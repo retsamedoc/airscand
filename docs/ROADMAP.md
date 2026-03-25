@@ -1,5 +1,29 @@
 ## ROADMAP
 
+### Phase 1 closeout (Discovery) - complete
+
+- WS-Discovery Probe response now returns namespace-correct `ProbeMatches`.
+- `wsa:RelatesTo` is correlated to inbound probe `wsa:MessageID`.
+- `XAddrs` is built from an explicit advertised address (`WSD_ADVERTISE_ADDR`) with fallbacks.
+- Discovery logging now includes sender address, extracted message ID, and advertised `XAddrs`.
+- Added automated coverage for ProbeMatch generation and Probe->ProbeMatches responder behavior.
+
+#### Phase 1 env vars used
+
+- `WSD_HOST`: HTTP bind host.
+- `WSD_PORT`: HTTP bind port.
+- `WSD_ENDPOINT`: WS-Scan SOAP endpoint path.
+- `WSD_SCAN_PATH`: scan upload endpoint path.
+- `WSD_OUTPUT_DIR`: output directory for uploaded scan files.
+- `WSD_UUID`: optional explicit persistent identity UUID.
+- `WSD_ADVERTISE_ADDR`: LAN-reachable address/host to publish in `XAddrs`.
+
+#### Known limitations (Phase 2+)
+
+- SOAP parsing remains intentionally lightweight and string-based.
+- Discovery responder still only handles the minimal probe path, not full WS-* compliance.
+- WS-Scan SOAP actions still use minimal placeholder behavior and need fuller protocol responses.
+
 ### Near-term (Phase 1–2 focus)
 
 - Keep the current **single-process** architecture: one asyncio loop running

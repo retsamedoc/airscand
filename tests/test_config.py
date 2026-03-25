@@ -7,6 +7,7 @@ def test_config_env_overrides(monkeypatch):
     monkeypatch.setenv("WSD_ENDPOINT", "/x")
     monkeypatch.setenv("WSD_SCAN_PATH", "/y")
     monkeypatch.setenv("WSD_OUTPUT_DIR", "/tmp/scans")
+    monkeypatch.setenv("WSD_ADVERTISE_ADDR", "192.168.1.50")
     monkeypatch.setenv("WSD_UUID", "explicit-uuid")
 
     from app.config import Config
@@ -17,6 +18,7 @@ def test_config_env_overrides(monkeypatch):
     assert cfg.endpoint_path == "/x"
     assert cfg.scan_path == "/y"
     assert cfg.output_dir == "/tmp/scans"
+    assert cfg.advertise_addr == "192.168.1.50"
     assert cfg.uuid == "explicit-uuid"
 
 
