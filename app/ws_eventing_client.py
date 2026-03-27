@@ -1,7 +1,9 @@
+"""Outbound WS-Eventing and WS-Transfer client helpers."""
+
+import asyncio
 import logging
 import re
 import uuid
-import asyncio
 
 from aiohttp import ClientError, ClientSession
 
@@ -49,6 +51,7 @@ log = logging.getLogger(__name__)
 
 
 def _new_message_id() -> str:
+    """Generate WS-Addressing message identifier."""
     return f"urn:uuid:{uuid.uuid4()}"
 
 
@@ -62,6 +65,7 @@ def build_subscribe_request(
     scan_destinations: tuple[tuple[str, str], ...] = DEFAULT_SCAN_DESTINATIONS,
     message_id: str | None = None,
 ) -> tuple[str, str]:
+    """Build WS-Eventing Subscribe SOAP envelope."""
     mid = message_id or _new_message_id()
     from_line = f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
@@ -118,6 +122,7 @@ def build_get_request(
     message_id: str | None = None,
     from_address: str | None = None,
 ) -> tuple[str, str]:
+    """Build WS-Transfer Get SOAP envelope."""
     mid = message_id or _new_message_id()
     from_line = f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
@@ -140,6 +145,7 @@ def build_get_request(
 
 
 def parse_subscribe_response(text: str) -> dict[str, str | None]:
+    """Extract subscription details from SOAP response body."""
     identifier_match = IDENTIFIER_PATTERN.search(text)
     expires_match = EXPIRES_PATTERN.search(text)
     return {
@@ -149,6 +155,7 @@ def parse_subscribe_response(text: str) -> dict[str, str | None]:
 
 
 def parse_get_response(text: str) -> dict[str, str | None]:
+    """Extract candidate subscribe endpoint from WS-Transfer response."""
     values = URI_TEXT_PATTERN.findall(text)
     subscribe_to = next((value for value in values if "/WDP/SCAN" in value), None)
     if not subscribe_to:
@@ -157,6 +164,7 @@ def parse_get_response(text: str) -> dict[str, str | None]:
 
 
 def parse_soap_fault(text: str) -> dict[str, str | None]:
+    """Extract fault code/subcode/reason from SOAP fault payload."""
     code_match = FAULT_CODE_PATTERN.search(text)
     subcode_match = FAULT_SUBCODE_PATTERN.search(text)
     reason_match = FAULT_REASON_PATTERN.search(text)
@@ -173,6 +181,7 @@ async def _post_soap(
     payload: str,
     timeout_sec: float,
 ) -> tuple[int, str]:
+    """POST SOAP payload and return status and response text."""
     headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
     async with ClientSession() as session:
         async with session.post(
@@ -190,7 +199,8 @@ async def preflight_get_scanner_capabilities(
     timeout_sec: float = 5.0,
     get_to_url: str | None = None,
     from_address: str | None = None,
-):
+) -> dict[str, str | None]:
+    """Query scanner capabilities and parse helpful endpoint hints."""
     get_url = get_to_url or scanner_xaddr
     message_id, payload = build_get_request(to_url=get_url, from_address=from_address)
     log.info(
@@ -257,7 +267,8 @@ async def register_with_scanner(
     subscription_identifier: str | None = None,
     filter_action: str = SCAN_AVAILABLE_EVENT_ACTION,
     scan_destinations: tuple[tuple[str, str], ...] = DEFAULT_SCAN_DESTINATIONS,
-):
+) -> dict[str, str | None]:
+    """Send WS-Eventing Subscribe request to scanner endpoint."""
     to_url = subscribe_to_url or scanner_xaddr
     message_id, payload = build_subscribe_request(
         notify_to=notify_to,

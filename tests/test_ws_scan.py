@@ -1,5 +1,10 @@
-from types import SimpleNamespace
+"""WS-Scan SOAP handler tests."""
+
+from __future__ import annotations
+
 import logging
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -14,8 +19,12 @@ from app.ws_scan import (
     handle_wsd,
 )
 
+if TYPE_CHECKING:
+    from _pytest.logging import LogCaptureFixture
+
 
 def _soap_envelope(action: str, message_id: str = "urn:uuid:req-1") -> bytes:
+    """Build a compact SOAP envelope for action tests."""
     return f"""<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
@@ -30,11 +39,12 @@ def _soap_envelope(action: str, message_id: str = "urn:uuid:req-1") -> bytes:
 </soap:Envelope>""".encode()
 
 
-def _request(payload: bytes):
+def _request(payload: bytes) -> object:
+    """Create a dummy aiohttp-like request for handler tests."""
     class DummyRequest:
         content_type = "application/soap+xml"
 
-        def __init__(self, body):
+        def __init__(self, body: bytes) -> None:
             self._body = body
             self.app = {
                 "config": SimpleNamespace(
@@ -44,20 +54,22 @@ def _request(payload: bytes):
                 )
             }
 
-        async def read(self):
+        async def read(self) -> bytes:
             return self._body
 
     return DummyRequest(payload)
 
 
-def test_extract_action_and_message_id():
+def test_extract_action_and_message_id() -> None:
+    """SOAP parser extracts action and message id."""
     xml = _soap_envelope(ACTION_SUBSCRIBE, message_id="urn:uuid:abc")
     text = xml.decode()
     assert extract_action(text) == ACTION_SUBSCRIBE
     assert extract_message_id(text) == "urn:uuid:abc"
 
 
-def test_subscribe_response_includes_subscription_manager():
+def test_subscribe_response_includes_subscription_manager() -> None:
+    """Subscribe response includes manager address and identifier."""
     xml = build_eventing_subscribe_response("urn:uuid:req-1", "http://192.168.1.50:5357/wsd")
     assert "SubscribeResponse" in xml
     assert "<wsa:RelatesTo>urn:uuid:req-1</wsa:RelatesTo>" in xml
@@ -76,7 +88,8 @@ def test_subscribe_response_includes_subscription_manager():
         (ACTION_UNSUBSCRIBE, "UnsubscribeResponse"),
     ],
 )
-async def test_handle_wsd_eventing_actions(action: str, expected: str):
+async def test_handle_wsd_eventing_actions(action: str, expected: str) -> None:
+    """Each supported eventing action returns matching SOAP response."""
     response = await handle_wsd(_request(_soap_envelope(action)))
     text = response.text
     assert response.content_type == "application/soap+xml"
@@ -85,14 +98,16 @@ async def test_handle_wsd_eventing_actions(action: str, expected: str):
 
 
 @pytest.mark.asyncio
-async def test_handle_wsd_non_eventing_action_falls_back_to_plain_ok():
+async def test_handle_wsd_non_eventing_action_falls_back_to_plain_ok() -> None:
+    """Unknown SOAP actions use plain-text fallback response."""
     response = await handle_wsd(_request(_soap_envelope("urn:example:UnknownAction")))
     assert response.content_type == "text/plain"
     assert response.text == "OK"
 
 
 @pytest.mark.asyncio
-async def test_handle_wsd_logs_missing_action_warning(caplog):
+async def test_handle_wsd_logs_missing_action_warning(caplog: LogCaptureFixture) -> None:
+    """Missing action headers are logged as warnings."""
     caplog.set_level(logging.INFO)
     payload = b"""<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
@@ -105,7 +120,8 @@ async def test_handle_wsd_logs_missing_action_warning(caplog):
 
 
 @pytest.mark.asyncio
-async def test_handle_wsd_logs_unsupported_action_warning(caplog):
+async def test_handle_wsd_logs_unsupported_action_warning(caplog: LogCaptureFixture) -> None:
+    """Unsupported action fallback logs warning message."""
     caplog.set_level(logging.INFO)
     await handle_wsd(_request(_soap_envelope("urn:example:UnknownAction")))
     assert "Unsupported WSD SOAP action; using plain OK fallback" in caplog.text

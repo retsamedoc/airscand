@@ -1,6 +1,9 @@
+"""WS-Scan SOAP parsing and response handlers."""
+
 import logging
 import re
 import uuid
+
 from aiohttp import web
 
 log = logging.getLogger(__name__)
@@ -28,6 +31,7 @@ MESSAGE_ID_PATTERN = re.compile(
 
 
 def extract_action(text: str) -> str | None:
+    """Extract WS-Addressing Action value from SOAP payload."""
     match = ACTION_PATTERN.search(text)
     if not match:
         return None
@@ -35,6 +39,7 @@ def extract_action(text: str) -> str | None:
 
 
 def extract_message_id(text: str) -> str | None:
+    """Extract WS-Addressing MessageID value from SOAP payload."""
     match = MESSAGE_ID_PATTERN.search(text)
     if not match:
         return None
@@ -69,6 +74,7 @@ def _soap_response(
 
 
 def build_eventing_subscribe_response(relates_to: str | None, xaddr: str) -> str:
+    """Build SOAP SubscribeResponse payload for WS-Eventing."""
     body = f"""    <wse:SubscribeResponse>
       <wse:SubscriptionManager>
         <wsa:Address>{xaddr}</wsa:Address>
@@ -80,21 +86,25 @@ def build_eventing_subscribe_response(relates_to: str | None, xaddr: str) -> str
 
 
 def build_eventing_renew_response(relates_to: str | None) -> str:
+    """Build SOAP RenewResponse payload."""
     body = "    <wse:RenewResponse><wse:Expires>PT1H</wse:Expires></wse:RenewResponse>"
     return _soap_response(action=ACTION_RENEW_RESPONSE, relates_to=relates_to, body_xml=body)
 
 
 def build_eventing_get_status_response(relates_to: str | None) -> str:
+    """Build SOAP GetStatusResponse payload."""
     body = "    <wse:GetStatusResponse><wse:Expires>PT1H</wse:Expires></wse:GetStatusResponse>"
     return _soap_response(action=ACTION_GET_STATUS_RESPONSE, relates_to=relates_to, body_xml=body)
 
 
 def build_eventing_unsubscribe_response(relates_to: str | None) -> str:
+    """Build SOAP UnsubscribeResponse payload."""
     body = "    <wse:UnsubscribeResponse/>"
     return _soap_response(action=ACTION_UNSUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body)
 
 
 async def handle_wsd(request: web.Request) -> web.Response:
+    """Handle incoming WSD SOAP request and emit appropriate response."""
     body = await request.read()
     text = body.decode(errors="ignore")
     action = extract_action(text)

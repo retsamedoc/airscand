@@ -1,9 +1,13 @@
+"""WS-Discovery protocol helpers and multicast service loop."""
+
 import asyncio
 import logging
 import re
 import socket
 import time
 import uuid
+
+from app.config import Config
 
 MULTICAST_GROUP = "239.255.255.250"
 PORT = 3702
@@ -91,11 +95,13 @@ def extract_resolve_epr_address(text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def our_epr(config) -> str:
+def our_epr(config: Config) -> str:
+    """Build this service endpoint reference address."""
     return f"urn:uuid:{config.uuid}"
 
 
-def build_xaddr(config) -> str:
+def build_xaddr(config: Config) -> str:
+    """Build externally advertised service URL."""
     return f"http://{config.advertise_addr}:{config.port}{config.endpoint_path}"
 
 
@@ -143,7 +149,8 @@ def build_resolve(endpoint_reference: str, message_id: str | None = None) -> tup
     return mid, body
 
 
-def build_hello(config, message_number: int) -> str:
+def build_hello(config: Config, message_number: int) -> str:
+    """Build a WS-Discovery Hello announcement payload."""
     xaddr = build_xaddr(config)
     msg_id = _new_message_id()
     sequence_id = getattr(config, "app_sequence_sequence_id", "") or our_epr(config)
@@ -175,7 +182,13 @@ def _probe_match_types() -> str:
     return "wsdp:Device pub:Computer wscn:ScanDeviceType"
 
 
-def build_probe_match(config, relates_to: str, xaddr: str, outbound_message_id: str | None = None) -> str:
+def build_probe_match(
+    config: Config,
+    relates_to: str,
+    xaddr: str,
+    outbound_message_id: str | None = None,
+) -> str:
+    """Build ProbeMatches response payload."""
     mid = outbound_message_id or _new_message_id()
     meta = getattr(config, "metadata_version", 1)
     types = _probe_match_types()
@@ -203,7 +216,13 @@ def build_probe_match(config, relates_to: str, xaddr: str, outbound_message_id: 
 """
 
 
-def build_resolve_matches(config, relates_to: str, xaddr: str, outbound_message_id: str | None = None) -> str:
+def build_resolve_matches(
+    config: Config,
+    relates_to: str,
+    xaddr: str,
+    outbound_message_id: str | None = None,
+) -> str:
+    """Build ResolveMatches response payload."""
     mid = outbound_message_id or _new_message_id()
     meta = getattr(config, "metadata_version", 1)
     types = _probe_match_types()
@@ -235,7 +254,7 @@ def _normalize_epr(s: str) -> str:
     return s.strip().lower()
 
 
-def _epr_matches_ours(config, remote_epr: str) -> bool:
+def _epr_matches_ours(config: Config, remote_epr: str) -> bool:
     return _normalize_epr(remote_epr) == _normalize_epr(our_epr(config))
 
 
@@ -282,7 +301,13 @@ def configure_multicast_interface(sock: socket.socket, advertise_addr: str) -> N
         )
 
 
-def handle_discovery_packet(config, data: bytes, addr, sock) -> bool:
+def handle_discovery_packet(
+    config: Config,
+    data: bytes,
+    addr: tuple[str, int],
+    sock: socket.socket,
+) -> bool:
+    """Handle a single multicast discovery packet."""
     text = data.decode(errors="ignore")
     action = extract_action(text)
     message_id = extract_message_id(text)
@@ -407,11 +432,12 @@ async def _recv_discovery_match(sock: socket.socket, timeout_sec: float) -> tupl
 
 
 async def discover_scanner_xaddr(
-    config,
+    config: Config,
     *,
     timeout_sec: float = 2.0,
     max_attempts: int = 3,
 ) -> str | None:
+    """Actively probe multicast and return first scanner XAddr found."""
     if getattr(config, "scanner_xaddr", ""):
         return config.scanner_xaddr
 
@@ -462,7 +488,8 @@ async def discover_scanner_xaddr(
     return None
 
 
-async def _send_hello(sock: socket.socket, config, message_number: int) -> None:
+async def _send_hello(sock: socket.socket, config: Config, message_number: int) -> None:
+    """Send one multicast Hello frame."""
     loop = asyncio.get_running_loop()
     body = build_hello(config, message_number).encode("utf-8")
     await loop.sock_sendto(sock, body, (MULTICAST_GROUP, PORT))
@@ -472,7 +499,8 @@ async def _send_hello(sock: socket.socket, config, message_number: int) -> None:
     )
 
 
-async def _hello_sender(sock: socket.socket, config) -> None:
+async def _hello_sender(sock: socket.socket, config: Config) -> None:
+    """Continuously emit Hello messages at configured interval."""
     n = 0
     interval = float(getattr(config, "hello_interval_sec", 60.0))
     await _send_hello(sock, config, n)
@@ -485,7 +513,8 @@ async def _hello_sender(sock: socket.socket, config) -> None:
         n += 1
 
 
-async def start_discovery(config):
+async def start_discovery(config: Config) -> None:
+    """Start WS-Discovery listener loop and periodic Hello sender."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("", PORT))

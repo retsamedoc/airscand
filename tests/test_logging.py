@@ -1,8 +1,17 @@
+"""Logging configuration tests."""
+
+from __future__ import annotations
+
 import json
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from _pytest.capture import CaptureFixture
 
 
-def test_setup_logging_emits_json(capsys):
+def test_setup_logging_emits_json(capsys: CaptureFixture[str]) -> None:
+    """Logger emits JSON entries with required keys."""
     root = logging.getLogger()
     root.handlers.clear()
 
@@ -20,7 +29,8 @@ def test_setup_logging_emits_json(capsys):
     assert "module" in payload
 
 
-def test_setup_logging_honors_debug_level(capsys):
+def test_setup_logging_honors_debug_level(capsys: CaptureFixture[str]) -> None:
+    """Debug level configuration enables debug emission."""
     root = logging.getLogger()
     root.handlers.clear()
 

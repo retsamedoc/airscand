@@ -1,7 +1,17 @@
+"""Configuration behavior tests."""
+
+from __future__ import annotations
+
 import re
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from _pytest.monkeypatch import MonkeyPatch
 
 
-def test_config_env_overrides(monkeypatch):
+def test_config_env_overrides(monkeypatch: MonkeyPatch) -> None:
+    """Environment variables override dataclass defaults."""
     monkeypatch.setenv("WSD_HOST", "127.0.0.1")
     monkeypatch.setenv("WSD_PORT", "1234")
     monkeypatch.setenv("WSD_ENDPOINT", "/x")
@@ -32,7 +42,8 @@ def test_config_env_overrides(monkeypatch):
     assert cfg.eventing_notify_to_url == "http://192.168.1.50:5357/callback"
 
 
-def test_config_persistent_uuid(monkeypatch, tmp_path):
+def test_config_persistent_uuid(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """Generated UUID persists across config instances."""
     monkeypatch.delenv("WSD_UUID", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
@@ -45,7 +56,8 @@ def test_config_persistent_uuid(monkeypatch, tmp_path):
     assert cfg2.uuid == cfg1.uuid
 
 
-def test_config_persistent_sequence_id(monkeypatch, tmp_path):
+def test_config_persistent_sequence_id(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """Generated sequence id persists across config instances."""
     monkeypatch.delenv("WSD_APP_SEQUENCE_SEQUENCE_ID", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setenv("WSD_UUID", "explicit-uuid")
@@ -58,7 +70,8 @@ def test_config_persistent_sequence_id(monkeypatch, tmp_path):
     assert cfg2.app_sequence_sequence_id == cfg1.app_sequence_sequence_id
 
 
-def test_config_discovery_env_overrides(monkeypatch):
+def test_config_discovery_env_overrides(monkeypatch: MonkeyPatch) -> None:
+    """Discovery-specific environment variables are respected."""
     monkeypatch.setenv("WSD_HELLO_INTERVAL_SEC", "0")
     monkeypatch.setenv("WSD_METADATA_VERSION", "7")
     monkeypatch.setenv("WSD_APP_SEQUENCE_INSTANCE_ID", "99")

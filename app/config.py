@@ -1,11 +1,16 @@
-from dataclasses import dataclass
+"""Configuration loading from environment variables and persisted state."""
+
 import os
-from pathlib import Path
 import socket
 import uuid as uuidlib
+from dataclasses import dataclass
+from pathlib import Path
+
 
 @dataclass
 class Config:
+    """Runtime configuration resolved from defaults and environment variables."""
+
     host: str = "0.0.0.0"
     port: int = 5357
     endpoint_path: str = "/wsd"
@@ -24,6 +29,7 @@ class Config:
     eventing_notify_to_url: str = ""
 
     def __post_init__(self) -> None:
+        """Resolve environment variables and derive runtime values."""
         self.host = os.getenv("WSD_HOST", self.host)
         self.port = int(os.getenv("WSD_PORT", str(self.port)))
         self.endpoint_path = os.getenv("WSD_ENDPOINT", self.endpoint_path)
@@ -74,6 +80,7 @@ class Config:
 
 
 def _get_or_create_persistent_uuid() -> str:
+    """Load UUID from state file, or create and persist a new one."""
     state_home = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     path = state_home / "airscand" / "uuid"
 
@@ -91,6 +98,7 @@ def _get_or_create_persistent_uuid() -> str:
 
 
 def _get_or_create_sequence_id() -> str:
+    """Load app sequence id from state file, or create a new one."""
     state_home = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     path = state_home / "airscand" / "ws_discovery_sequence_id"
 
@@ -108,6 +116,7 @@ def _get_or_create_sequence_id() -> str:
 
 
 def _detect_lan_ip() -> str:
+    """Best-effort LAN IP detection for outbound interface selection."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         # No packets are sent, but connect lets us infer an outbound local IP.
@@ -120,6 +129,7 @@ def _detect_lan_ip() -> str:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Parse common truthy/falsey environment variable values."""
     raw = os.getenv(name)
     if raw is None:
         return default

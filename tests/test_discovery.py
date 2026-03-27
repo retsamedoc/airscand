@@ -1,6 +1,11 @@
+"""WS-Discovery helper and handler tests."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 from app.discovery import (
     ACTION_BYE,
@@ -8,35 +13,42 @@ from app.discovery import (
     ACTION_PROBE,
     ACTION_PROBE_MATCHES,
     ACTION_RESOLVE,
-    SELF_PROBE_TTL_SEC,
-    _remember_outbound_probe_id,
-    _recent_outbound_probe_ids,
-    build_probe,
-    build_resolve,
-    NS_WSD,
     NS_WSCN,
-    discover_scanner_xaddr,
+    NS_WSD,
+    SELF_PROBE_TTL_SEC,
+    _recent_outbound_probe_ids,
+    _recv_discovery_match,
+    _remember_outbound_probe_id,
     build_hello,
+    build_probe,
     build_probe_match,
+    build_resolve,
     build_resolve_matches,
+    discover_scanner_xaddr,
     extract_action,
     extract_relates_to,
     extract_resolve_epr_address,
     extract_xaddrs,
-    _recv_discovery_match,
     handle_discovery_packet,
 )
 
+if TYPE_CHECKING:
+    from _pytest.logging import LogCaptureFixture
+    from _pytest.monkeypatch import MonkeyPatch
+
 
 class DummySocket:
-    def __init__(self) -> None:
-        self.sent = []
+    """Capture UDP payloads sent by discovery handlers."""
 
-    def sendto(self, payload: bytes, addr) -> None:
+    def __init__(self) -> None:
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+
+    def sendto(self, payload: bytes, addr: tuple[str, int]) -> None:
         self.sent.append((payload, addr))
 
 
-def make_config(**kwargs):
+def make_config(**kwargs: Any) -> SimpleNamespace:
+    """Build a minimal config namespace for discovery tests."""
     base = dict(
         uuid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         advertise_addr="192.168.1.50",
@@ -52,6 +64,7 @@ def make_config(**kwargs):
 
 
 def _probe_envelope(message_id: str = "uuid:abc-123") -> bytes:
+    """Build a Probe SOAP envelope for packet tests."""
     return f"""<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
             xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
@@ -68,7 +81,8 @@ def _probe_envelope(message_id: str = "uuid:abc-123") -> bytes:
 """.encode()
 
 
-def test_build_probe_match_discovery_namespace_and_types():
+def test_build_probe_match_discovery_namespace_and_types() -> None:
+    """ProbeMatches payload includes expected namespaces and types."""
     cfg = make_config()
     xml = build_probe_match(cfg, "uuid:probe-123", "http://192.168.1.50:5357/wsd")
     assert f'xmlns:wsd="{NS_WSD}"' in xml
@@ -79,7 +93,8 @@ def test_build_probe_match_discovery_namespace_and_types():
     assert "ProbeMatches" in xml
 
 
-def test_build_resolve_matches_relates_to():
+def test_build_resolve_matches_relates_to() -> None:
+    """ResolveMatches payload carries relates-to and expected types."""
     cfg = make_config()
     xml = build_resolve_matches(cfg, "urn:uuid:resolve-mid-1", "http://192.168.1.50:5357/wsd")
     assert "ResolveMatches" in xml
@@ -87,7 +102,8 @@ def test_build_resolve_matches_relates_to():
     assert "wsdp:Device pub:Computer wscn:ScanDeviceType" in xml
 
 
-def test_build_hello_has_computer_types_and_app_sequence():
+def test_build_hello_has_computer_types_and_app_sequence() -> None:
+    """Hello payload contains AppSequence and device type metadata."""
     cfg = make_config()
     xml = build_hello(cfg, message_number=1)
     assert "discovery/Hello" in xml
@@ -97,7 +113,8 @@ def test_build_hello_has_computer_types_and_app_sequence():
     assert 'MessageNumber="1"' in xml
 
 
-def test_extract_action_and_resolve_epr():
+def test_extract_action_and_resolve_epr() -> None:
+    """Action and resolve EPR parsing returns expected values."""
     sample = _probe_envelope().decode()
     assert extract_action(sample) == ACTION_PROBE
 
@@ -118,7 +135,8 @@ def test_extract_action_and_resolve_epr():
     )
 
 
-def test_extract_relates_to_and_xaddrs():
+def test_extract_relates_to_and_xaddrs() -> None:
+    """RelatesTo and XAddrs parser extracts all expected values."""
     xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
@@ -142,7 +160,8 @@ def test_extract_relates_to_and_xaddrs():
     ]
 
 
-def test_build_probe_and_resolve():
+def test_build_probe_and_resolve() -> None:
+    """Probe and Resolve payload builders include expected fields."""
     probe_mid, probe_xml = build_probe("urn:uuid:probe-mid")
     resolve_mid, resolve_xml = build_resolve(
         "urn:uuid:cfe92100-67c4-11d4-a45f-9caed324e3c0",
@@ -156,7 +175,8 @@ def test_build_probe_and_resolve():
     assert "urn:uuid:cfe92100-67c4-11d4-a45f-9caed324e3c0" in resolve_xml
 
 
-def test_handle_discovery_packet_replies_with_probematches():
+def test_handle_discovery_packet_replies_with_probematches() -> None:
+    """Probe packets produce ProbeMatches responses."""
     cfg = make_config()
     sock = DummySocket()
     handled = handle_discovery_packet(cfg, _probe_envelope(), ("10.0.0.44", 3702), sock)
@@ -171,7 +191,10 @@ def test_handle_discovery_packet_replies_with_probematches():
     assert "<wsd:XAddrs>http://192.168.1.50:5357/wsd</wsd:XAddrs>" in text
 
 
-def test_handle_discovery_packet_ignores_recent_self_probe_and_logs(caplog):
+def test_handle_discovery_packet_ignores_recent_self_probe_and_logs(
+    caplog: LogCaptureFixture,
+) -> None:
+    """Self-origin probes are ignored and logged at debug level."""
     cfg = make_config()
     sock = DummySocket()
     caplog.set_level(logging.DEBUG)
@@ -189,7 +212,10 @@ def test_handle_discovery_packet_ignores_recent_self_probe_and_logs(caplog):
     assert matches[-1].levelno == logging.DEBUG
 
 
-def test_handle_discovery_packet_does_not_ignore_expired_self_probe(monkeypatch):
+def test_handle_discovery_packet_does_not_ignore_expired_self_probe(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Expired self-probe cache entries no longer suppress handling."""
     cfg = make_config()
     sock = DummySocket()
     _recent_outbound_probe_ids.clear()
@@ -204,7 +230,8 @@ def test_handle_discovery_packet_does_not_ignore_expired_self_probe(monkeypatch)
     assert len(sock.sent) == 1
 
 
-def test_handle_discovery_ignores_probematches_action():
+def test_handle_discovery_ignores_probematches_action() -> None:
+    """Inbound ProbeMatches action is ignored by server handler."""
     cfg = make_config()
     sock = DummySocket()
     probematches = b"""<?xml version="1.0"?>
@@ -220,7 +247,8 @@ def test_handle_discovery_ignores_probematches_action():
     assert sock.sent == []
 
 
-def test_handle_discovery_resolve_matches_when_epr_matches():
+def test_handle_discovery_resolve_matches_when_epr_matches() -> None:
+    """Resolve with matching EPR produces ResolveMatches response."""
     cfg = make_config()
     sock = DummySocket()
     body = f"""<?xml version="1.0"?>
@@ -248,7 +276,8 @@ def test_handle_discovery_resolve_matches_when_epr_matches():
     assert "<wsa:RelatesTo>urn:uuid:res-1</wsa:RelatesTo>" in text
 
 
-def test_handle_discovery_resolve_ignored_on_epr_mismatch():
+def test_handle_discovery_resolve_ignored_on_epr_mismatch() -> None:
+    """Resolve with non-matching EPR is ignored."""
     cfg = make_config()
     sock = DummySocket()
     body = f"""<?xml version="1.0"?>
@@ -272,7 +301,8 @@ def test_handle_discovery_resolve_ignored_on_epr_mismatch():
     assert sock.sent == []
 
 
-def test_discover_scanner_xaddr_uses_config_override():
+def test_discover_scanner_xaddr_uses_config_override() -> None:
+    """Configured scanner_xaddr bypasses active discovery."""
     cfg = make_config(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
     assert (
         asyncio.run(discover_scanner_xaddr(cfg))
@@ -280,23 +310,24 @@ def test_discover_scanner_xaddr_uses_config_override():
     )
 
 
-def test_discover_scanner_xaddr_from_probe_matches(monkeypatch):
+def test_discover_scanner_xaddr_from_probe_matches(monkeypatch: MonkeyPatch) -> None:
+    """Active discovery returns XAddr from ProbeMatches payload."""
     cfg = make_config(scanner_xaddr="")
 
     class DummySock:
-        def sendto(self, _data, _addr):
+        def sendto(self, _data: bytes, _addr: tuple[str, int]) -> None:
             return None
 
-        def setsockopt(self, *_args):
+        def setsockopt(self, *_args: object) -> None:
             return None
 
-        def setblocking(self, _v):
+        def setblocking(self, _v: bool) -> None:
             return None
 
-        def close(self):
+        def close(self) -> None:
             return None
 
-    async def fake_recv(sock, timeout_sec):
+    async def fake_recv(sock: object, timeout_sec: float) -> tuple[str, str, list[str]]:
         return (
             ACTION_PROBE_MATCHES,
             "urn:uuid:probe-1",
@@ -312,7 +343,8 @@ def test_discover_scanner_xaddr_from_probe_matches(monkeypatch):
     assert xaddr == "http://192.168.1.60:80/WSD/DEVICE"
 
 
-def test_handle_discovery_packet_logs_invalid_missing_action(caplog):
+def test_handle_discovery_packet_logs_invalid_missing_action(caplog: LogCaptureFixture) -> None:
+    """Missing action packets are rejected and logged."""
     cfg = make_config()
     sock = DummySocket()
     caplog.set_level(logging.INFO)
@@ -320,7 +352,8 @@ def test_handle_discovery_packet_logs_invalid_missing_action(caplog):
     assert "Invalid discovery packet (missing Action)" in caplog.text
 
 
-def test_handle_discovery_packet_logs_unsupported_action(caplog):
+def test_handle_discovery_packet_logs_unsupported_action(caplog: LogCaptureFixture) -> None:
+    """Unsupported actions are logged with warning severity."""
     cfg = make_config()
     sock = DummySocket()
     caplog.set_level(logging.INFO)
@@ -336,7 +369,8 @@ def test_handle_discovery_packet_logs_unsupported_action(caplog):
     assert "Unsupported discovery action" in caplog.text
 
 
-def test_handle_discovery_packet_hello_does_not_warn(caplog):
+def test_handle_discovery_packet_hello_does_not_warn(caplog: LogCaptureFixture) -> None:
+    """Hello packets do not trigger unsupported-action warnings."""
     cfg = make_config()
     sock = DummySocket()
     caplog.set_level(logging.DEBUG)
@@ -356,7 +390,8 @@ def test_handle_discovery_packet_hello_does_not_warn(caplog):
     )
 
 
-def test_handle_discovery_packet_bye_does_not_warn(caplog):
+def test_handle_discovery_packet_bye_does_not_warn(caplog: LogCaptureFixture) -> None:
+    """Bye packets do not trigger unsupported-action warnings."""
     cfg = make_config()
     sock = DummySocket()
     caplog.set_level(logging.DEBUG)
@@ -376,7 +411,10 @@ def test_handle_discovery_packet_bye_does_not_warn(caplog):
     )
 
 
-def test_discovery_packet_received_is_debug_for_cached_message_id(caplog):
+def test_discovery_packet_received_is_debug_for_cached_message_id(
+    caplog: LogCaptureFixture,
+) -> None:
+    """Cached self-probe ids downgrade ingress logging to debug."""
     cfg = make_config()
     sock = DummySocket()
     caplog.set_level(logging.DEBUG)
@@ -391,10 +429,14 @@ def test_discovery_packet_received_is_debug_for_cached_message_id(caplog):
     assert received[-1].levelno == logging.DEBUG
 
 
-def test_recv_discovery_match_logs_invalid_packet(caplog, monkeypatch):
+def test_recv_discovery_match_logs_invalid_packet(
+    caplog: LogCaptureFixture,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Invalid match packet logs warning and returns None."""
     caplog.set_level(logging.INFO)
 
-    async def fake_wait_for(_awaitable, timeout):
+    async def fake_wait_for(_awaitable: object, timeout: float) -> tuple[bytes, tuple[str, int]]:
         try:
             await _awaitable
         except Exception:

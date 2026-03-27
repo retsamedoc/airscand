@@ -1,5 +1,10 @@
+"""Outbound WS-Eventing client tests."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -16,8 +21,13 @@ from app.ws_eventing_client import (
     register_with_scanner,
 )
 
+if TYPE_CHECKING:
+    from _pytest.logging import LogCaptureFixture
+    from _pytest.monkeypatch import MonkeyPatch
 
-def test_build_subscribe_request_contains_notify_to_and_to_url():
+
+def test_build_subscribe_request_contains_notify_to_and_to_url() -> None:
+    """Subscribe request includes required headers and destination blocks."""
     mid, xml = build_subscribe_request(
         notify_to="http://192.168.1.50:5357/wsd",
         to_url="http://192.168.1.60:80/WSD/DEVICE",
@@ -40,7 +50,8 @@ def test_build_subscribe_request_contains_notify_to_and_to_url():
     assert "<wsa:Address>http://192.168.1.50:5357/wsd</wsa:Address>" in xml
 
 
-def test_build_subscribe_request_allows_from_address():
+def test_build_subscribe_request_allows_from_address() -> None:
+    """Subscribe request includes optional From address when provided."""
     _, xml = build_subscribe_request(
         notify_to="http://192.168.1.50:5357/wsd",
         to_url="http://192.168.1.60:80/WSD/DEVICE",
@@ -51,7 +62,8 @@ def test_build_subscribe_request_allows_from_address():
     assert "<wsa:Address>urn:uuid:client-1</wsa:Address>" in xml
 
 
-def test_build_get_request_contains_action_and_to():
+def test_build_get_request_contains_action_and_to() -> None:
+    """Get request includes WS-Transfer action and destination."""
     mid, xml = build_get_request(
         to_url="http://192.168.1.60:80/WSD/DEVICE",
         message_id="urn:uuid:get-1",
@@ -61,7 +73,8 @@ def test_build_get_request_contains_action_and_to():
     assert "<wsa:To>http://192.168.1.60:80/WSD/DEVICE</wsa:To>" in xml
 
 
-def test_build_get_request_allows_from_address():
+def test_build_get_request_allows_from_address() -> None:
+    """Get request includes optional From address."""
     _, xml = build_get_request(
         to_url="http://192.168.1.60:80/WDP/SCAN",
         from_address="urn:uuid:client-1",
@@ -71,7 +84,8 @@ def test_build_get_request_allows_from_address():
     assert "<wsa:Address>urn:uuid:client-1</wsa:Address>" in xml
 
 
-def test_parse_subscribe_response_identifier_and_expires():
+def test_parse_subscribe_response_identifier_and_expires() -> None:
+    """Subscribe response parser extracts identifier and expiry."""
     xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing"
@@ -89,7 +103,8 @@ def test_parse_subscribe_response_identifier_and_expires():
     assert parsed["expires"] == "PT1H"
 
 
-def test_parse_soap_fault_extracts_code_subcode_reason():
+def test_parse_soap_fault_extracts_code_subcode_reason() -> None:
+    """Fault parser extracts code, subcode, and reason text."""
     xml = """<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing">
@@ -112,7 +127,8 @@ def test_parse_soap_fault_extracts_code_subcode_reason():
     assert parsed["fault_reason"] == "No route can be determined."
 
 
-def test_parse_get_response_finds_wdp_scan_url_first():
+def test_parse_get_response_finds_wdp_scan_url_first() -> None:
+    """Get response parser prefers explicit /WDP/SCAN endpoint."""
     xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Body>
@@ -126,7 +142,8 @@ def test_parse_get_response_finds_wdp_scan_url_first():
 
 
 @pytest.mark.asyncio
-async def test_preflight_get_posts_and_parses_response(monkeypatch):
+async def test_preflight_get_posts_and_parses_response(monkeypatch: MonkeyPatch) -> None:
+    """Preflight GET posts SOAP and returns parsed endpoint hint."""
     response_xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Body>
@@ -139,23 +156,23 @@ async def test_preflight_get_posts_and_parses_response(monkeypatch):
     class DummyResponse:
         status = 200
 
-        async def text(self):
+        async def text(self) -> str:
             return response_xml
 
-        async def __aenter__(self):
+        async def __aenter__(self) -> DummyResponse:
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
     class DummySession:
-        async def __aenter__(self):
+        async def __aenter__(self) -> DummySession:
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
-        def post(self, url, data, headers, timeout):
+        def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> DummyResponse:
             captured["url"] = url
             captured["data"] = data.decode("utf-8")
             return DummyResponse()
@@ -173,7 +190,8 @@ async def test_preflight_get_posts_and_parses_response(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_register_with_scanner_posts_and_parses_response(monkeypatch):
+async def test_register_with_scanner_posts_and_parses_response(monkeypatch: MonkeyPatch) -> None:
+    """Subscribe request posts SOAP and parses success payload."""
     response_xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing"
@@ -191,23 +209,23 @@ async def test_register_with_scanner_posts_and_parses_response(monkeypatch):
     class DummyResponse:
         status = 200
 
-        async def text(self):
+        async def text(self) -> str:
             return response_xml
 
-        async def __aenter__(self):
+        async def __aenter__(self) -> DummyResponse:
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
     class DummySession:
-        async def __aenter__(self):
+        async def __aenter__(self) -> DummySession:
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
-        def post(self, url, data, headers, timeout):
+        def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> DummyResponse:
             captured["url"] = url
             captured["data"] = data.decode("utf-8")
             captured["headers"] = headers
@@ -236,7 +254,11 @@ async def test_register_with_scanner_posts_and_parses_response(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_register_with_scanner_logs_non2xx_and_missing_identifier(monkeypatch, caplog):
+async def test_register_with_scanner_logs_non2xx_and_missing_identifier(
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Non-2xx subscribe responses are logged with fault details."""
     caplog.set_level(logging.INFO)
     response_xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -256,23 +278,23 @@ async def test_register_with_scanner_logs_non2xx_and_missing_identifier(monkeypa
     class DummyResponse:
         status = 500
 
-        async def text(self):
+        async def text(self) -> str:
             return response_xml
 
-        async def __aenter__(self):
+        async def __aenter__(self) -> DummyResponse:
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
     class DummySession:
-        async def __aenter__(self):
+        async def __aenter__(self) -> DummySession:
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
-        def post(self, url, data, headers, timeout):
+        def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> DummyResponse:
             return DummyResponse()
 
     monkeypatch.setattr("app.ws_eventing_client.ClientSession", lambda: DummySession())
@@ -287,17 +309,21 @@ async def test_register_with_scanner_logs_non2xx_and_missing_identifier(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_register_with_scanner_logs_timeout(monkeypatch, caplog):
+async def test_register_with_scanner_logs_timeout(
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Timeouts are logged and propagated to callers."""
     caplog.set_level(logging.INFO)
 
     class DummySession:
-        async def __aenter__(self):
+        async def __aenter__(self) -> DummySession:
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
-        def post(self, url, data, headers, timeout):
+        def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> object:
             raise asyncio.TimeoutError()
 
     monkeypatch.setattr("app.ws_eventing_client.ClientSession", lambda: DummySession())

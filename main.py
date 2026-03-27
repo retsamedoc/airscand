@@ -1,17 +1,23 @@
+"""Service entrypoint for discovery, HTTP, and scanner registration."""
+
 import asyncio
 import logging
 import uuid
 from urllib.parse import urlsplit, urlunsplit
+
 from app.config import Config
 from app.discovery import discover_scanner_xaddr, start_discovery
 from app.http_server import start_http_server
 from app.logging import setup_logging
 from app.ws_eventing_client import preflight_get_scanner_capabilities, register_with_scanner
 
+__all__ = ["main"]
+
 log = logging.getLogger(__name__)
 
 
-def _resolve_subscribe_to_url(config, scanner_xaddr: str) -> str:
+def _resolve_subscribe_to_url(config: Config, scanner_xaddr: str) -> str:
+    """Resolve WS-Eventing subscribe endpoint from config or scanner endpoint."""
     explicit = getattr(config, "scanner_subscribe_to_url", "") or ""
     if explicit.strip():
         return explicit.strip()
@@ -21,7 +27,8 @@ def _resolve_subscribe_to_url(config, scanner_xaddr: str) -> str:
     return f"{base}/WDP/SCAN"
 
 
-async def _eventing_registration_loop(config):
+async def _eventing_registration_loop(config: Config) -> None:
+    """Retry scanner eventing registration until a successful subscription."""
     backoff_sec = 2.0
     max_backoff_sec = 60.0
     notify_to = getattr(config, "eventing_notify_to_url", "") or (
@@ -74,13 +81,21 @@ async def _eventing_registration_loop(config):
                         },
                     )
                     return
-        except Exception as exc:
-            log.warning("Scanner registration attempt failed", extra={"error": str(exc)})
+        except Exception:
+            log.exception(
+                "Scanner registration attempt failed",
+                extra={
+                    "notify_to": notify_to,
+                    "client_from_address": client_from_address,
+                    "backoff_sec": backoff_sec,
+                },
+            )
 
         await asyncio.sleep(backoff_sec)
         backoff_sec = min(backoff_sec * 2, max_backoff_sec)
 
-async def main():
+async def main() -> None:
+    """Initialize configuration and run all long-lived service tasks."""
     config = Config()
     setup_logging(config.log_level)
 

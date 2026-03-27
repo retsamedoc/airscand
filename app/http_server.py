@@ -1,12 +1,19 @@
-from aiohttp import web
+"""HTTP server setup for WSD and scan upload endpoints."""
+
 import asyncio
 import logging
-from app.ws_scan import handle_wsd
+
+from aiohttp import web
+
+from app.config import Config
 from app.scan_receiver import handle_scan
+from app.ws_scan import handle_wsd
 
 log = logging.getLogger(__name__)
 
-async def start_http_server(config):
+
+async def start_http_server(config: Config) -> None:
+    """Start and keep alive the aiohttp server."""
     app = web.Application()
     app["config"] = config
 
@@ -21,5 +28,11 @@ async def start_http_server(config):
 
     log.info("HTTP server started", extra={"port": config.port})
 
-    while True:
-        await asyncio.sleep(3600)
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        log.info("HTTP server cancellation received; shutting down")
+        raise
+    finally:
+        await runner.cleanup()
