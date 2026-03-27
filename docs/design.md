@@ -200,19 +200,27 @@ Two possible modes:
 ##### Success Criteria
 - Service starts cleanly
 
-#### Phase 1 — Discovery (Early Win)
+#### Phase 1 — Discovery (Preliminary)
 - Implement Probe listener
 - Send ProbeMatch
 
 ##### Success Criteria
-- Printer recognizes daemon OR sends HTTP requests
+- Printer sends Probe and daemon responds with valid ProbeMatch
+- Printer records/attempts the advertised endpoint (`XAddrs`)
+- Note: this phase alone does not validate end-to-end scan workflow readiness
 
-#### Phase 2 — HTTP Endpoint
+#### Phase 2 — HTTP + WS-Eventing Registration
 - Start HTTP server
 - Log SOAP requests
+- Implement WS-Eventing registration/subscription handshake required by scanner
+- Verify daemon is registered as a scan destination on the device
 
 ##### Success Criteria
-- SOAP requests observed
+- SOAP requests are observed on HTTP endpoint(s)
+- WS-Eventing registration succeeds and scanner can target daemon as destination
+- Status: complete (validated on target Epson workflow)
+- Completion date: 2026-03-26
+- Tested models: Epson WF-3640
 
 #### Phase 3 — WS-Scan Basics
 - Handle CreateScanJob
@@ -229,18 +237,12 @@ Two possible modes:
 
 - Scanned image saved to disk
 
-#### Phase 5 — Eventing (Conditional)
-- Implement WS-Eventing if required
-
-##### Success Criteria
-- Scan button reliably triggers workflow
-
-#### Phase 6 — Hardening
+#### Phase 5 — Hardening
 - XML parsing
 - Error handling
 - State management
 
-#### Phase 7 — Packaging
+#### Phase 6 — Packaging
 - Containerization
 - CLI
 - systemd integration
@@ -294,7 +296,6 @@ Two possible modes:
 - Authentication support
 
 ### 12. Open Questions
-- Does the printer require WS-Eventing?
 - Does it push or require image retrieval?
 - Are additional SOAP headers mandatory?
 

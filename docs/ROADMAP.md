@@ -7,6 +7,17 @@
 - `XAddrs` is built from an explicit advertised address (`WSD_ADVERTISE_ADDR`) with fallbacks.
 - Discovery logging now includes sender address, extracted message ID, and advertised `XAddrs`.
 - Added automated coverage for ProbeMatch generation and Probe->ProbeMatches responder behavior.
+- Important: discovery-only closeout is a preliminary milestone; scanner workflow validation still requires Phase 2 WS-Eventing registration.
+
+### Phase 2 closeout (HTTP + WS-Eventing registration) - complete
+
+- Outbound registration loop now runs WS-Transfer preflight (`Get`) followed by WS-Eventing `Subscribe`.
+- Default subscribe target is Win10-aligned WDP scan endpoint on scanner host (`/WDP/SCAN`) with fallback/override controls.
+- Subscribe envelope now includes WSD/WDP scan fields needed for Epson interoperability (`From`, `EndTo`, `NotifyTo`, filter, and scan destinations).
+- Fault-aware retries remain in place across registration attempts (`wsa:DestinationUnreachable` is logged with structured diagnostics).
+- Manual validation: scanner registration succeeds and host can be selected as a scan destination.
+- Completion date: **2026-03-26**
+- Tested device models: **Epson WF-3760**, **Epson WF-3640**
 
 #### Phase 1 env vars used
 
@@ -24,12 +35,14 @@
 - Discovery responder still only handles the minimal probe path, not full WS-* compliance.
 - WS-Scan SOAP actions still use minimal placeholder behavior and need fuller protocol responses.
 
-### Near-term (Phase 1–2 focus)
+### Near-term (Phase 3–4 focus)
 
 - Keep the current **single-process** architecture: one asyncio loop running
   - UDP WS-Discovery listener task
   - HTTP server task (currently `aiohttp`)
-- Goal: validate that the printer discovers the host and reaches the HTTP endpoint(s) reliably.
+- Implement WS-Scan job lifecycle actions beyond registration (CreateScanJob and related flows).
+- Complete end-to-end scan capture persistence (`/scan`) for production-like reliability.
+- Improve SOAP parsing robustness (namespace-aware parsing for additional actions and richer fault handling).
 
 ### Re-evaluate after Phase 1–2: FastAPI/uvicorn option
 

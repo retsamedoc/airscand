@@ -40,10 +40,14 @@ class JsonFormatter(logging.Formatter):
         payload.update(extras)
         return json.dumps(payload, default=str)
 
-def setup_logging():
+def _resolve_log_level(level_name: str) -> int:
+    return getattr(logging, level_name.upper(), logging.INFO)
+
+
+def setup_logging(level_name: str = "INFO"):
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
 
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(_resolve_log_level(level_name))
     root.addHandler(handler)

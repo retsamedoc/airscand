@@ -1,0 +1,122 @@
+from types import SimpleNamespace
+
+import pytest
+
+from main import _eventing_registration_loop, _resolve_subscribe_to_url
+
+
+@pytest.mark.asyncio
+async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch):
+    cfg = SimpleNamespace(
+        advertise_addr="192.168.1.50",
+        port=5357,
+        endpoint_path="/wsd",
+        uuid="11111111-2222-3333-4444-555555555555",
+        eventing_notify_to_url="",
+        eventing_preflight_get=True,
+        scanner_subscribe_to_url="",
+    )
+    attempts = {"discover": 0, "register": 0, "preflight": 0}
+
+    async def fake_discover(_config):
+        attempts["discover"] += 1
+        if attempts["discover"] < 2:
+            return None
+        return "http://192.168.1.60:80/WSD/DEVICE"
+
+    async def fake_register(
+        *,
+        scanner_xaddr,
+        notify_to,
+        timeout_sec=5.0,
+        subscribe_to_url=None,
+        from_address=None,
+        subscription_identifier=None,
+    ):
+        attempts["register"] += 1
+        assert scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
+        assert subscribe_to_url == "http://192.168.1.60:80/WDP/SCAN"
+        assert notify_to == "http://192.168.1.50:5357/wsd"
+        assert from_address == "urn:uuid:11111111-2222-3333-4444-555555555555"
+        return {"identifier": "sub-1", "expires": "PT1H"}
+
+    async def fake_preflight_wdp(*, scanner_xaddr, timeout_sec=5.0, get_to_url=None, from_address=None):
+        attempts["preflight"] += 1
+        assert scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
+        assert get_to_url == "http://192.168.1.60:80/WDP/SCAN"
+        assert from_address == "urn:uuid:11111111-2222-3333-4444-555555555555"
+        return {"suggested_subscribe_to_url": None, "message_id": "urn:uuid:get-1"}
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("main.discover_scanner_xaddr", fake_discover)
+    monkeypatch.setattr("main.preflight_get_scanner_capabilities", fake_preflight_wdp)
+    monkeypatch.setattr("main.register_with_scanner", fake_register)
+    monkeypatch.setattr("main.asyncio.sleep", fake_sleep)
+
+    await _eventing_registration_loop(cfg)
+    assert attempts["discover"] == 2
+    assert attempts["preflight"] == 1
+    assert attempts["register"] == 1
+
+
+def test_resolve_subscribe_to_url_prefers_explicit_override():
+    cfg = SimpleNamespace(
+        scanner_subscribe_to_url="http://192.168.1.60:80/custom/subscribe",
+    )
+    assert (
+        _resolve_subscribe_to_url(cfg, "http://192.168.1.60:80/WSD/DEVICE")
+        == "http://192.168.1.60:80/custom/subscribe"
+    )
+
+
+def test_resolve_subscribe_to_url_defaults_to_wdp_scan():
+    cfg = SimpleNamespace(
+        scanner_subscribe_to_url="",
+    )
+    assert _resolve_subscribe_to_url(cfg, "http://192.168.1.60:80/WSD/DEVICE") == (
+        "http://192.168.1.60:80/WDP/SCAN"
+    )
+
+
+@pytest.mark.asyncio
+async def test_eventing_registration_loop_uses_preflight_suggested_destination(monkeypatch):
+    cfg = SimpleNamespace(
+        advertise_addr="192.168.1.50",
+        port=5357,
+        endpoint_path="/wsd",
+        uuid="11111111-2222-3333-4444-555555555555",
+        eventing_notify_to_url="",
+        eventing_preflight_get=True,
+        scanner_subscribe_to_url="",
+    )
+    calls = []
+
+    async def fake_discover(_config):
+        return "http://192.168.1.60:80/WSD/DEVICE"
+
+    async def fake_preflight(*, scanner_xaddr, timeout_sec=5.0, get_to_url=None, from_address=None):
+        return {
+            "suggested_subscribe_to_url": "http://192.168.1.60:80/WDP/SCAN",
+            "message_id": "urn:uuid:get-1",
+        }
+
+    async def fake_register(
+        *,
+        scanner_xaddr,
+        notify_to,
+        timeout_sec=5.0,
+        subscribe_to_url=None,
+        from_address=None,
+        subscription_identifier=None,
+    ):
+        calls.append(subscribe_to_url)
+        return {"status": "200", "fault_subcode": None, "identifier": "sub-1", "expires": "PT1H"}
+
+    monkeypatch.setattr("main.discover_scanner_xaddr", fake_discover)
+    monkeypatch.setattr("main.preflight_get_scanner_capabilities", fake_preflight)
+    monkeypatch.setattr("main.register_with_scanner", fake_register)
+
+    await _eventing_registration_loop(cfg)
+    assert calls[0] == "http://192.168.1.60:80/WDP/SCAN"
