@@ -12,15 +12,18 @@ NS_SOAP = "http://www.w3.org/2003/05/soap-envelope"
 NS_WSA = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
 NS_WSE = "http://schemas.xmlsoap.org/ws/2004/08/eventing"
 NS_WSMAN = "http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
+NS_SCA = "http://schemas.microsoft.com/windows/2006/08/wdp/scan"
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
 ACTION_RENEW = f"{NS_WSE}/Renew"
 ACTION_GET_STATUS = f"{NS_WSE}/GetStatus"
 ACTION_UNSUBSCRIBE = f"{NS_WSE}/Unsubscribe"
+ACTION_CREATE_SCAN_JOB = f"{NS_SCA}/CreateScanJob"
 ACTION_SUBSCRIBE_RESPONSE = f"{NS_WSE}/SubscribeResponse"
 ACTION_RENEW_RESPONSE = f"{NS_WSE}/RenewResponse"
 ACTION_GET_STATUS_RESPONSE = f"{NS_WSE}/GetStatusResponse"
 ACTION_UNSUBSCRIBE_RESPONSE = f"{NS_WSE}/UnsubscribeResponse"
+ACTION_CREATE_SCAN_JOB_RESPONSE = f"{NS_SCA}/CreateScanJobResponse"
 
 ACTION_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?Action>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?Action>"
@@ -60,7 +63,7 @@ def _soap_response(
     mid = outbound_message_id or _new_message_id()
     relates_line = f"    <wsa:RelatesTo>{relates_to}</wsa:RelatesTo>\n" if relates_to else ""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}" xmlns:wsman="{NS_WSMAN}">
+<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}" xmlns:wsman="{NS_WSMAN}" xmlns:sca="{NS_SCA}">
   <soap:Header>
     <wsa:Action>{action}</wsa:Action>
     <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
@@ -101,6 +104,19 @@ def build_eventing_unsubscribe_response(relates_to: str | None) -> str:
     """Build SOAP UnsubscribeResponse payload."""
     body = "    <wse:UnsubscribeResponse/>"
     return _soap_response(action=ACTION_UNSUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body)
+
+
+def build_create_scan_job_response(relates_to: str | None, job_id: str | None = None) -> str:
+    """Build minimal WS-Scan CreateScanJobResponse payload."""
+    resolved_job_id = job_id or str(uuid.uuid4())
+    body = f"""    <sca:CreateScanJobResponse>
+      <sca:JobId>{resolved_job_id}</sca:JobId>
+    </sca:CreateScanJobResponse>"""
+    return _soap_response(
+        action=ACTION_CREATE_SCAN_JOB_RESPONSE,
+        relates_to=relates_to,
+        body_xml=body,
+    )
 
 
 async def handle_wsd(request: web.Request) -> web.Response:
@@ -162,6 +178,19 @@ async def handle_wsd(request: web.Request) -> web.Response:
             log.warning("Unsubscribe request missing MessageID")
         response_xml = build_eventing_unsubscribe_response(relates_to)
         log.info("WSD SOAP response sent", extra={"response_action": ACTION_UNSUBSCRIBE_RESPONSE})
+        return web.Response(
+            text=response_xml,
+            content_type="application/soap+xml",
+            charset="utf-8",
+        )
+    if action == ACTION_CREATE_SCAN_JOB:
+        if not relates_to:
+            log.warning("CreateScanJob request missing MessageID")
+        response_xml = build_create_scan_job_response(relates_to)
+        log.info(
+            "WSD SOAP response sent",
+            extra={"response_action": ACTION_CREATE_SCAN_JOB_RESPONSE},
+        )
         return web.Response(
             text=response_xml,
             content_type="application/soap+xml",

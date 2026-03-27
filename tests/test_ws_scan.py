@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from app.ws_scan import (
+    ACTION_CREATE_SCAN_JOB,
     ACTION_GET_STATUS,
     ACTION_RENEW,
     ACTION_SUBSCRIBE,
     ACTION_UNSUBSCRIBE,
+    build_create_scan_job_response,
     build_eventing_subscribe_response,
     extract_action,
     extract_message_id,
@@ -78,6 +80,14 @@ def test_subscribe_response_includes_subscription_manager() -> None:
     assert "<wse:Expires>PT1H</wse:Expires>" in xml
 
 
+def test_create_scan_job_response_includes_job_id_and_relates_to() -> None:
+    """CreateScanJob response includes job id and correlated message id."""
+    xml = build_create_scan_job_response("urn:uuid:req-2", job_id="job-123")
+    assert "CreateScanJobResponse" in xml
+    assert "<wsa:RelatesTo>urn:uuid:req-2</wsa:RelatesTo>" in xml
+    assert "<sca:JobId>job-123</sca:JobId>" in xml
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "expected"),
@@ -86,10 +96,11 @@ def test_subscribe_response_includes_subscription_manager() -> None:
         (ACTION_RENEW, "RenewResponse"),
         (ACTION_GET_STATUS, "GetStatusResponse"),
         (ACTION_UNSUBSCRIBE, "UnsubscribeResponse"),
+        (ACTION_CREATE_SCAN_JOB, "CreateScanJobResponse"),
     ],
 )
 async def test_handle_wsd_eventing_actions(action: str, expected: str) -> None:
-    """Each supported eventing action returns matching SOAP response."""
+    """Each supported SOAP action returns a matching SOAP response."""
     response = await handle_wsd(_request(_soap_envelope(action)))
     text = response.text
     assert response.content_type == "application/soap+xml"

@@ -15,8 +15,13 @@
   - Completion date: **2026-03-26**
   - Tested device models: **Epson WF-3760**, **Epson WF-3640**
 
-- **Next focus (Phase 3/4):**
-  - Complete WS-Scan SOAP actions (job negotiation)
+- **Phase 3 (WS-Scan basics)** is complete:
+  - SOAP endpoint now handles WS-Scan `CreateScanJob`
+  - Returns minimal `CreateScanJobResponse` payload with `sca:JobId`
+  - Preserves WS-Addressing request/response correlation via `wsa:RelatesTo`
+  - Completion date: **2026-03-26**
+
+- **Next focus (Phase 4):**
   - Finalize scan payload receive/save flow for reliable end-to-end scan-to-computer
 
 ## Configuration (environment variables)

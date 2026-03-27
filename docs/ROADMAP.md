@@ -19,6 +19,14 @@
 - Completion date: **2026-03-26**
 - Tested device models: **Epson WF-3760**, **Epson WF-3640**
 
+### Phase 3 closeout (WS-Scan basics) - complete
+
+- HTTP SOAP handler now supports WS-Scan `CreateScanJob` in addition to WS-Eventing actions.
+- `CreateScanJob` requests return a minimal SOAP `CreateScanJobResponse` with `sca:JobId`.
+- WS-Addressing correlation is preserved with `wsa:RelatesTo` mapped from inbound `wsa:MessageID`.
+- Added automated coverage for CreateScanJob response generation and end-to-end action dispatch behavior.
+- Completion date: **2026-03-26**
+
 #### Phase 1 env vars used
 
 - `WSD_HOST`: HTTP bind host.
@@ -35,12 +43,11 @@
 - Discovery responder still only handles the minimal probe path, not full WS-* compliance.
 - WS-Scan SOAP actions still use minimal placeholder behavior and need fuller protocol responses.
 
-### Near-term (Phase 3–4 focus)
+### Near-term (Phase 4 focus)
 
 - Keep the current **single-process** architecture: one asyncio loop running
   - UDP WS-Discovery listener task
   - HTTP server task (currently `aiohttp`)
-- Implement WS-Scan job lifecycle actions beyond registration (CreateScanJob and related flows).
 - Complete end-to-end scan capture persistence (`/scan`) for production-like reliability.
 - Improve SOAP parsing robustness (namespace-aware parsing for additional actions and richer fault handling).
 
