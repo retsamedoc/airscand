@@ -179,8 +179,23 @@ WSD_UUID	|(generated)	|Persistent identity
 
 ### 6.2 Scan Initiation
 - User presses “Scan to Computer”
-- Printer sends CreateScanJob to /wsd
-- Daemon responds with job metadata
+- Printer sends `ScanAvailableEvent` to `/wsd`
+- Daemon responds with generic HTTP `200 OK`
+- Daemon submits outbound `GetScannerElements` to scanner `/WDP/SCAN` as best-effort metadata probe for:
+  - `ScannerDescription`
+  - `DefaultScanTicket`
+  - `ScannerConfiguration`
+  - `ScannerStatus`
+- Metadata probe failures/timeouts are logged but do not stop the chain
+- Daemon submits outbound `ValidateScanTicket` to scanner `/WDP/SCAN` using a Win10-like fixed scan ticket template
+- Daemon waits for `ValidateScanTicketResponse`
+- If validation succeeds, daemon submits outbound `CreateScanJob` to scanner `/WDP/SCAN`
+- If create succeeds with `JobId`, daemon submits outbound `RetrieveImage` to scanner `/WDP/SCAN`
+- `RetrieveImageRequest` fields are currently mapped as:
+  - `JobId`: `CreateScanJobResponse/JobId`
+  - `JobToken`: resolved destination token (`ValidateScanTicketResponse/DestinationToken` or event token fallback)
+  - `DocumentDescription`: fixed default value `1`
+- `GetScannerElements` payload blocks are currently stored in scan-chain results and structured logs for diagnostics and future ticket synthesis.
 
 ### 6.3 Image Transfer
 

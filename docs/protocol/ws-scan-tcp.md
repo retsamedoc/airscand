@@ -99,3 +99,24 @@ Observed behavior in bring-up:
 - Before `Subscribe`, Epson workflows may issue WS-Transfer `Get`; if `Get`/`Subscribe` are sent to the wrong role/path (for example `/WSD/DEVICE`), scanner can return `wsa:DestinationUnreachable`.
 - Practical fallback can still retry alternate endpoints (for example `/WSDScanner`) when no better destination is learned from `Get`.
 - Keep capture evidence for both requests and faults; this is useful to lock down model-specific defaults.
+
+### WF-3640 scan available chain (current implementation)
+
+When `airscand` receives `wsa:Action` `.../ScanAvailableEvent` on `/wsd`, it now performs:
+
+1. Immediate generic HTTP `200 OK` response to the inbound event
+2. Outbound `GetScannerElements` to scanner `http://<scanner>/WDP/SCAN` requesting:
+   - `ScannerDescription`
+   - `DefaultScanTicket`
+   - `ScannerConfiguration`
+   - `ScannerStatus`
+3. Continue chain regardless of probe outcome (best-effort metadata enrichment)
+4. Outbound `ValidateScanTicket` to scanner `http://<scanner>/WDP/SCAN`
+5. Wait for `ValidateScanTicketResponse`
+6. Outbound `CreateScanJob` to scanner `http://<scanner>/WDP/SCAN` only after successful validation
+
+Notes:
+
+- Initial `ValidateScanTicketRequest` payload is a fixed Win10-like template, not dynamically derived from event payload fields yet.
+- Outbound scanner target is normalized to `/WDP/SCAN` from discovered/configured scanner endpoint.
+- `GetScannerElements` results are currently captured for observability/logging and do not yet alter ticket/job request content.

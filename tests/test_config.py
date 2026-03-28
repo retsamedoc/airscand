@@ -21,6 +21,7 @@ def test_config_env_overrides(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("WSD_UUID", "explicit-uuid")
     monkeypatch.setenv("WSD_SCANNER_XADDR", "http://192.168.1.60:80/WSD/DEVICE")
     monkeypatch.setenv("WSD_LOG_LEVEL", "debug")
+    monkeypatch.setenv("WSD_LOG_JSON", "1")
     monkeypatch.setenv("WSD_SCANNER_SUBSCRIBE_TO_URL", "http://192.168.1.60:80/WSDScanner")
     monkeypatch.setenv("WSD_EVENTING_PREFLIGHT_GET", "0")
     monkeypatch.setenv("WSD_EVENTING_NOTIFY_TO_URL", "http://192.168.1.50:5357/callback")
@@ -37,6 +38,7 @@ def test_config_env_overrides(monkeypatch: MonkeyPatch) -> None:
     assert cfg.uuid == "explicit-uuid"
     assert cfg.scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
     assert cfg.log_level == "DEBUG"
+    assert cfg.log_json is True
     assert cfg.scanner_subscribe_to_url == "http://192.168.1.60:80/WSDScanner"
     assert cfg.eventing_preflight_get is False
     assert cfg.eventing_notify_to_url == "http://192.168.1.50:5357/callback"

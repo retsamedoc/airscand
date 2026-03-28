@@ -42,6 +42,7 @@ async def _eventing_registration_loop(config: Config) -> None:
             if not scanner_xaddr:
                 log.info("Scanner endpoint not yet discovered; retrying registration")
             else:
+                config.scanner_xaddr = scanner_xaddr
                 preflight_details = None
                 subscribe_to_url = _resolve_subscribe_to_url(config, scanner_xaddr)
                 if getattr(config, "eventing_preflight_get", True):
@@ -71,12 +72,30 @@ async def _eventing_registration_loop(config: Config) -> None:
                 )
                 status = int(result.get("status") or "0")
                 if result.get("identifier") and (status == 0 or 200 <= status < 300):
+                    sub_id = str(result.get("identifier") or "").strip()
+                    setattr(config, "scanner_eventing_subscription_id", sub_id)
+                    dest_tok = str(result.get("subscribe_destination_token") or "").strip()
+                    setattr(config, "scanner_subscribe_destination_token", dest_tok)
+                    raw_map = result.get("subscribe_destination_tokens")
+                    if isinstance(raw_map, dict):
+                        setattr(
+                            config,
+                            "scanner_subscribe_destination_tokens",
+                            {str(k): str(v) for k, v in raw_map.items()},
+                        )
+                    else:
+                        setattr(config, "scanner_subscribe_destination_tokens", {})
+                    setattr(config, "use_env_subscribe_destination_token_only", False)
                     log.info(
                         "Scanner registration succeeded",
                         extra={
                             "scanner_xaddr": scanner_xaddr,
                             "subscribe_to_url": subscribe_to_url,
                             "subscription_id": result.get("identifier"),
+                            "subscribe_destination_token": result.get("subscribe_destination_token"),
+                            "subscribe_destination_tokens_count": len(
+                                getattr(config, "scanner_subscribe_destination_tokens", {}) or {}
+                            ),
                             "expires": result.get("expires"),
                         },
                     )
@@ -97,7 +116,7 @@ async def _eventing_registration_loop(config: Config) -> None:
 async def main() -> None:
     """Initialize configuration and run all long-lived service tasks."""
     config = Config()
-    setup_logging(config.log_level)
+    setup_logging(config.log_level, log_json=config.log_json)
 
     await asyncio.gather(
         start_discovery(config),
@@ -106,4 +125,7 @@ async def main() -> None:
     )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("Shutdown requested; exiting")

@@ -17,14 +17,26 @@
 - Fault-aware retries remain in place across registration attempts (`wsa:DestinationUnreachable` is logged with structured diagnostics).
 - Manual validation: scanner registration succeeds and host can be selected as a scan destination.
 - Completion date: **2026-03-26**
-- Tested device models: **Epson WF-3760**, **Epson WF-3640**
+- Tested device models: **Epson WF-3640**
 
 ### Phase 3 closeout (WS-Scan basics) - complete
 
-- HTTP SOAP handler now supports WS-Scan `CreateScanJob` in addition to WS-Eventing actions.
-- `CreateScanJob` requests return a minimal SOAP `CreateScanJobResponse` with `sca:JobId`.
+- HTTP SOAP handler now supports WS-Scan `CreateScanJob` and `ScanAvailableEvent` in addition to WS-Eventing actions.
+- `ScanAvailableEvent` now returns an immediate generic HTTP `200 OK` and triggers asynchronous outbound scanner calls.
+- Outbound chain now follows WF-3640 flow: `ValidateScanTicket` (fixed Win10-like template), then `CreateScanJob`, then `RetrieveImage` to scanner `/WDP/SCAN`.
+- Outbound chain now also issues best-effort `GetScannerElements` before validation to collect `ScannerDescription`, `DefaultScanTicket`, `ScannerConfiguration`, and `ScannerStatus` for observability.
+- `RetrieveImageRequest` now sends `JobId` from `CreateScanJobResponse`, `JobToken` from resolved destination token, and default `DocumentDescription` value `1`.
+- Inbound `CreateScanJob` requests return a minimal SOAP `CreateScanJobResponse` with `sca:JobId`.
 - WS-Addressing correlation is preserved with `wsa:RelatesTo` mapped from inbound `wsa:MessageID`.
 - Added automated coverage for CreateScanJob response generation and end-to-end action dispatch behavior.
+- Completion date: **2026-03-26**
+
+### Phase 4 closeout (Image capture core goal) - complete
+
+- `/scan` payload persistence is now hardened with atomic write semantics (temp file + replace).
+- Empty upload payloads are rejected with explicit `400` responses.
+- Scan save logging now includes byte size, input content type, and detected file extension.
+- Added automated coverage for `/scan` success path and error handling (empty payload, invalid config).
 - Completion date: **2026-03-26**
 
 #### Phase 1 env vars used
@@ -43,12 +55,11 @@
 - Discovery responder still only handles the minimal probe path, not full WS-* compliance.
 - WS-Scan SOAP actions still use minimal placeholder behavior and need fuller protocol responses.
 
-### Near-term (Phase 4 focus)
+### Near-term (Phase 5 focus)
 
 - Keep the current **single-process** architecture: one asyncio loop running
   - UDP WS-Discovery listener task
   - HTTP server task (currently `aiohttp`)
-- Complete end-to-end scan capture persistence (`/scan`) for production-like reliability.
 - Improve SOAP parsing robustness (namespace-aware parsing for additional actions and richer fault handling).
 
 ### Re-evaluate after Phase 1–2: FastAPI/uvicorn option

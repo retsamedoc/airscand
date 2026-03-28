@@ -3,7 +3,7 @@
 import os
 import socket
 import uuid as uuidlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -23,10 +23,23 @@ class Config:
     app_sequence_instance_id: int = 1
     app_sequence_sequence_id: str = ""
     scanner_xaddr: str = ""
+    # SubscribeResponse Identifier (wsman:Identifier); optional CreateScanJob DestinationToken fallback.
+    scanner_eventing_subscription_id: str = ""
+    # DestinationToken from SubscribeResponse DestinationResponses (spec-primary for device-initiated scans).
+    scanner_subscribe_destination_token: str = ""
+    # ClientContext -> DestinationToken from SubscribeResponse (multi-destination); selection uses ScanAvailableEvent ClientContext.
+    scanner_subscribe_destination_tokens: dict[str, str] = field(default_factory=dict)
+    # True when WSD_SUBSCRIBE_DESTINATION_TOKEN env is set; forces single token until registration clears it.
+    use_env_subscribe_destination_token_only: bool = False
+    # Logging: ``WSD_LOG_LEVEL`` sets the root level (default INFO).
+    # ``WSD_LOG_JSON`` when true emits JSON for every level; when false, INFO+ use human lines and DEBUG uses JSON only.
     log_level: str = "INFO"
+    log_json: bool = False
     scanner_subscribe_to_url: str = ""
     eventing_preflight_get: bool = True
     eventing_notify_to_url: str = ""
+    # When CreateScanJob fails with ClientErrorInvalidDestinationToken, retry once without DestinationToken.
+    create_scan_job_retry_invalid_destination_token: bool = True
 
     def __post_init__(self) -> None:
         """Resolve environment variables and derive runtime values."""
@@ -65,7 +78,17 @@ class Config:
             self.app_sequence_sequence_id = _get_or_create_sequence_id()
 
         self.scanner_xaddr = os.getenv("WSD_SCANNER_XADDR", self.scanner_xaddr).strip()
+        self.scanner_eventing_subscription_id = os.getenv(
+            "WSD_EVENTING_SUBSCRIPTION_ID", self.scanner_eventing_subscription_id
+        ).strip()
+        self.scanner_subscribe_destination_token = os.getenv(
+            "WSD_SUBSCRIBE_DESTINATION_TOKEN", self.scanner_subscribe_destination_token
+        ).strip()
+        self.use_env_subscribe_destination_token_only = bool(
+            os.getenv("WSD_SUBSCRIBE_DESTINATION_TOKEN", "").strip()
+        )
         self.log_level = os.getenv("WSD_LOG_LEVEL", self.log_level).strip().upper()
+        self.log_json = _env_bool("WSD_LOG_JSON", self.log_json)
         self.scanner_subscribe_to_url = os.getenv(
             "WSD_SCANNER_SUBSCRIBE_TO_URL", self.scanner_subscribe_to_url
         ).strip()
@@ -77,6 +100,10 @@ class Config:
             "WSD_EVENTING_NOTIFY_TO_URL",
             self.eventing_notify_to_url,
         ).strip()
+        self.create_scan_job_retry_invalid_destination_token = _env_bool(
+            "WSD_CREATE_SCAN_JOB_RETRY_INVALID_DESTINATION_TOKEN",
+            self.create_scan_job_retry_invalid_destination_token,
+        )
 
 
 def _get_or_create_persistent_uuid() -> str:

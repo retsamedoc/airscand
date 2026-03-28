@@ -16,13 +16,24 @@
   - Tested device models: **Epson WF-3760**, **Epson WF-3640**
 
 - **Phase 3 (WS-Scan basics)** is complete:
-  - SOAP endpoint now handles WS-Scan `CreateScanJob`
-  - Returns minimal `CreateScanJobResponse` payload with `sca:JobId`
+  - SOAP endpoint now handles WS-Scan `CreateScanJob` and `ScanAvailableEvent`
+  - `ScanAvailableEvent` is acknowledged immediately with generic HTTP `200 OK`
+  - `ScanAvailableEvent` asynchronously triggers outbound `ValidateScanTicket`, outbound `CreateScanJob`, and outbound `RetrieveImage` against scanner `/WDP/SCAN`
+  - Initial `ValidateScanTicketRequest` uses a fixed Win10-like scan ticket template
+  - `RetrieveImageRequest` currently maps `JobId` from `CreateScanJobResponse`, `JobToken` from resolved destination token, and `DocumentDescription` to default `1`
+  - Inbound `CreateScanJob` requests return minimal `CreateScanJobResponse` payload with `sca:JobId`
   - Preserves WS-Addressing request/response correlation via `wsa:RelatesTo`
   - Completion date: **2026-03-26**
 
-- **Next focus (Phase 4):**
-  - Finalize scan payload receive/save flow for reliable end-to-end scan-to-computer
+- **Phase 4 (Image capture core goal)** is complete:
+  - `/scan` saves uploads using atomic write semantics
+  - Empty payloads are rejected with explicit `400` response
+  - Save logs include bytes, content type, and detected file extension
+  - Automated tests now cover successful persistence and error paths
+  - Completion date: **2026-03-26**
+
+- **Next focus (Phase 5):**
+  - Improve SOAP parsing robustness and richer fault handling
 
 ## Configuration (environment variables)
 

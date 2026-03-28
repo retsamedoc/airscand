@@ -1,6 +1,7 @@
 """Inbound scan receiver and persistence helpers."""
 
 import logging
+import os
 import uuid
 from pathlib import Path
 
@@ -22,9 +23,29 @@ def detect_file_type(data: bytes) -> str:
     return "bin"
 
 
+def _write_scan_atomically(output_path: Path, data: bytes) -> None:
+    """Persist scan bytes via temp file + atomic replace."""
+    tmp_path = output_path.with_name(f".{output_path.name}.part")
+    try:
+        with tmp_path.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(output_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 async def handle_scan(request: web.Request) -> web.Response:
     """Store uploaded scan payload to configured output directory."""
     data = await request.read()
+    if not data:
+        log.warning(
+            "Rejected empty scan payload",
+            extra={"content_type": request.content_type, "content_length": request.content_length},
+        )
+        return web.Response(status=400, text="Empty scan payload")
 
     ext = detect_file_type(data)
     filename = f"scan_{uuid.uuid4()}.{ext}"
@@ -38,7 +59,7 @@ async def handle_scan(request: web.Request) -> web.Response:
     path = output_dir / filename
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        _write_scan_atomically(path, data)
     except OSError:
         log.exception(
             "Failed to persist scan payload",
@@ -50,6 +71,14 @@ async def handle_scan(request: web.Request) -> web.Response:
         )
         return web.Response(status=500, text="Failed to save scan")
 
-    log.info("Scan saved", extra={"file": str(path)})
+    log.info(
+        "Scan saved",
+        extra={
+            "file": str(path),
+            "bytes": len(data),
+            "content_type": request.content_type,
+            "detected_ext": ext,
+        },
+    )
 
-    return web.Response(text="OK")
+    return web.Response(status=201, text="OK")

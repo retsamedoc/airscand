@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import runpy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ import pytest
 from main import _eventing_registration_loop, _resolve_subscribe_to_url
 
 if TYPE_CHECKING:
+    from _pytest.logging import LogCaptureFixture
     from _pytest.monkeypatch import MonkeyPatch
 
 
@@ -24,6 +26,9 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         eventing_notify_to_url="",
         eventing_preflight_get=True,
         scanner_subscribe_to_url="",
+        scanner_eventing_subscription_id="",
+        scanner_subscribe_destination_tokens={},
+        use_env_subscribe_destination_token_only=False,
     )
     attempts = {"discover": 0, "register": 0, "preflight": 0}
 
@@ -47,7 +52,12 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         assert subscribe_to_url == "http://192.168.1.60:80/WDP/SCAN"
         assert notify_to == "http://192.168.1.50:5357/wsd"
         assert from_address == "urn:uuid:11111111-2222-3333-4444-555555555555"
-        return {"identifier": "sub-1", "expires": "PT1H"}
+        return {
+            "identifier": "sub-1",
+            "expires": "PT1H",
+            "subscribe_destination_token": "dest-from-subscribe",
+            "subscribe_destination_tokens": {"Scan": "dest-from-subscribe"},
+        }
 
     async def fake_preflight_wdp(
         *,
@@ -74,6 +84,10 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
     assert attempts["discover"] == 2
     assert attempts["preflight"] == 1
     assert attempts["register"] == 1
+    assert cfg.scanner_eventing_subscription_id == "sub-1"
+    assert cfg.scanner_subscribe_destination_token == "dest-from-subscribe"
+    assert cfg.scanner_subscribe_destination_tokens == {"Scan": "dest-from-subscribe"}
+    assert cfg.use_env_subscribe_destination_token_only is False
 
 
 def test_resolve_subscribe_to_url_prefers_explicit_override() -> None:
@@ -110,6 +124,10 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         eventing_notify_to_url="",
         eventing_preflight_get=True,
         scanner_subscribe_to_url="",
+        scanner_eventing_subscription_id="",
+        scanner_subscribe_destination_token="",
+        scanner_subscribe_destination_tokens={},
+        use_env_subscribe_destination_token_only=False,
     )
     calls = []
 
@@ -138,7 +156,13 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         subscription_identifier: str | None = None,
     ) -> dict[str, str | None]:
         calls.append(subscribe_to_url)
-        return {"status": "200", "fault_subcode": None, "identifier": "sub-1", "expires": "PT1H"}
+        return {
+            "status": "200",
+            "fault_subcode": None,
+            "identifier": "sub-1",
+            "expires": "PT1H",
+            "subscribe_destination_token": None,
+        }
 
     monkeypatch.setattr("main.discover_scanner_xaddr", fake_discover)
     monkeypatch.setattr("main.preflight_get_scanner_capabilities", fake_preflight)
@@ -146,3 +170,27 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
 
     await _eventing_registration_loop(cfg)
     assert calls[0] == "http://192.168.1.60:80/WDP/SCAN"
+    assert cfg.scanner_eventing_subscription_id == "sub-1"
+    assert cfg.scanner_subscribe_destination_token == ""
+    assert cfg.scanner_subscribe_destination_tokens == {}
+    assert cfg.use_env_subscribe_destination_token_only is False
+
+
+def test_main_entrypoint_handles_keyboard_interrupt(
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
+    """Module entrypoint swallows Ctrl-C and emits a clean shutdown log."""
+
+    def fake_asyncio_run(coroutine_obj: object) -> None:
+        coroutine_close = getattr(coroutine_obj, "close", None)
+        if callable(coroutine_close):
+            coroutine_close()
+        raise KeyboardInterrupt
+
+    caplog.set_level("INFO", logger="__main__")
+    monkeypatch.setattr("asyncio.run", fake_asyncio_run)
+
+    runpy.run_module("main", run_name="__main__")
+
+    assert any("Shutdown requested; exiting" in message for message in caplog.messages)
