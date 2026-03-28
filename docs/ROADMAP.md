@@ -57,6 +57,7 @@
 
 ### Near-term (Phase 5 focus)
 
+- When **multi-page** scan testing starts, re-evaluate **RetrieveImage** `DocumentDescription` handling: today we send a fixed `DocumentNumber` (default `1`) inside `DocumentDescription`; multi-page jobs may require per-document numbering, multiple `RetrieveImage` calls, or values taken from `CreateScanJobResponse` / job status.
 - Keep the current **single-process** architecture: one asyncio loop running
   - UDP WS-Discovery listener task
   - HTTP server task (currently `aiohttp`)

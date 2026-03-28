@@ -11,12 +11,14 @@ import pytest
 from app.ws_eventing_client import (
     ACTION_CREATE_SCAN_JOB,
     ACTION_GET,
+    ACTION_GET_JOB_STATUS,
     ACTION_GET_SCANNER_ELEMENTS,
     ACTION_RETRIEVE_IMAGE,
     ACTION_VALIDATE_SCAN_TICKET,
     FILTER_DIALECT_DEVPROF_ACTION,
     SCAN_AVAILABLE_EVENT_ACTION,
     build_create_scan_job_request,
+    build_get_job_status_request,
     build_get_request,
     build_get_scanner_elements_request,
     build_retrieve_image_request,
@@ -27,6 +29,7 @@ from app.ws_eventing_client import (
     extract_soap_envelope_message_id,
     get_scanner_elements_metadata,
     parse_create_scan_job_response,
+    parse_get_job_status_response,
     parse_get_response,
     parse_get_scanner_elements_response,
     parse_retrieve_image_response,
@@ -40,6 +43,14 @@ from app.ws_eventing_client import (
     resolve_wdp_scan_url,
     run_scan_available_chain,
 )
+
+_FAKE_GET_JOB_STATUS_COMPLETED_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetJobStatusResponse>
+    <sca:JobState>Completed</sca:JobState>
+    <sca:ImagesToTransfer>1</sca:ImagesToTransfer>
+  </sca:GetJobStatusResponse></soap:Body>
+</soap:Envelope>"""
 
 if TYPE_CHECKING:
     from _pytest.logging import LogCaptureFixture
@@ -192,7 +203,7 @@ def test_build_retrieve_image_request_contains_expected_elements() -> None:
         to_url="http://192.168.1.60:80/WDP/SCAN",
         job_id="job-123",
         job_token="token-1",
-        document_description="1",
+        document_number="1",
         from_address="urn:uuid:client-1",
         message_id="urn:uuid:retrieve-1",
     )
@@ -201,7 +212,8 @@ def test_build_retrieve_image_request_contains_expected_elements() -> None:
     assert "<wsa:To>http://192.168.1.60:80/WDP/SCAN</wsa:To>" in xml
     assert "<sca:JobId>job-123</sca:JobId>" in xml
     assert "<sca:JobToken>token-1</sca:JobToken>" in xml
-    assert "<sca:DocumentDescription>1</sca:DocumentDescription>" in xml
+    assert "<sca:DocumentDescription>" in xml
+    assert "<sca:DocumentNumber>1</sca:DocumentNumber>" in xml
 
 
 def test_build_get_scanner_elements_request_contains_expected_elements() -> None:
@@ -529,6 +541,57 @@ def test_parse_create_scan_job_response_extracts_job_token() -> None:
     parsed = parse_create_scan_job_response(xml)
     assert parsed["job_id"] == "job-9"
     assert parsed["job_token"] == "token-xyz"
+
+
+def test_parse_create_scan_job_response_pairs_job_token_inside_response_only() -> None:
+    """Do not use the first JobToken in the envelope if it is outside CreateScanJobResponse."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Header>
+    <sca:JobToken>stale-or-echoed</sca:JobToken>
+  </soap:Header>
+  <soap:Body>
+    <sca:CreateScanJobResponse>
+      <sca:JobId>job-real</sca:JobId>
+      <sca:JobToken>token-real</sca:JobToken>
+    </sca:CreateScanJobResponse>
+  </soap:Body>
+</soap:Envelope>
+"""
+    parsed = parse_create_scan_job_response(xml)
+    assert parsed["job_id"] == "job-real"
+    assert parsed["job_token"] == "token-real"
+
+
+def test_build_get_job_status_request_contains_job_identifiers() -> None:
+    """GetJobStatus request includes JobId and JobToken."""
+    _mid, xml = build_get_job_status_request(
+        to_url="http://192.168.1.60:80/WDP/SCAN",
+        job_id="jid-1",
+        job_token="jtok-1",
+    )
+    assert ACTION_GET_JOB_STATUS.split("/")[-1] in xml
+    assert "<sca:JobId>jid-1</sca:JobId>" in xml
+    assert "<sca:JobToken>jtok-1</sca:JobToken>" in xml
+
+
+def test_parse_get_job_status_response_extracts_state_and_images() -> None:
+    """GetJobStatus parser reads JobState and ImagesToTransfer inside GetJobStatusResponse."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body>
+    <sca:GetJobStatusResponse>
+      <sca:JobState>Processing</sca:JobState>
+      <sca:ImagesToTransfer>0</sca:ImagesToTransfer>
+    </sca:GetJobStatusResponse>
+  </soap:Body>
+</soap:Envelope>
+"""
+    parsed = parse_get_job_status_response(xml)
+    assert parsed["job_state"] == "Processing"
+    assert parsed["images_to_transfer"] == "0"
 
 
 def test_parse_retrieve_image_response_extracts_status() -> None:
@@ -910,7 +973,10 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert len(calls) == 4
     assert ACTION_GET_SCANNER_ELEMENTS in calls[0]
     assert ACTION_VALIDATE_SCAN_TICKET in calls[1]
@@ -921,7 +987,7 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
     assert ACTION_RETRIEVE_IMAGE in calls[3]
     assert "<sca:JobId>job-42</sca:JobId>" in calls[3]
     assert "<sca:JobToken>jtok-42</sca:JobToken>" in calls[3]
-    assert "<sca:DocumentDescription>1</sca:DocumentDescription>" in calls[3]
+    assert "<sca:DocumentNumber>1</sca:DocumentNumber>" in calls[3]
     assert result["validate_http_status"] == "200"
     assert result["create_http_status"] == "200"
     assert result["retrieve_http_status"] == "200"
@@ -929,6 +995,57 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
     assert result["job_id"] == "job-42"
     assert result["retrieve_elapsed_sec"] is not None
     assert float(result["retrieve_elapsed_sec"] or "0") >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """When polling is enabled, GetJobStatus runs after CreateScanJob and before RetrieveImage."""
+    calls: list[str] = []
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        calls.append(payload)
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket><sca:ScanTicket>
+      <sca:JobDescription><sca:JobName>DeviceTicketName</sca:JobName></sca:JobDescription>
+    </sca:ScanTicket></sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>"""
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-42</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>"""
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId><sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>"""
+        if ACTION_GET_JOB_STATUS in payload:
+            return 200, _FAKE_GET_JOB_STATUS_COMPLETED_XML
+        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
+</soap:Envelope>"""
+
+    async def instant_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.ws_eventing_client.asyncio.sleep", instant_sleep)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=True,
+        get_job_status_max_wait_sec=30.0,
+    )
+    assert len(calls) == 5
+    assert ACTION_GET_JOB_STATUS in calls[3]
+    assert ACTION_RETRIEVE_IMAGE in calls[4]
+    assert "<sca:JobId>job-42</sca:JobId>" in calls[4]
+    assert result["retrieve_http_status"] == "200"
 
 
 @pytest.mark.asyncio
@@ -973,6 +1090,7 @@ async def test_run_scan_available_chain_prefers_subscribe_destination_token_over
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         subscribe_destination_token="Client3478",
+        poll_get_job_status_before_retrieve=False,
     )
     assert "<sca:DestinationToken>Client3478</sca:DestinationToken>" in calls[2]
     assert "scanner-validate-response" not in calls[2]
@@ -1019,6 +1137,7 @@ async def test_run_scan_available_chain_selects_token_by_event_client_context(
         scan_available_payload=event_xml,
         subscribe_destination_token="tok-scan",
         subscribe_destination_tokens={"Scan": "tok-scan", "ScanToEmail": "tok-email"},
+        poll_get_job_status_before_retrieve=False,
     )
     assert "<sca:DestinationToken>tok-email</sca:DestinationToken>" in calls[2]
     assert "<sca:ScanIdentifier>sid-1</sca:ScanIdentifier>" in calls[2]
@@ -1065,7 +1184,10 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert "<sca:DestinationToken>urn:uuid:scanner-validate-response</sca:DestinationToken>" in calls[2]
     assert "body-token-secondary" not in calls[2]
     assert "<sca:JobToken>jtok-msg</sca:JobToken>" in calls[3]
@@ -1086,7 +1208,10 @@ async def test_run_scan_available_chain_stops_on_validation_failure(monkeypatch:
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert len(calls) == 2
     assert ACTION_GET_SCANNER_ELEMENTS in calls[0]
     assert ACTION_VALIDATE_SCAN_TICKET in calls[1]
@@ -1111,7 +1236,10 @@ async def test_run_scan_available_chain_stops_when_valid_ticket_false(monkeypatc
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert len(calls) == 2
     assert result["valid_ticket"] == "false"
     assert result["create_http_status"] is None
@@ -1137,7 +1265,10 @@ async def test_run_scan_available_chain_stops_when_validation_info_has_no_valid_
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert len(calls) == 2
     assert result["valid_ticket"] == "false"
     assert result["create_http_status"] is None
@@ -1171,6 +1302,7 @@ async def test_run_scan_available_chain_uses_event_destination_token(monkeypatch
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<sca:ScanAvailableEvent><sca:DestinationToken>event-token</sca:DestinationToken></sca:ScanAvailableEvent>",
+        poll_get_job_status_before_retrieve=False,
     )
     assert "<sca:DestinationToken>event-token</sca:DestinationToken>" in calls[2]
     assert "<sca:JobToken>jtok-77</sca:JobToken>" in calls[3]
@@ -1202,7 +1334,10 @@ async def test_run_scan_available_chain_skips_retrieve_when_create_omits_job_tok
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert len(calls) == 3
     assert ACTION_CREATE_SCAN_JOB in calls[2]
     assert result["job_id"] == "job-no-token"
@@ -1231,7 +1366,10 @@ async def test_run_scan_available_chain_skips_retrieve_without_job_id(monkeypatc
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert len(calls) == 3
     assert ACTION_CREATE_SCAN_JOB in calls[2]
     assert result["job_id"] is None
@@ -1283,6 +1421,7 @@ async def test_run_scan_available_chain_prefers_event_subscription_identifier_ov
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload=event_xml,
         eventing_subscription_identifier="urn:uuid:from-config-only",
+        poll_get_job_status_before_retrieve=False,
     )
     assert "<sca:DestinationToken>urn:uuid:from-notify-envelope</sca:DestinationToken>" in calls[2]
     assert "from-config-only" not in calls[2]
@@ -1316,6 +1455,7 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>9CAED324E3C0_417441412_5</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
         eventing_subscription_identifier="4bda57f5-1d9e-4c3d-871b-2e9ab12c8fd4",
+        poll_get_job_status_before_retrieve=False,
     )
     assert "<sca:ScanIdentifier>9CAED324E3C0_417441412_5</sca:ScanIdentifier>" in calls[2]
     assert (
@@ -1360,6 +1500,7 @@ async def test_run_scan_available_chain_retries_create_without_token_on_invalid_
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>sid-retry-1</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
+        poll_get_job_status_before_retrieve=False,
     )
     assert len(calls) == 5
     assert "<sca:DestinationToken>dest-bad</sca:DestinationToken>" in calls[2]
@@ -1399,6 +1540,7 @@ async def test_run_scan_available_chain_skips_retry_when_disabled(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>sid-1</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
         retry_create_without_destination_token_on_invalid_token=False,
+        poll_get_job_status_before_retrieve=False,
     )
     assert len(calls) == 3
     assert ACTION_CREATE_SCAN_JOB in calls[2]
@@ -1429,7 +1571,10 @@ async def test_run_scan_available_chain_create_retry_failure_still_stops(monkeyp
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert len(calls) == 4
     assert ACTION_CREATE_SCAN_JOB in calls[2]
     assert ACTION_CREATE_SCAN_JOB in calls[3]
@@ -1464,7 +1609,10 @@ async def test_run_scan_available_chain_continues_when_metadata_probe_times_out(
 </soap:Envelope>"""
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    result = await run_scan_available_chain(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+    )
     assert ACTION_GET_SCANNER_ELEMENTS in calls[0]
     assert ACTION_VALIDATE_SCAN_TICKET in calls[1]
     assert result["probe_http_status"] is None

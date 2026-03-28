@@ -23,9 +23,15 @@ ACTION_VALIDATE_SCAN_TICKET = f"{NS_SCA}/ValidateScanTicket"
 ACTION_CREATE_SCAN_JOB = f"{NS_SCA}/CreateScanJob"
 ACTION_RETRIEVE_IMAGE = f"{NS_SCA}/RetrieveImage"
 ACTION_GET_SCANNER_ELEMENTS = f"{NS_SCA}/GetScannerElements"
+ACTION_GET_JOB_STATUS = f"{NS_SCA}/GetJobStatus"
 WSA_ANONYMOUS = f"{NS_WSA}/role/anonymous"
-DEFAULT_DOCUMENT_DESCRIPTION = "1"
+# Inner text for <sca:DocumentNumber> inside <sca:DocumentDescription> (RetrieveImageRequest).
+DEFAULT_DOCUMENT_NUMBER = "1"
 INVALID_DESTINATION_TOKEN_FAULT = "ClientErrorInvalidDestinationToken"
+# WIA §7.3: poll GetJobStatus until terminal; initial spacing 200–500ms, backoff up to ~2s.
+GET_JOB_STATUS_INITIAL_INTERVAL_SEC = 0.25
+GET_JOB_STATUS_MAX_INTERVAL_SEC = 2.0
+GET_JOB_STATUS_MAX_WAIT_SEC = 120.0
 # SOAP text for GetScannerElements must be QName values (namespace prefix + local name).
 # See Microsoft "Name for RequestedElements element" WS-Scan reference.
 SCANNER_METADATA_ELEMENT_PREFIX = "sca"
@@ -72,6 +78,23 @@ JOB_ID_PATTERN = re.compile(
 )
 JOB_TOKEN_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?JobToken>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?JobToken>"
+)
+# Inner body only — avoid pairing JobId from the response with a JobToken from elsewhere in the envelope.
+CREATE_SCAN_JOB_RESPONSE_INNER_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?CreateScanJobResponse\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?CreateScanJobResponse>",
+    re.DOTALL | re.IGNORECASE,
+)
+GET_JOB_STATUS_RESPONSE_INNER_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?GetJobStatusResponse\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?GetJobStatusResponse>",
+    re.DOTALL | re.IGNORECASE,
+)
+JOB_STATE_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?JobState>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?JobState>",
+    re.IGNORECASE,
+)
+JOB_STATUS_IMAGES_TO_TRANSFER_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?ImagesToTransfer[^>]*>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?ImagesToTransfer>",
+    re.IGNORECASE,
 )
 VALIDATE_STATUS_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?ValidateScanTicketResponse[^>]*>.*?<"
@@ -352,11 +375,15 @@ def build_retrieve_image_request(
     to_url: str,
     job_id: str,
     job_token: str,
-    document_description: str = DEFAULT_DOCUMENT_DESCRIPTION,
+    document_number: str = DEFAULT_DOCUMENT_NUMBER,
     message_id: str | None = None,
     from_address: str | None = None,
 ) -> tuple[str, str]:
-    """Build WS-Scan RetrieveImage SOAP envelope."""
+    """Build WS-Scan RetrieveImage SOAP envelope.
+
+    ``DocumentDescription`` must wrap ``DocumentNumber`` (not a bare integer in
+    ``DocumentDescription``).
+    """
     mid = message_id or _new_message_id()
     from_line = f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
@@ -376,8 +403,45 @@ def build_retrieve_image_request(
     <sca:RetrieveImageRequest>
       <sca:JobId>{job_id}</sca:JobId>
       <sca:JobToken>{job_token}</sca:JobToken>
-      <sca:DocumentDescription>{document_description}</sca:DocumentDescription>
+      <sca:DocumentDescription>
+        <sca:DocumentNumber>{document_number}</sca:DocumentNumber>
+      </sca:DocumentDescription>
     </sca:RetrieveImageRequest>
+  </soap:Body>
+</soap:Envelope>
+"""
+    return mid, body
+
+
+def build_get_job_status_request(
+    *,
+    to_url: str,
+    job_id: str,
+    job_token: str,
+    message_id: str | None = None,
+    from_address: str | None = None,
+) -> tuple[str, str]:
+    """Build WS-Scan GetJobStatus SOAP envelope."""
+    mid = message_id or _new_message_id()
+    from_line = f"""    <wsa:From>
+      <wsa:Address>{from_address}</wsa:Address>
+    </wsa:From>
+""" if from_address else ""
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:sca="{NS_SCA}">
+  <soap:Header>
+    <wsa:Action>{ACTION_GET_JOB_STATUS}</wsa:Action>
+    <wsa:To>{to_url}</wsa:To>
+    <wsa:MessageID>{mid}</wsa:MessageID>
+{from_line}    <wsa:ReplyTo>
+      <wsa:Address>{WSA_ANONYMOUS}</wsa:Address>
+    </wsa:ReplyTo>
+  </soap:Header>
+  <soap:Body>
+    <sca:GetJobStatusRequest>
+      <sca:JobId>{job_id}</sca:JobId>
+      <sca:JobToken>{job_token}</sca:JobToken>
+    </sca:GetJobStatusRequest>
   </soap:Body>
 </soap:Envelope>
 """
@@ -538,12 +602,225 @@ def parse_validate_scan_ticket_response(text: str) -> dict[str, str | None]:
 
 def parse_create_scan_job_response(text: str) -> dict[str, str | None]:
     """Extract job id, job token, and SOAP fault details from CreateScanJobResponse."""
-    job_match = JOB_ID_PATTERN.search(text)
-    job_token_match = JOB_TOKEN_PATTERN.search(text)
     details = parse_soap_fault(text)
+    block_m = CREATE_SCAN_JOB_RESPONSE_INNER_PATTERN.search(text)
+    search_scope = block_m.group(1) if block_m else text
+    job_match = JOB_ID_PATTERN.search(search_scope)
+    job_token_match = JOB_TOKEN_PATTERN.search(search_scope)
     details["job_id"] = job_match.group(1).strip() if job_match else None
     details["job_token"] = job_token_match.group(1).strip() if job_token_match else None
     return details
+
+
+def parse_get_job_status_response(text: str) -> dict[str, str | None]:
+    """Extract JobState, ImagesToTransfer, and SOAP fault details from GetJobStatusResponse."""
+    details = parse_soap_fault(text)
+    block_m = GET_JOB_STATUS_RESPONSE_INNER_PATTERN.search(text)
+    scope = block_m.group(1) if block_m else text
+    jm = JOB_STATE_PATTERN.search(scope)
+    im = JOB_STATUS_IMAGES_TO_TRANSFER_PATTERN.search(scope)
+    details["job_state"] = jm.group(1).strip() if jm else None
+    details["images_to_transfer"] = im.group(1).strip() if im else None
+    return details
+
+
+def _job_ready_for_retrieve_from_status(
+    job_state: str | None,
+    images_to_transfer: str | None,
+) -> bool:
+    """Return True when GetJobStatus indicates the pull client may call RetrieveImage."""
+    s = (job_state or "").strip().lower()
+    if "cancel" in s or "abort" in s:
+        return False
+    if s in ("error", "failed", "faulted"):
+        return False
+    if s in ("completed", "ready", "completedwitherrors", "imageavailable"):
+        return True
+    if "complete" in s and "incomplete" not in s:
+        return True
+    try:
+        if int((images_to_transfer or "0").strip()) > 0:
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def _job_status_terminal_failure(job_state: str | None) -> bool:
+    """Return True when the scan job will not produce retrievable images."""
+    s = (job_state or "").strip().lower()
+    if not s:
+        return False
+    if "cancel" in s or "abort" in s:
+        return True
+    if s in ("error", "failed", "faulted"):
+        return True
+    return False
+
+
+def _get_job_status_fault_implies_unsupported(
+    http_status: int,
+    details: dict[str, str | None],
+) -> bool:
+    """Heuristic: scanner does not implement GetJobStatus; caller may fall back to RetrieveImage only."""
+    if http_status in (404, 405):
+        return True
+    if details.get("fault_code") and not details.get("job_state"):
+        sub = (details.get("fault_subcode") or "").lower()
+        reason = (details.get("fault_reason") or "").lower()
+        if "notsupported" in sub or "actionnotsupported" in sub:
+            return True
+        if "not supported" in reason or "unknown action" in reason:
+            return True
+    return False
+
+
+async def poll_get_job_status_until_ready(
+    *,
+    target_url: str,
+    job_id: str,
+    job_token: str,
+    from_address: str | None,
+    timeout_sec: float,
+    max_wait_sec: float = GET_JOB_STATUS_MAX_WAIT_SEC,
+    enabled: bool = True,
+) -> dict[str, object]:
+    """Poll GetJobStatus until the job is ready for RetrieveImage or timeout (WIA §7.3)."""
+    if not enabled:
+        return {
+            "skipped": True,
+            "polls": 0,
+            "last_job_state": None,
+            "timed_out": False,
+            "unsupported": False,
+            "terminal_failure": False,
+        }
+
+    deadline = time.monotonic() + max_wait_sec
+    await asyncio.sleep(GET_JOB_STATUS_INITIAL_INTERVAL_SEC)
+    interval = GET_JOB_STATUS_INITIAL_INTERVAL_SEC
+    polls = 0
+    last_state: str | None = None
+    last_images: str | None = None
+
+    while time.monotonic() <= deadline:
+        polls += 1
+        _mid, payload = build_get_job_status_request(
+            to_url=target_url,
+            job_id=job_id,
+            job_token=job_token,
+            from_address=from_address,
+        )
+        status, response_text = await _post_soap(
+            url=target_url,
+            payload=payload,
+            timeout_sec=timeout_sec,
+        )
+        details = parse_get_job_status_response(response_text)
+        last_state = details.get("job_state")
+        last_images = details.get("images_to_transfer")
+        if polls == 1 and _get_job_status_fault_implies_unsupported(status, details):
+            log.info(
+                "GetJobStatus not supported or failed; continuing without status polling",
+                extra={
+                    "target_url": target_url,
+                    "http_status": status,
+                    "fault_subcode": details.get("fault_subcode"),
+                },
+            )
+            return {
+                "skipped": True,
+                "polls": polls,
+                "last_job_state": last_state,
+                "timed_out": False,
+                "unsupported": True,
+                "terminal_failure": False,
+            }
+        if status < 200 or status >= 300:
+            log.warning(
+                "GetJobStatus returned non-success HTTP status",
+                extra={"target_url": target_url, "http_status": status},
+            )
+            if polls == 1:
+                return {
+                    "skipped": True,
+                    "polls": polls,
+                    "last_job_state": last_state,
+                    "timed_out": False,
+                    "unsupported": True,
+                    "terminal_failure": False,
+                }
+            break
+        if details.get("fault_code") and not details.get("job_state"):
+            log.warning(
+                "GetJobStatus SOAP fault without JobState",
+                extra={
+                    "target_url": target_url,
+                    "fault_subcode": details.get("fault_subcode"),
+                },
+            )
+            if polls == 1:
+                return {
+                    "skipped": True,
+                    "polls": polls,
+                    "last_job_state": last_state,
+                    "timed_out": False,
+                    "unsupported": False,
+                    "terminal_failure": False,
+                }
+            break
+        if _job_status_terminal_failure(last_state):
+            log.warning(
+                "GetJobStatus terminal job state",
+                extra={"target_url": target_url, "job_state": last_state},
+            )
+            return {
+                "skipped": False,
+                "polls": polls,
+                "last_job_state": last_state,
+                "timed_out": False,
+                "unsupported": False,
+                "terminal_failure": True,
+            }
+        if _job_ready_for_retrieve_from_status(last_state, last_images):
+            log.info(
+                "GetJobStatus indicates job ready for RetrieveImage",
+                extra={
+                    "target_url": target_url,
+                    "polls": polls,
+                    "job_state": last_state,
+                    "images_to_transfer": last_images,
+                },
+            )
+            return {
+                "skipped": False,
+                "polls": polls,
+                "last_job_state": last_state,
+                "timed_out": False,
+                "unsupported": False,
+                "terminal_failure": False,
+            }
+        await asyncio.sleep(interval)
+        interval = min(interval * 1.5, GET_JOB_STATUS_MAX_INTERVAL_SEC)
+
+    log.warning(
+        "GetJobStatus polling timed out before ready state; attempting RetrieveImage anyway",
+        extra={
+            "target_url": target_url,
+            "polls": polls,
+            "last_job_state": last_state,
+        },
+    )
+    return {
+        "skipped": False,
+        "polls": polls,
+        "last_job_state": last_state,
+        "timed_out": True,
+        "unsupported": False,
+        "terminal_failure": False,
+    }
+
+
 
 
 def parse_retrieve_image_response(text: str) -> dict[str, str | None]:
@@ -1071,8 +1348,10 @@ async def run_scan_available_chain(
     subscribe_destination_tokens: dict[str, str] | None = None,
     use_env_subscribe_destination_token_only: bool = False,
     retry_create_without_destination_token_on_invalid_token: bool = True,
+    poll_get_job_status_before_retrieve: bool = True,
+    get_job_status_max_wait_sec: float = GET_JOB_STATUS_MAX_WAIT_SEC,
 ) -> dict[str, str | None]:
-    """Execute ValidateScanTicket, CreateScanJob, then RetrieveImage."""
+    """Execute ValidateScanTicket, CreateScanJob, GetJobStatus polling, then RetrieveImage."""
     target_url = resolve_wdp_scan_url(scanner_xaddr)
     scanner_metadata: dict[str, str | None] = {
         "probe_http_status": None,
@@ -1214,6 +1493,7 @@ async def run_scan_available_chain(
     create_used_token = destination_token
     create_used_scan_identifier = scan_identifier
     create_fault_subcode = create_details.get("fault_subcode") or ""
+    create_retried_without_dest_token = False
     if (
         retry_create_without_destination_token_on_invalid_token
         and create_status >= 400
@@ -1249,6 +1529,7 @@ async def run_scan_available_chain(
         create_details = parse_create_scan_job_response(create_response_text)
         create_used_token = None
         create_used_scan_identifier = scan_identifier
+        create_retried_without_dest_token = True
 
     log.info(
         "CreateScanJob completed",
@@ -1321,6 +1602,40 @@ async def run_scan_available_chain(
             "retrieve_fault_code": None,
             "retrieve_fault_subcode": None,
             "retrieve_fault_reason": None,
+            "retrieve_elapsed_sec": None,
+        }
+
+    poll_result = await poll_get_job_status_until_ready(
+        target_url=target_url,
+        job_id=resolved_job_id,
+        job_token=create_job_token,
+        from_address=from_address,
+        timeout_sec=timeout_sec,
+        max_wait_sec=get_job_status_max_wait_sec,
+        enabled=poll_get_job_status_before_retrieve,
+    )
+    if poll_result.get("terminal_failure"):
+        return {
+            "target_url": target_url,
+            **scanner_metadata,
+            "validate_http_status": str(validate_status),
+            "validate_message_id": validate_message_id,
+            "validate_status": validate_details.get("status"),
+            "valid_ticket": validate_details.get("valid_ticket"),
+            "destination_token": destination_token,
+            "scan_identifier": scan_identifier,
+            "fault_code": create_details.get("fault_code"),
+            "fault_subcode": create_details.get("fault_subcode"),
+            "fault_reason": create_details.get("fault_reason"),
+            "create_http_status": str(create_status),
+            "create_message_id": create_message_id,
+            "job_id": resolved_job_id,
+            "retrieve_http_status": None,
+            "retrieve_message_id": None,
+            "retrieve_status": None,
+            "retrieve_fault_code": None,
+            "retrieve_fault_subcode": "wscn:JobTerminatedBeforeRetrieve",
+            "retrieve_fault_reason": "GetJobStatus reported a terminal job state before image transfer",
             "retrieve_elapsed_sec": None,
         }
 
