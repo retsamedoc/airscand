@@ -18,6 +18,7 @@ FILTER_DIALECT_DEVPROF_ACTION = "http://schemas.xmlsoap.org/ws/2006/02/devprof/A
 SCAN_AVAILABLE_EVENT_ACTION = f"{NS_SCA}/ScanAvailableEvent"
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
+ACTION_UNSUBSCRIBE = f"{NS_WSE}/Unsubscribe"
 ACTION_GET = f"{NS_WST}/Get"
 ACTION_VALIDATE_SCAN_TICKET = f"{NS_SCA}/ValidateScanTicket"
 ACTION_CREATE_SCAN_JOB = f"{NS_SCA}/CreateScanJob"
@@ -256,6 +257,39 @@ def build_subscribe_request(
 {destinations_xml}      </sca:ScanDestinations>
       <wse:Expires>PT1H</wse:Expires>
     </wse:Subscribe>
+  </soap:Body>
+</soap:Envelope>
+"""
+    return mid, body
+
+
+def build_unsubscribe_request(
+    *,
+    to_url: str,
+    subscription_identifier: str,
+    from_address: str | None = None,
+    message_id: str | None = None,
+) -> tuple[str, str]:
+    """Build WS-Eventing Unsubscribe SOAP envelope for the subscription manager endpoint."""
+    mid = message_id or _new_message_id()
+    from_line = f"""    <wsa:From>
+      <wsa:Address>{from_address}</wsa:Address>
+    </wsa:From>
+""" if from_address else ""
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}">
+  <soap:Header>
+    <wsa:Action>{ACTION_UNSUBSCRIBE}</wsa:Action>
+    <wsa:To>{to_url}</wsa:To>
+    <wsa:MessageID>{mid}</wsa:MessageID>
+{from_line}    <wsa:ReplyTo>
+      <wsa:Address>{WSA_ANONYMOUS}</wsa:Address>
+    </wsa:ReplyTo>
+  </soap:Header>
+  <soap:Body>
+    <wse:Unsubscribe>
+      <wse:Identifier>{subscription_identifier}</wse:Identifier>
+    </wse:Unsubscribe>
   </soap:Body>
 </soap:Envelope>
 """
@@ -523,6 +557,18 @@ def extract_subscribe_destination_token(text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def extract_subscription_manager_url(text: str) -> str | None:
+    """Extract ``wsa:Address`` inside ``wse:SubscriptionManager`` from SubscribeResponse."""
+    match = re.search(
+        r"<(?:[A-Za-z0-9_]+:)?SubscriptionManager\b[^>]*>"
+        r".*?"
+        r"<(?:[A-Za-z0-9_]+:)?Address>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?Address>",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
+
+
 def parse_subscribe_response(text: str) -> dict[str, str | None]:
     """Extract subscription details from SOAP response body."""
     identifier_match = IDENTIFIER_PATTERN.search(text)
@@ -534,6 +580,7 @@ def parse_subscribe_response(text: str) -> dict[str, str | None]:
         "expires": expires_match.group(1).strip() if expires_match else None,
         "subscribe_destination_token": subscribe_destination_token,
         "subscribe_destination_tokens": tokens_map if tokens_map else None,
+        "subscription_manager_url": extract_subscription_manager_url(text),
     }
 
 
@@ -1228,6 +1275,90 @@ async def register_with_scanner(
         log.warning(
             "Outbound WS-Eventing subscribe transport error",
             extra={"scanner_xaddr": scanner_xaddr, "error": str(exc)},
+        )
+        raise
+
+
+async def unsubscribe_from_scanner(
+    *,
+    manager_url: str,
+    subscription_id: str,
+    from_address: str | None = None,
+    timeout_sec: float = 5.0,
+) -> dict[str, str | None]:
+    """Send WS-Eventing Unsubscribe to the subscription manager endpoint."""
+    trimmed_url = (manager_url or "").strip()
+    trimmed_id = (subscription_id or "").strip()
+    if not trimmed_url or not trimmed_id:
+        log.info(
+            "Skipping WS-Eventing unsubscribe (missing manager URL or subscription id)",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "subscription_id": trimmed_id,
+            },
+        )
+        return {
+            "status": "skipped",
+            "message_id": None,
+            "fault_code": None,
+            "fault_subcode": None,
+            "fault_reason": None,
+        }
+    message_id, payload = build_unsubscribe_request(
+        to_url=trimmed_url,
+        subscription_identifier=trimmed_id,
+        from_address=from_address,
+    )
+    log.info(
+        "Outbound WS-Eventing unsubscribe sending",
+        extra={
+            "subscription_manager_url": trimmed_url,
+            "subscription_id": trimmed_id,
+            "message_id": message_id,
+            "timeout_sec": timeout_sec,
+        },
+    )
+    try:
+        status, response_text = await _post_soap(
+            url=trimmed_url,
+            payload=payload,
+            timeout_sec=timeout_sec,
+        )
+        details = parse_soap_fault(response_text)
+        details.update({"status": str(status), "message_id": message_id})
+        if status < 200 or status >= 300:
+            log.warning(
+                "Outbound WS-Eventing unsubscribe returned non-success status",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "status": status,
+                    "fault_subcode": details.get("fault_subcode"),
+                    "fault_reason": details.get("fault_reason"),
+                },
+            )
+        else:
+            log.info(
+                "Outbound WS-Eventing unsubscribe completed",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "subscription_id": trimmed_id,
+                    "status": status,
+                },
+            )
+        return details
+    except asyncio.TimeoutError:
+        log.warning(
+            "Outbound WS-Eventing unsubscribe timed out",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "timeout_sec": timeout_sec,
+            },
+        )
+        raise
+    except ClientError as exc:
+        log.warning(
+            "Outbound WS-Eventing unsubscribe transport error",
+            extra={"subscription_manager_url": trimmed_url, "error": str(exc)},
         )
         raise
 

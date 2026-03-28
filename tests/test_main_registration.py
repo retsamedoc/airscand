@@ -26,6 +26,7 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         eventing_notify_to_url="",
         eventing_preflight_get=True,
         scanner_subscribe_to_url="",
+        scanner_eventing_subscribe_manager_url="",
         scanner_eventing_subscription_id="",
         scanner_subscribe_destination_tokens={},
         use_env_subscribe_destination_token_only=False,
@@ -85,6 +86,7 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
     assert attempts["preflight"] == 1
     assert attempts["register"] == 1
     assert cfg.scanner_eventing_subscription_id == "sub-1"
+    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN"
     assert cfg.scanner_subscribe_destination_token == "dest-from-subscribe"
     assert cfg.scanner_subscribe_destination_tokens == {"Scan": "dest-from-subscribe"}
     assert cfg.use_env_subscribe_destination_token_only is False
@@ -124,6 +126,7 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         eventing_notify_to_url="",
         eventing_preflight_get=True,
         scanner_subscribe_to_url="",
+        scanner_eventing_subscribe_manager_url="",
         scanner_eventing_subscription_id="",
         scanner_subscribe_destination_token="",
         scanner_subscribe_destination_tokens={},
@@ -171,6 +174,7 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
     await _eventing_registration_loop(cfg)
     assert calls[0] == "http://192.168.1.60:80/WDP/SCAN"
     assert cfg.scanner_eventing_subscription_id == "sub-1"
+    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN"
     assert cfg.scanner_subscribe_destination_token == ""
     assert cfg.scanner_subscribe_destination_tokens == {}
     assert cfg.use_env_subscribe_destination_token_only is False

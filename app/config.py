@@ -19,6 +19,8 @@ class Config:
     advertise_addr: str = ""
     uuid: str = ""
     hello_interval_sec: float = 60.0
+    # Last WS-Discovery Hello AppSequence MessageNumber sent (for Bye sequencing).
+    discovery_last_message_number: int = -1
     metadata_version: int = 1
     app_sequence_instance_id: int = 1
     app_sequence_sequence_id: str = ""
@@ -36,6 +38,8 @@ class Config:
     log_level: str = "INFO"
     log_json: bool = False
     scanner_subscribe_to_url: str = ""
+    # Effective subscribe POST URL; used for outbound Unsubscribe when SubscriptionManager is absent.
+    scanner_eventing_subscribe_manager_url: str = ""
     eventing_preflight_get: bool = True
     eventing_notify_to_url: str = ""
     # When CreateScanJob fails with ClientErrorInvalidDestinationToken, retry once without DestinationToken.

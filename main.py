@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import signal
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -9,7 +10,11 @@ from app.config import Config
 from app.discovery import discover_scanner_xaddr, start_discovery
 from app.http_server import start_http_server
 from app.logging import setup_logging
-from app.ws_eventing_client import preflight_get_scanner_capabilities, register_with_scanner
+from app.ws_eventing_client import (
+    preflight_get_scanner_capabilities,
+    register_with_scanner,
+    unsubscribe_from_scanner,
+)
 
 __all__ = ["main"]
 
@@ -73,6 +78,10 @@ async def _eventing_registration_loop(config: Config) -> None:
                 status = int(result.get("status") or "0")
                 if result.get("identifier") and (status == 0 or 200 <= status < 300):
                     sub_id = str(result.get("identifier") or "").strip()
+                    mgr_url = (result.get("subscription_manager_url") or "").strip()
+                    if not mgr_url:
+                        mgr_url = subscribe_to_url
+                    setattr(config, "scanner_eventing_subscribe_manager_url", mgr_url)
                     setattr(config, "scanner_eventing_subscription_id", sub_id)
                     dest_tok = str(result.get("subscribe_destination_token") or "").strip()
                     setattr(config, "scanner_subscribe_destination_token", dest_tok)
@@ -91,6 +100,7 @@ async def _eventing_registration_loop(config: Config) -> None:
                         extra={
                             "scanner_xaddr": scanner_xaddr,
                             "subscribe_to_url": subscribe_to_url,
+                            "subscription_manager_url": mgr_url,
                             "subscription_id": result.get("identifier"),
                             "subscribe_destination_token": result.get("subscribe_destination_token"),
                             "subscribe_destination_tokens_count": len(
@@ -113,16 +123,73 @@ async def _eventing_registration_loop(config: Config) -> None:
         await asyncio.sleep(backoff_sec)
         backoff_sec = min(backoff_sec * 2, max_backoff_sec)
 
+
+async def _shutdown_services(
+    config: Config,
+    tasks: list[asyncio.Task[None]],
+) -> None:
+    """Unsubscribe from WS-Eventing, then cancel long-lived tasks (discovery sends Bye in ``finally``)."""
+    client_from_address = f"urn:uuid:{config.uuid}"
+    mgr = str(getattr(config, "scanner_eventing_subscribe_manager_url", "") or "").strip()
+    sub_id = str(getattr(config, "scanner_eventing_subscription_id", "") or "").strip()
+    try:
+        await unsubscribe_from_scanner(
+            manager_url=mgr,
+            subscription_id=sub_id,
+            from_address=client_from_address,
+        )
+    except Exception:
+        log.exception("WS-Eventing unsubscribe during shutdown failed")
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def main() -> None:
     """Initialize configuration and run all long-lived service tasks."""
     config = Config()
     setup_logging(config.log_level, log_json=config.log_json)
 
-    await asyncio.gather(
-        start_discovery(config),
-        start_http_server(config),
-        _eventing_registration_loop(config),
-    )
+    loop = asyncio.get_running_loop()
+    tasks = [
+        asyncio.create_task(start_discovery(config)),
+        asyncio.create_task(start_http_server(config)),
+        asyncio.create_task(_eventing_registration_loop(config)),
+    ]
+    shutdown_task: asyncio.Task[None] | None = None
+    shutdown_started = False
+
+    async def request_shutdown() -> None:
+        nonlocal shutdown_started
+        if shutdown_started:
+            return
+        shutdown_started = True
+        log.info("Shutdown requested; cleaning up")
+        await _shutdown_services(config, tasks)
+
+    def on_signal() -> None:
+        nonlocal shutdown_task
+        if shutdown_task is not None and not shutdown_task.done():
+            return
+        shutdown_task = asyncio.create_task(request_shutdown())
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, on_signal)
+        except NotImplementedError:
+            break
+
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, ValueError, RuntimeError):
+                pass
+        if shutdown_task is not None:
+            await shutdown_task
+
 
 if __name__ == "__main__":
     try:

@@ -14,6 +14,7 @@ from humanfriendly.terminal import ansi_wrap
 LOG_INLINE_CONTEXT_KEYS: tuple[str, ...] = (
     "scanner_xaddr",
     "subscribe_to_url",
+    "subscription_manager_url",
     "get_to_url",
     "subscription_id",
     "subscribe_destination_token",

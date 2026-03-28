@@ -23,10 +23,12 @@ from app.ws_eventing_client import (
     build_get_scanner_elements_request,
     build_retrieve_image_request,
     build_subscribe_request,
+    build_unsubscribe_request,
     build_validate_scan_ticket_request,
     extract_client_context,
     extract_event_subscription_identifier,
     extract_soap_envelope_message_id,
+    extract_subscription_manager_url,
     get_scanner_elements_metadata,
     parse_create_scan_job_response,
     parse_get_job_status_response,
@@ -42,6 +44,7 @@ from app.ws_eventing_client import (
     resolve_subscribe_destination_token_for_chain,
     resolve_wdp_scan_url,
     run_scan_available_chain,
+    unsubscribe_from_scanner,
 )
 
 _FAKE_GET_JOB_STATUS_COMPLETED_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -273,6 +276,7 @@ def test_parse_subscribe_response_identifier_and_expires() -> None:
     assert parsed["identifier"] == "4bda57f5-1d9e-4c3d-871b-2e9ab12c8fd4"
     assert parsed["expires"] == "PT1H"
     assert parsed["subscribe_destination_token"] is None
+    assert parsed["subscription_manager_url"] is None
 
 
 def test_parse_subscribe_response_extracts_destination_response_token() -> None:
@@ -297,6 +301,7 @@ def test_parse_subscribe_response_extracts_destination_response_token() -> None:
     parsed = parse_subscribe_response(xml)
     assert parsed["subscribe_destination_token"] == "Client3478"
     assert parsed["subscribe_destination_tokens"] == {"App1ScanID2345": "Client3478"}
+    assert parsed["subscription_manager_url"] is None
 
 
 def test_parse_subscribe_response_multiple_destination_responses() -> None:
@@ -325,6 +330,55 @@ def test_parse_subscribe_response_multiple_destination_responses() -> None:
     parsed = parse_subscribe_response(xml)
     assert parsed["subscribe_destination_tokens"] == {"Scan": "tok-scan", "ScanToEmail": "tok-email"}
     assert parsed["subscribe_destination_token"] == "tok-scan"
+    assert parsed["subscription_manager_url"] is None
+
+
+def test_parse_subscribe_response_extracts_subscription_manager_url() -> None:
+    """SubscribeResponse may include SubscriptionManager EPR for lifecycle operations."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing"
+  xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+  xmlns:wsman="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">
+  <soap:Body>
+    <wse:SubscribeResponse>
+      <wsman:Identifier>sub-id-1</wsman:Identifier>
+      <wse:SubscriptionManager>
+        <wsa:Address>http://192.168.1.60:80/WDP/SCAN/submgr</wsa:Address>
+      </wse:SubscriptionManager>
+      <wse:Expires>PT1H</wse:Expires>
+    </wse:SubscribeResponse>
+  </soap:Body>
+</soap:Envelope>
+"""
+    assert extract_subscription_manager_url(xml) == "http://192.168.1.60:80/WDP/SCAN/submgr"
+    parsed = parse_subscribe_response(xml)
+    assert parsed["subscription_manager_url"] == "http://192.168.1.60:80/WDP/SCAN/submgr"
+
+
+def test_build_unsubscribe_request_includes_identifier_and_action() -> None:
+    """Unsubscribe envelope targets manager URL and carries subscription identifier."""
+    mid, body = build_unsubscribe_request(
+        to_url="http://192.168.1.60:80/WDP/SCAN",
+        subscription_identifier="urn:uuid:sub-1",
+        from_address="urn:uuid:11111111-2222-3333-4444-555555555555",
+    )
+    assert "Unsubscribe" in body
+    assert mid in body
+    assert "urn:uuid:sub-1" in body
+    assert "http://192.168.1.60:80/WDP/SCAN" in body
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_from_scanner_skips_when_missing_url_or_id() -> None:
+    """Unsubscribe is skipped when manager URL or subscription id is empty."""
+    result = await unsubscribe_from_scanner(manager_url="", subscription_id="sub-1")
+    assert result.get("status") == "skipped"
+    result2 = await unsubscribe_from_scanner(
+        manager_url="http://192.168.1.1/wdp",
+        subscription_id="",
+    )
+    assert result2.get("status") == "skipped"
 
 
 def test_extract_client_context_reads_scan_available_body() -> None:

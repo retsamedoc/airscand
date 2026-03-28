@@ -19,6 +19,7 @@ from app.discovery import (
     _recent_outbound_probe_ids,
     _recv_discovery_match,
     _remember_outbound_probe_id,
+    build_bye,
     build_hello,
     build_probe,
     build_probe_match,
@@ -111,6 +112,17 @@ def test_build_hello_has_computer_types_and_app_sequence() -> None:
     assert 'InstanceId="4"' in xml
     assert "urn:uuid:c22d45fe-bdf5-4925-b4e1-30da581fd709" in xml
     assert 'MessageNumber="1"' in xml
+
+
+def test_build_bye_has_epr_app_sequence_and_bye_action() -> None:
+    """Bye payload mirrors Hello EPR and AppSequence with Bye action."""
+    cfg = make_config()
+    xml = build_bye(cfg, message_number=2)
+    assert ACTION_BYE in xml
+    assert "wsd:Bye" in xml
+    assert "urn:uuid:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in xml
+    assert 'MessageNumber="2"' in xml
+    assert 'InstanceId="4"' in xml
 
 
 def test_extract_action_and_resolve_epr() -> None:

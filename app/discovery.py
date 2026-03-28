@@ -178,6 +178,32 @@ def build_hello(config: Config, message_number: int) -> str:
 """
 
 
+def build_bye(config: Config, message_number: int) -> str:
+    """Build a WS-Discovery Bye message (departure announcement)."""
+    msg_id = _new_message_id()
+    sequence_id = getattr(config, "app_sequence_sequence_id", "") or our_epr(config)
+    instance_id = getattr(config, "app_sequence_instance_id", 1)
+    meta = getattr(config, "metadata_version", 1)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wsd="{NS_WSD}" xmlns:wsdp="{NS_WSDP}" xmlns:pub="{NS_PUB}">
+  <soap:Header>
+    <wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
+    <wsa:Action>{ACTION_BYE}</wsa:Action>
+    <wsa:MessageID>{msg_id}</wsa:MessageID>
+    <wsd:AppSequence InstanceId="{instance_id}" SequenceId="{sequence_id}" MessageNumber="{message_number}"/>
+  </soap:Header>
+  <soap:Body>
+    <wsd:Bye>
+      <wsa:EndpointReference>
+        <wsa:Address>{our_epr(config)}</wsa:Address>
+      </wsa:EndpointReference>
+      <wsd:MetadataVersion>{meta}</wsd:MetadataVersion>
+    </wsd:Bye>
+  </soap:Body>
+</soap:Envelope>
+"""
+
+
 def _probe_match_types() -> str:
     return "wsdp:Device pub:Computer wscn:ScanDeviceType"
 
@@ -493,8 +519,20 @@ async def _send_hello(sock: socket.socket, config: Config, message_number: int) 
     loop = asyncio.get_running_loop()
     body = build_hello(config, message_number).encode("utf-8")
     await loop.sock_sendto(sock, body, (MULTICAST_GROUP, PORT))
+    setattr(config, "discovery_last_message_number", message_number)
     log.info(
         "Hello multicast sent",
+        extra={"n": message_number, "xaddr": build_xaddr(config)},
+    )
+
+
+async def _send_bye(sock: socket.socket, config: Config, message_number: int) -> None:
+    """Send one multicast Bye frame."""
+    loop = asyncio.get_running_loop()
+    body = build_bye(config, message_number).encode("utf-8")
+    await loop.sock_sendto(sock, body, (MULTICAST_GROUP, PORT))
+    log.info(
+        "Bye multicast sent",
         extra={"n": message_number, "xaddr": build_xaddr(config)},
     )
 
@@ -541,4 +579,9 @@ async def start_discovery(config: Config) -> None:
             await hello_task
         except asyncio.CancelledError:
             pass
+        bye_n = int(getattr(config, "discovery_last_message_number", -1)) + 1
+        try:
+            await _send_bye(sock, config, bye_n)
+        except Exception:
+            log.exception("WS-Discovery Bye send failed during shutdown")
         sock.close()
