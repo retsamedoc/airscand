@@ -1345,6 +1345,7 @@ async def run_scan_available_chain(
             "http_status": retrieve_status,
             "message_id": retrieve_message_id,
             "job_id": resolved_job_id,
+            "job_token": create_job_token,
             "fault_subcode": retrieve_details.get("fault_subcode"),
             "retrieve_elapsed_sec": round(retrieve_elapsed_sec, 6),
             "within_retrieve_window_60s": retrieve_elapsed_sec <= 60.0,
@@ -1356,6 +1357,7 @@ async def run_scan_available_chain(
             extra={
                 "target_url": target_url,
                 "job_id": resolved_job_id,
+                "job_token": create_job_token,
                 "retrieve_elapsed_sec": round(retrieve_elapsed_sec, 6),
             },
         )
@@ -1365,6 +1367,7 @@ async def run_scan_available_chain(
             extra={
                 "target_url": target_url,
                 "job_id": resolved_job_id,
+                "job_token": create_job_token,
                 "fault_subcode": retrieve_fault_subcode,
             },
         )
@@ -1374,6 +1377,7 @@ async def run_scan_available_chain(
             extra={
                 "target_url": target_url,
                 "job_id": resolved_job_id,
+                "job_token": create_job_token,
                 "fault_subcode": retrieve_fault_subcode,
             },
         )
