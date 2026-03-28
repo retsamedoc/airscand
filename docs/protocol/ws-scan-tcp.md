@@ -21,7 +21,7 @@ Use this file to paste the WS-Scan-related HTTP/TCP exchange from a capture betw
 
 When implementing the PC side, this repo intends to expose (configurable):
 
-- `POST {WSD_ENDPOINT}` (default `/wsd`) — minimal SOAP response for bring-up.
+- `POST {WSD_ENDPOINT}` (default `/wsd`) — WS-Scan / event-sink SOAP handling; **`ScanAvailableEvent`** is acknowledged with a SOAP 1.2 body (`Content-Type: application/soap+xml`, `wsa:RelatesTo`), not a bare HTTP `200` with `text/plain` alone.
 - `POST {WSD_SCAN_PATH}` (default `/scan`) — receive uploaded scan bytes and save to disk.
 
 Defaults: `WSD_PORT=5357`, `WSD_HOST=0.0.0.0`, `WSD_ADVERTISE_ADDR` for WS-Discovery advertisement when **this** machine is the discovered “scanner service” (reverse scenario vs Epson-led discovery).
@@ -104,7 +104,7 @@ Observed behavior in bring-up:
 
 When `airscand` receives `wsa:Action` `.../ScanAvailableEvent` on `/wsd`, it now performs:
 
-1. Immediate generic HTTP `200 OK` response to the inbound event
+1. Immediate HTTP `200` with a SOAP 1.2 **ScanAvailableEvent** acknowledgment (`Content-Type: application/soap+xml`, `wsa:RelatesTo` matching the notification)
 2. Outbound `GetScannerElements` to scanner `http://<scanner>/WDP/SCAN` requesting:
    - `ScannerDescription`
    - `DefaultScanTicket`
@@ -114,9 +114,10 @@ When `airscand` receives `wsa:Action` `.../ScanAvailableEvent` on `/wsd`, it now
 4. Outbound `ValidateScanTicket` to scanner `http://<scanner>/WDP/SCAN`
 5. Wait for `ValidateScanTicketResponse`
 6. Outbound `CreateScanJob` to scanner `http://<scanner>/WDP/SCAN` only after successful validation
+7. Outbound `RetrieveImage` using **JobId** and **JobToken** from `CreateScanJobResponse`
 
 Notes:
 
-- Initial `ValidateScanTicketRequest` payload is a fixed Win10-like template, not dynamically derived from event payload fields yet.
+- `ValidateScanTicketRequest` uses inner **ScanTicket** from **DefaultScanTicket** when the metadata probe succeeds; otherwise a Win10-like template.
 - Outbound scanner target is normalized to `/WDP/SCAN` from discovered/configured scanner endpoint.
-- `GetScannerElements` results are currently captured for observability/logging and do not yet alter ticket/job request content.
+- `GetScannerElements` blocks are stored for observability; **ScannerConfiguration** may adjust **InputSource** in the resolved ticket.

@@ -17,12 +17,13 @@
 
 - **Phase 3 (WS-Scan basics)** is complete:
   - SOAP endpoint now handles WS-Scan `CreateScanJob` and `ScanAvailableEvent`
-  - `ScanAvailableEvent` is acknowledged immediately with generic HTTP `200 OK`
+  - `ScanAvailableEvent` is acknowledged with a SOAP 1.2 envelope (`Content-Type: application/soap+xml`), `wsa:RelatesTo` matching the notification `wsa:MessageID`, and synthetic `ScanAvailableEventResponse` action (HTTP 200)
   - `ScanAvailableEvent` asynchronously triggers outbound `ValidateScanTicket`, outbound `CreateScanJob`, and outbound `RetrieveImage` against scanner `/WDP/SCAN`
-  - Initial `ValidateScanTicketRequest` uses a fixed Win10-like scan ticket template
-  - `RetrieveImageRequest` currently maps `JobId` from `CreateScanJobResponse`, `JobToken` from resolved destination token, and `DocumentDescription` to default `1`
-  - Inbound `CreateScanJob` requests return minimal `CreateScanJobResponse` payload with `sca:JobId`
+  - `ValidateScanTicketRequest` uses inner **ScanTicket** from **DefaultScanTicket** when the best-effort `GetScannerElements` probe succeeds; otherwise a Win10-like scan ticket template
+  - `RetrieveImageRequest` maps `JobId` and `JobToken` from `CreateScanJobResponse`, and `DocumentDescription` to default `1` (destination tokens apply to **CreateScanJob** `DestinationToken` selection, not **RetrieveImage**)
+  - Inbound `CreateScanJob` requests return `CreateScanJobResponse` with **JobId**, **JobToken**, **ImageInformation**, and **DocumentFinalParameters**
   - Preserves WS-Addressing request/response correlation via `wsa:RelatesTo`
+  - **Epson WF-3640** validated end-to-end on the device-initiated chain (**ScanAvailable** through **RetrieveImage**)
   - Completion date: **2026-03-26**
 
 - **Phase 4 (Image capture core goal)** is complete:

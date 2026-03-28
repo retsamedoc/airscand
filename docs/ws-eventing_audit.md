@@ -9,7 +9,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 | Role | Where implemented | Notes |
 |------|-------------------|--------|
 | Subscriber | `register_with_scanner`, `_eventing_registration_loop` | Sends `Subscribe` only; no `Renew` / `GetStatus` / `Unsubscribe` client. |
-| Event sink | `handle_wsd` (`ScanAvailableEvent`) | Receives notifications; responds with plain HTTP body, not a SOAP notification handler per strict reading. |
+| Event sink | `handle_wsd` (`ScanAvailableEvent`) | Receives notifications; for **ScanAvailableEvent** responds with SOAP 1.2 (`application/soap+xml`), `wsa:RelatesTo`, and [`build_scan_available_event_ack_response`](../app/ws_scan.py) (synthetic `ScanAvailableEventResponse` action). Unsupported actions still use plain `text/plain` “OK” in the default branch (§9). |
 | Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | Returns SOAP-shaped responses without subscription state or faults. |
 
 ---
@@ -20,7 +20,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 |----------|------:|--------|
 | Critical | 3 | No subscription state; **lease renewal** absent on client; **`SubscriptionEnd`** missing |
 | High | 5 | **SOAP faults** not generated; **Subscribe** not validated; **delivery mode** / **filter** handling; **Subscription Manager EPR** not used after `Subscribe` |
-| Medium | 6 | **Non-SOAP fallbacks**; **notification** acknowledgment shape; **regex** parsing; **`GetStatus`** semantics; optional **EndTo** / **Filter** vs spec minimal profile |
+| Medium | 4 | **Non-SOAP fallbacks** (#9); **regex** parsing (#11); **`GetStatus`** semantics (#12); **EndTo** / **Filter** (#13) _(notification ack for `ScanAvailableEvent`: [resolved §10](#10-scanavailableevent-notification-ack--resolved))_ |
 | Low | 4 | Security SHOULDs; **WSDL/metadata**; test coverage gaps; **SOAP 1.1** vs **1.2** only |
 
 ---
@@ -137,15 +137,13 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ---
 
-### 10. `ScanAvailableEvent` handler responds with plain text, not SOAP (violates §4.1–4.2 spirit)
+### 10. `ScanAvailableEvent` notification ack — **Resolved** {#10-scanavailableevent-notification-ack--resolved}
 
-**Spec:** Notifications SHOULD be one-way SOAP messages to the event sink in Push mode.
+**Spec:** Notifications SHOULD be one-way SOAP messages to the event sink in Push mode; the sink HTTP response is implementation-defined for many stacks.
 
-**Code:** [`handle_wsd`](../app/ws_scan.py) returns `web.Response(text="OK", content_type="text/plain")` after scheduling async work.
+**Implementation:** [`handle_wsd`](../app/ws_scan.py) returns [`build_scan_available_event_ack_response`](../app/ws_scan.py): SOAP 1.2, `Content-Type: application/soap+xml`, `wsa:RelatesTo` matching the notification `wsa:MessageID`, synthetic `ScanAvailableEventResponse` action, empty `soap:Body`. Matches [ws-scan_audit.md](ws-scan_audit.md) Medium #7. Device-driven coverage: Epson WF-3640 on the ScanAvailable → CreateScanJob chain.
 
-**Risk:** Some devices may expect an empty SOAP envelope or a specific HTTP/SOAP pattern; `text/plain` may be tolerated but is not spec-aligned.
-
-**Recommendation:** If traces show failures, respond with minimal SOAP 200 or documented HTTP accept pattern; add device-driven tests.
+**Residual:** Other inbound SOAP actions without a dedicated branch still use `text/plain` “OK” (§9).
 
 ---
 
@@ -234,6 +232,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 | Inbound action dispatch for Renew / GetStatus / Unsubscribe (response shapes only) | [`handle_wsd`](../app/ws_scan.py) |
 | Client fault extraction for retry policy | [`parse_soap_fault`](../app/ws_eventing_client.py); `_eventing_registration_loop` in [`main.py`](../main.py) retries via rediscovery/backoff only (no alternate `subscribe_to_url` loop on `wsa:DestinationUnreachable` in the reviewed revision) |
 | Store subscription id after success | `scanner_eventing_subscription_id` in [`main.py`](../main.py), [`app/config.py`](../app/config.py) |
+| `ScanAvailableEvent` sink HTTP response (SOAP 1.2 ack) | [`build_scan_available_event_ack_response`](../app/ws_scan.py), [`handle_wsd`](../app/ws_scan.py) |
 
 ---
 

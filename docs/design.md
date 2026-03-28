@@ -115,9 +115,8 @@ Responsibilities
 
 |Action	|Purpose|
 |--|--|
-|CreateScanJob	| Initiate scan job| 
-|Behavior | Return minimal valid SOAP responses| 
-Provide JobId |Direct printer to scan upload endpoint|
+|CreateScanJob	| Respond to printer-initiated scan job with **CreateScanJobResponse** (**JobId**, **JobToken**, **ImageInformation**, **DocumentFinalParameters**)|
+|ScanAvailableEvent	| Acknowledge with SOAP 1.2 **ScanAvailableEventResponse**; schedule outbound scan chain|
 
 
 ### 5.5 Scan Receiver (scan_receiver.py)
@@ -180,20 +179,20 @@ WSD_UUID	|(generated)	|Persistent identity
 ### 6.2 Scan Initiation
 - User presses “Scan to Computer”
 - Printer sends `ScanAvailableEvent` to `/wsd`
-- Daemon responds with generic HTTP `200 OK`
+- Daemon responds with HTTP 200 and a SOAP 1.2 envelope (`application/soap+xml`) correlating via `wsa:RelatesTo` to the notification `wsa:MessageID` (**ScanAvailableEventResponse**)
 - Daemon submits outbound `GetScannerElements` to scanner `/WDP/SCAN` as best-effort metadata probe for:
   - `ScannerDescription`
   - `DefaultScanTicket`
   - `ScannerConfiguration`
   - `ScannerStatus`
 - Metadata probe failures/timeouts are logged but do not stop the chain
-- Daemon submits outbound `ValidateScanTicket` to scanner `/WDP/SCAN` using a Win10-like fixed scan ticket template
+- Daemon submits outbound `ValidateScanTicket` to scanner `/WDP/SCAN` using **ScanTicket** from **`resolve_scan_ticket_xml_for_chain`** (inner ticket from **DefaultScanTicket** when the metadata probe succeeded; otherwise a Win10-like template)
 - Daemon waits for `ValidateScanTicketResponse`
-- If validation succeeds, daemon submits outbound `CreateScanJob` to scanner `/WDP/SCAN`
-- If create succeeds with `JobId`, daemon submits outbound `RetrieveImage` to scanner `/WDP/SCAN`
-- `RetrieveImageRequest` fields are currently mapped as:
+- If validation succeeds, daemon submits outbound `CreateScanJob` to scanner `/WDP/SCAN` (with **DestinationToken** / **ScanIdentifier** as resolved from subscribe and the event)
+- If **CreateScanJob** succeeds with **JobId** and **JobToken**, daemon submits outbound `RetrieveImage` to scanner `/WDP/SCAN`
+- `RetrieveImageRequest` fields are mapped as:
   - `JobId`: `CreateScanJobResponse/JobId`
-  - `JobToken`: resolved destination token (`ValidateScanTicketResponse/DestinationToken` or event token fallback)
+  - `JobToken`: `CreateScanJobResponse/JobToken` only
   - `DocumentDescription`: fixed default value `1`
 - `GetScannerElements` payload blocks are currently stored in scan-chain results and structured logs for diagnostics and future ticket synthesis.
 

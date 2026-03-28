@@ -1,0 +1,36 @@
+---
+Description: Conventional Commits for Git commit messages
+alwaysApply: true
+---
+
+## Commit messages
+
+All **commit subject lines** (first line of the message) must follow **[Conventional Commits](https://www.conventionalcommits.org/)**.
+
+### Subject format
+
+```
+<type>[(optional scope)][!]: <description>
+```
+
+- **type**: lowercase identifier (`feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`, etc.). Hyphens allowed inside the type when needed (e.g. custom tooling).
+- **scope**: optional, in parentheses, e.g. `(ws-scan)`, `(discovery)`.
+- **!**: optional; marks a breaking change when placed before the colon.
+- **description**: short, imperative mood (“add” not “added”), no trailing period on the subject.
+
+### Examples
+
+```text
+feat(discovery): advertise scanner over WSD
+fix(ws-scan): close TCP connection on cancel
+docs: update protocol notes for WS-Scan
+chore!: drop Python 3.10 support
+```
+
+### Do not rewrite
+
+Leave **merge** commits (`Merge branch …`), **revert** subjects (`Revert "…"`), and **`fixup!` / `squash!`** lines as Git produces them.
+
+### Repo tooling
+
+Validation lives in `.githooks/commit-msg` when `git config core.hooksPath .githooks` is set; see `README.md`.

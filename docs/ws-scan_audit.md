@@ -4,6 +4,10 @@ This report compares the current `airscand` implementation (primarily [`app/ws_e
 
 **Scope:** SOAP actions and bodies for outbound client behavior, inbound handler behavior, and image receive path. WS-Eventing and WS-Transfer are touched only where they interact with WS-Scan.
 
+### Verified interop
+
+**Epson WorkForce WF-3640:** The device-initiated path (**ScanAvailableEvent** on the daemon, then outbound **ValidateScanTicket**, **CreateScanJob**, and **RetrieveImage** toward the scanner `/WDP/SCAN` endpoint) is exercised successfully in practice. Implementation: [`run_scan_available_chain`](../app/ws_eventing_client.py), inbound ack [`build_scan_available_event_ack_response`](../app/ws_scan.py).
+
 ---
 
 ## Summary table (by severity)
