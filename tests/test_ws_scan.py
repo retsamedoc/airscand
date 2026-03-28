@@ -15,12 +15,15 @@ from app.ws_scan import (
     ACTION_RENEW,
     ACTION_SCAN_AVAILABLE_EVENT,
     ACTION_SCAN_AVAILABLE_EVENT_RESPONSE,
+    ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE,
     ACTION_SUBSCRIBE,
     ACTION_UNSUBSCRIBE,
+    SCANNER_STATUS_SUMMARY_EVENT_ACTION,
     _log_chain_result,
     build_create_scan_job_response,
     build_eventing_subscribe_response,
     build_scan_available_event_ack_response,
+    build_scanner_status_summary_event_ack_response,
     extract_action,
     extract_message_id,
     handle_wsd,
@@ -29,6 +32,24 @@ from app.ws_scan import (
 if TYPE_CHECKING:
     from _pytest.logging import LogCaptureFixture
     from _pytest.monkeypatch import MonkeyPatch
+
+
+def _scanner_status_summary_envelope(message_id: str = "urn:uuid:st-1") -> bytes:
+    """SOAP notification for ScannerStatusSummaryEvent."""
+    return f"""<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Header>
+    <wsa:Action>{SCANNER_STATUS_SUMMARY_EVENT_ACTION}</wsa:Action>
+    <wsa:MessageID>{message_id}</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>
+    <sca:ScannerStatusSummaryEvent>
+      <sca:ScannerStatus><sca:State>Idle</sca:State></sca:ScannerStatus>
+    </sca:ScannerStatusSummaryEvent>
+  </soap:Body>
+</soap:Envelope>""".encode()
 
 
 def _soap_envelope(action: str, message_id: str = "urn:uuid:req-1") -> bytes:
@@ -49,6 +70,7 @@ def _soap_envelope(action: str, message_id: str = "urn:uuid:req-1") -> bytes:
 
 def _request(payload: bytes) -> object:
     """Create a dummy aiohttp-like request for handler tests."""
+
     class DummyRequest:
         content_type = "application/soap+xml"
 
@@ -66,6 +88,8 @@ def _request(payload: bytes) -> object:
                     scanner_subscribe_destination_tokens={"Scan": "Client3478"},
                     use_env_subscribe_destination_token_only=False,
                     create_scan_job_retry_invalid_destination_token=True,
+                    wait_scanner_idle_after_retrieve=True,
+                    scanner_idle_wait_sec=60.0,
                 )
             }
 
@@ -119,6 +143,14 @@ def test_scan_available_event_ack_response_is_soap_with_relates_to() -> None:
     assert "<wsa:RelatesTo>urn:uuid:notify-1</wsa:RelatesTo>" in xml
 
 
+def test_scanner_status_summary_event_ack_response_is_soap_with_relates_to() -> None:
+    """ScannerStatusSummaryEvent HTTP response uses SOAP envelope and correlates via RelatesTo."""
+    xml = build_scanner_status_summary_event_ack_response("urn:uuid:status-1")
+    assert "<soap:Envelope" in xml
+    assert f"<wsa:Action>{ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE}</wsa:Action>" in xml
+    assert "<wsa:RelatesTo>urn:uuid:status-1</wsa:RelatesTo>" in xml
+
+
 def test_create_scan_job_response_generates_token_when_omitted() -> None:
     """CreateScanJob response supplies JobToken when caller does not pass one."""
     xml = build_create_scan_job_response("urn:uuid:req-3", job_id="job-789")
@@ -144,6 +176,19 @@ async def test_handle_wsd_eventing_actions(action: str, expected: str) -> None:
     assert response.content_type == "application/soap+xml"
     assert expected in text
     assert "<wsa:RelatesTo>urn:uuid:req-1</wsa:RelatesTo>" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_scanner_status_summary_event_returns_soap_ack() -> None:
+    """ScannerStatusSummaryEvent returns SOAP ack and correlates via RelatesTo."""
+    response = await handle_wsd(_request(_scanner_status_summary_envelope()))
+    assert response.status == 200
+    assert response.content_type == "application/soap+xml"
+    assert "<soap:Envelope" in response.text
+    assert (
+        f"<wsa:Action>{ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE}</wsa:Action>" in response.text
+    )
+    assert "<wsa:RelatesTo>urn:uuid:st-1</wsa:RelatesTo>" in response.text
 
 
 @pytest.mark.asyncio
@@ -181,9 +226,7 @@ async def test_scan_available_event_returns_ok_and_triggers_chain(
     monkeypatch: MonkeyPatch,
 ) -> None:
     """ScanAvailableEvent returns SOAP ack and schedules follow-up chain."""
-    calls: list[
-        tuple[str, str | None, str | None, str | None, str | None]
-    ] = []
+    calls: list[tuple[str, str | None, str | None, str | None, str | None]] = []
 
     async def fake_chain(
         *,
@@ -196,6 +239,7 @@ async def test_scan_available_event_returns_ok_and_triggers_chain(
         subscribe_destination_tokens: dict[str, str] | None = None,
         use_env_subscribe_destination_token_only: bool = False,
         retry_create_without_destination_token_on_invalid_token: bool = True,
+        **kwargs: object,
     ) -> dict[str, str | None]:
         calls.append(
             (
@@ -248,6 +292,7 @@ async def test_scan_available_event_chain_failure_does_not_change_response(
         subscribe_destination_tokens: dict[str, str] | None = None,
         use_env_subscribe_destination_token_only: bool = False,
         retry_create_without_destination_token_on_invalid_token: bool = True,
+        **kwargs: object,
     ) -> dict[str, str | None]:
         raise RuntimeError("boom")
 

@@ -35,6 +35,7 @@ from app.ws_eventing_client import (
     parse_get_response,
     parse_get_scanner_elements_response,
     parse_retrieve_image_response,
+    parse_scanner_status_summary_event,
     parse_soap_fault,
     parse_subscribe_response,
     parse_validate_scan_ticket_response,
@@ -68,7 +69,9 @@ def test_build_subscribe_request_contains_notify_to_and_to_url() -> None:
         message_id="urn:uuid:req-1",
     )
     assert mid == "urn:uuid:req-1"
-    assert "<wsa:Action>http://schemas.xmlsoap.org/ws/2004/08/eventing/Subscribe</wsa:Action>" in xml
+    assert (
+        "<wsa:Action>http://schemas.xmlsoap.org/ws/2004/08/eventing/Subscribe</wsa:Action>" in xml
+    )
     assert "<wsa:To>http://192.168.1.60:80/WSD/DEVICE</wsa:To>" in xml
     assert "<wsa:ReplyTo>" in xml
     assert "<wse:EndTo>" in xml
@@ -129,8 +132,10 @@ def test_build_validate_scan_ticket_request_contains_expected_elements() -> None
     assert f"<wsa:Action>{ACTION_VALIDATE_SCAN_TICKET}</wsa:Action>" in xml
     assert "<wsa:To>http://192.168.1.60:80/WDP/SCAN</wsa:To>" in xml
     assert "<sca:ValidateScanTicketRequest>" in xml
-    assert "<sca:JobName>Validating scan ticket for current WIA item properties</sca:JobName>" in xml
-    assert "<sca:InputSource sca:MustHonor=\"true\">Platen</sca:InputSource>" in xml
+    assert (
+        "<sca:JobName>Validating scan ticket for current WIA item properties</sca:JobName>" in xml
+    )
+    assert '<sca:InputSource sca:MustHonor="true">Platen</sca:InputSource>' in xml
 
 
 def test_resolve_scan_ticket_xml_for_chain_prefers_device_scan_ticket() -> None:
@@ -328,7 +333,10 @@ def test_parse_subscribe_response_multiple_destination_responses() -> None:
 </soap:Envelope>
 """
     parsed = parse_subscribe_response(xml)
-    assert parsed["subscribe_destination_tokens"] == {"Scan": "tok-scan", "ScanToEmail": "tok-email"}
+    assert parsed["subscribe_destination_tokens"] == {
+        "Scan": "tok-scan",
+        "ScanToEmail": "tok-email",
+    }
     assert parsed["subscribe_destination_token"] == "tok-scan"
     assert parsed["subscription_manager_url"] is None
 
@@ -690,7 +698,10 @@ def test_parse_get_scanner_elements_response_extracts_target_elements() -> None:
 
 def test_resolve_wdp_scan_url_normalizes_scanner_endpoint() -> None:
     """Scanner endpoints normalize to WDP scan URL."""
-    assert resolve_wdp_scan_url("http://192.168.1.60:80/WSD/DEVICE") == "http://192.168.1.60:80/WDP/SCAN"
+    assert (
+        resolve_wdp_scan_url("http://192.168.1.60:80/WSD/DEVICE")
+        == "http://192.168.1.60:80/WDP/SCAN"
+    )
 
 
 @pytest.mark.asyncio
@@ -724,7 +735,9 @@ async def test_preflight_get_posts_and_parses_response(monkeypatch: MonkeyPatch)
         async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
-        def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> DummyResponse:
+        def post(
+            self, url: str, data: bytes, headers: dict[str, str], timeout: float
+        ) -> DummyResponse:
             captured["url"] = url
             captured["data"] = data.decode("utf-8")
             return DummyResponse()
@@ -777,7 +790,9 @@ async def test_register_with_scanner_posts_and_parses_response(monkeypatch: Monk
         async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
-        def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> DummyResponse:
+        def post(
+            self, url: str, data: bytes, headers: dict[str, str], timeout: float
+        ) -> DummyResponse:
             captured["url"] = url
             captured["data"] = data.decode("utf-8")
             captured["headers"] = headers
@@ -847,7 +862,9 @@ async def test_register_with_scanner_logs_non2xx_and_missing_identifier(
         async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
             return False
 
-        def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> DummyResponse:
+        def post(
+            self, url: str, data: bytes, headers: dict[str, str], timeout: float
+        ) -> DummyResponse:
             return DummyResponse()
 
     monkeypatch.setattr("app.ws_eventing_client.ClientSession", lambda: DummySession())
@@ -976,7 +993,10 @@ async def test_get_scanner_elements_metadata_retries_when_invalid_args(
             gse_payloads.append(payload)
             if len(gse_payloads) == 1:
                 return 400, fault_xml
-            if payload.count("<sca:Name>") == 1 and "<sca:Name>sca:DefaultScanTicket</sca:Name>" in payload:
+            if (
+                payload.count("<sca:Name>") == 1
+                and "<sca:Name>sca:DefaultScanTicket</sca:Name>" in payload
+            ):
                 return 200, ticket_xml
             return 200, reduced_xml
         return 500, ""
@@ -1002,7 +1022,9 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
         if ACTION_GET_SCANNER_ELEMENTS in payload:
-            return 200, """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:GetScannerElementsResponse>
     <sca:DefaultScanTicket>
       <sca:ScanTicket>
@@ -1010,21 +1032,31 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
       </sca:ScanTicket>
     </sca:DefaultScanTicket>
   </sca:GetScannerElementsResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-42</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId><sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1049,6 +1081,133 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
     assert result["job_id"] == "job-42"
     assert result["retrieve_elapsed_sec"] is not None
     assert float(result["retrieve_elapsed_sec"] or "0") >= 0.0
+    assert result.get("scanner_idle_wait_result") == "skipped"
+
+
+def test_parse_scanner_status_summary_event_extracts_scanner_state() -> None:
+    """Parser reads State from ScannerStatusSummaryEvent body."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body>
+    <sca:ScannerStatusSummaryEvent>
+      <sca:ScannerStatus><sca:State>Processing</sca:State></sca:ScannerStatus>
+    </sca:ScannerStatusSummaryEvent>
+  </soap:Body>
+</soap:Envelope>"""
+    parsed = parse_scanner_status_summary_event(xml)
+    assert parsed.get("scanner_state") == "Processing"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_idle_wait_success(monkeypatch: MonkeyPatch) -> None:
+    """When enabled, Idle wait uses await_scanner_idle_after_retrieve result."""
+    calls: list[str] = []
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        calls.append(payload)
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket><sca:ScanTicket>
+      <sca:JobDescription><sca:JobName>n</sca:JobName></sca:JobDescription>
+    </sca:ScanTicket></sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>j</sca:JobId><sca:JobToken>t</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
+</soap:Envelope>""",
+        )
+
+    async def instant_idle(_timeout: float) -> bool:
+        return True
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client.await_scanner_idle_after_retrieve",
+        instant_idle,
+    )
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        wait_scanner_idle_after_retrieve=True,
+        scanner_idle_wait_sec=30.0,
+    )
+    assert result.get("scanner_idle_wait_result") == "success"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_idle_wait_timeout(monkeypatch: MonkeyPatch) -> None:
+    """Idle wait records timeout when scanner never reports Idle."""
+    calls: list[str] = []
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        calls.append(payload)
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket><sca:ScanTicket>
+      <sca:JobDescription><sca:JobName>n</sca:JobName></sca:JobDescription>
+    </sca:ScanTicket></sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>j</sca:JobId><sca:JobToken>t</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
+</soap:Envelope>""",
+        )
+
+    async def never_idle(_timeout: float) -> bool:
+        return False
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client.await_scanner_idle_after_retrieve",
+        never_idle,
+    )
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        wait_scanner_idle_after_retrieve=True,
+        scanner_idle_wait_sec=0.01,
+    )
+    assert result.get("scanner_idle_wait_result") == "timeout"
 
 
 @pytest.mark.asyncio
@@ -1061,29 +1220,41 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
         if ACTION_GET_SCANNER_ELEMENTS in payload:
-            return 200, """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:GetScannerElementsResponse>
     <sca:DefaultScanTicket><sca:ScanTicket>
       <sca:JobDescription><sca:JobName>DeviceTicketName</sca:JobName></sca:JobDescription>
     </sca:ScanTicket></sca:DefaultScanTicket>
   </sca:GetScannerElementsResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-42</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId><sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_GET_JOB_STATUS in payload:
             return 200, _FAKE_GET_JOB_STATUS_COMPLETED_XML
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     async def instant_sleep(_delay: float) -> None:
         return None
@@ -1131,14 +1302,20 @@ async def test_run_scan_available_chain_prefers_subscribe_destination_token_over
         if ACTION_VALIDATE_SCAN_TICKET in payload:
             return 200, validate_xml
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-sub</sca:JobId><sca:JobToken>jtok-sub</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1165,19 +1342,28 @@ async def test_run_scan_available_chain_selects_token_by_event_client_context(
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-cc</sca:JobId><sca:JobToken>jtok-cc</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     event_xml = (
@@ -1228,28 +1414,39 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
         if ACTION_VALIDATE_SCAN_TICKET in payload:
             return 200, validate_xml
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-msg</sca:JobId><sca:JobToken>jtok-msg</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
     )
-    assert "<sca:DestinationToken>urn:uuid:scanner-validate-response</sca:DestinationToken>" in calls[2]
+    assert (
+        "<sca:DestinationToken>urn:uuid:scanner-validate-response</sca:DestinationToken>"
+        in calls[2]
+    )
     assert "body-token-secondary" not in calls[2]
     assert "<sca:JobToken>jtok-msg</sca:JobToken>" in calls[3]
     assert result["job_id"] == "job-msg"
 
 
 @pytest.mark.asyncio
-async def test_run_scan_available_chain_stops_on_validation_failure(monkeypatch: MonkeyPatch) -> None:
+async def test_run_scan_available_chain_stops_on_validation_failure(
+    monkeypatch: MonkeyPatch,
+) -> None:
     """Chain exits before CreateScanJob when validation fails."""
     calls: list[str] = []
 
@@ -1257,9 +1454,12 @@ async def test_run_scan_available_chain_stops_on_validation_failure(monkeypatch:
         calls.append(payload)
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 500, "<soap:Envelope/>"
-        return 500, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+        return (
+            500,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Body><soap:Fault><soap:Code><soap:Value>soap:Sender</soap:Value></soap:Code></soap:Fault></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1276,7 +1476,9 @@ async def test_run_scan_available_chain_stops_on_validation_failure(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_run_scan_available_chain_stops_when_valid_ticket_false(monkeypatch: MonkeyPatch) -> None:
+async def test_run_scan_available_chain_stops_when_valid_ticket_false(
+    monkeypatch: MonkeyPatch,
+) -> None:
     """Chain exits before CreateScanJob when ValidTicket=false."""
     calls: list[str] = []
 
@@ -1284,10 +1486,13 @@ async def test_run_scan_available_chain_stops_when_valid_ticket_false(monkeypatc
         calls.append(payload)
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wscn="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><wscn:ValidateScanTicketResponse><wscn:ValidationInfo><wscn:ValidTicket>false</wscn:ValidTicket></wscn:ValidationInfo></wscn:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1311,12 +1516,15 @@ async def test_run_scan_available_chain_stops_when_validation_info_has_no_valid_
         calls.append(payload)
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wscn="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><wscn:ValidateScanTicketResponse><wscn:Status>Success</wscn:Status>
   <wscn:ValidationInfo><wscn:Detail>pending</wscn:Detail></wscn:ValidationInfo>
   </wscn:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1329,7 +1537,9 @@ async def test_run_scan_available_chain_stops_when_validation_info_has_no_valid_
 
 
 @pytest.mark.asyncio
-async def test_run_scan_available_chain_uses_event_destination_token(monkeypatch: MonkeyPatch) -> None:
+async def test_run_scan_available_chain_uses_event_destination_token(
+    monkeypatch: MonkeyPatch,
+) -> None:
     """Event payload destination token is used when validate response omits one."""
     calls: list[str] = []
 
@@ -1338,19 +1548,28 @@ async def test_run_scan_available_chain_uses_event_destination_token(monkeypatch
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-77</sca:JobId><sca:JobToken>jtok-77</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1378,14 +1597,20 @@ async def test_run_scan_available_chain_skips_retrieve_when_create_omits_job_tok
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-2</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-no-token</sca:JobId></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1401,7 +1626,9 @@ async def test_run_scan_available_chain_skips_retrieve_when_create_omits_job_tok
 
 
 @pytest.mark.asyncio
-async def test_run_scan_available_chain_skips_retrieve_without_job_id(monkeypatch: MonkeyPatch) -> None:
+async def test_run_scan_available_chain_skips_retrieve_without_job_id(
+    monkeypatch: MonkeyPatch,
+) -> None:
     """Chain skips RetrieveImage when CreateScanJob response omits JobId."""
     calls: list[str] = []
 
@@ -1410,14 +1637,20 @@ async def test_run_scan_available_chain_skips_retrieve_without_job_id(monkeypatc
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-2</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse/></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1456,19 +1689,28 @@ async def test_run_scan_available_chain_prefers_event_subscription_identifier_ov
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wscn="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><wscn:ValidateScanTicketResponse><wscn:ValidationInfo><wscn:ValidTicket>true</wscn:ValidTicket></wscn:ValidationInfo></wscn:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-ev</sca:JobId><sca:JobToken>jtok-ev</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1495,14 +1737,20 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:wscn="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><wscn:ValidateScanTicketResponse><wscn:ValidationInfo><wscn:ValidTicket>true</wscn:ValidTicket></wscn:ValidationInfo></wscn:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-99</sca:JobId><sca:JobToken>jtok-99</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1532,23 +1780,38 @@ async def test_run_scan_available_chain_retries_create_without_token_on_invalid_
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-bad</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
-        if ACTION_CREATE_SCAN_JOB in payload and "<sca:DestinationToken>dest-bad</sca:DestinationToken>" in payload:
-            return 400, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+</soap:Envelope>""",
+            )
+        if (
+            ACTION_CREATE_SCAN_JOB in payload
+            and "<sca:DestinationToken>dest-bad</sca:DestinationToken>" in payload
+        ):
+            return (
+                400,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Body><soap:Fault><soap:Code><soap:Value>soap:Sender</soap:Value><soap:Subcode><soap:Value>wscn:ClientErrorInvalidDestinationToken</soap:Value></soap:Subcode></soap:Code></soap:Fault></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-retry</sca:JobId><sca:JobToken>jtok-retry</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1579,14 +1842,20 @@ async def test_run_scan_available_chain_skips_retry_when_disabled(
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-bad</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 400, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+            return (
+                400,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Body><soap:Fault><soap:Code><soap:Value>soap:Sender</soap:Value><soap:Subcode><soap:Value>wscn:ClientErrorInvalidDestinationToken</soap:Value></soap:Subcode></soap:Code></soap:Fault></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         return 200, "<soap:Envelope/>"
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
@@ -1603,7 +1872,9 @@ async def test_run_scan_available_chain_skips_retry_when_disabled(
 
 
 @pytest.mark.asyncio
-async def test_run_scan_available_chain_create_retry_failure_still_stops(monkeypatch: MonkeyPatch) -> None:
+async def test_run_scan_available_chain_create_retry_failure_still_stops(
+    monkeypatch: MonkeyPatch,
+) -> None:
     """CreateScanJob stops after retry failure and does not call RetrieveImage."""
     calls: list[str] = []
 
@@ -1612,17 +1883,29 @@ async def test_run_scan_available_chain_create_retry_failure_still_stops(monkeyp
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             return 200, "<soap:Envelope/>"
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-bad</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
-        if ACTION_CREATE_SCAN_JOB in payload and "<sca:DestinationToken>dest-bad</sca:DestinationToken>" in payload:
-            return 400, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+</soap:Envelope>""",
+            )
+        if (
+            ACTION_CREATE_SCAN_JOB in payload
+            and "<sca:DestinationToken>dest-bad</sca:DestinationToken>" in payload
+        ):
+            return (
+                400,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Body><soap:Fault><soap:Code><soap:Value>soap:Sender</soap:Value><soap:Subcode><soap:Value>wscn:ClientErrorInvalidDestinationToken</soap:Value></soap:Subcode></soap:Code></soap:Fault></soap:Body>
-</soap:Envelope>"""
-        return 400, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+</soap:Envelope>""",
+            )
+        return (
+            400,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
   <soap:Body><soap:Fault><soap:Code><soap:Value>soap:Sender</soap:Value><soap:Subcode><soap:Value>wscn:ClientErrorInvalidRequest</soap:Value></soap:Subcode></soap:Code></soap:Fault></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(
@@ -1648,19 +1931,28 @@ async def test_run_scan_available_chain_continues_when_metadata_probe_times_out(
         if ACTION_GET_SCANNER_ELEMENTS in payload:
             raise asyncio.TimeoutError()
         if ACTION_VALIDATE_SCAN_TICKET in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-42</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+            )
         if ACTION_CREATE_SCAN_JOB in payload:
-            return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId><sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
-</soap:Envelope>"""
-        return 200, """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+</soap:Envelope>""",
+            )
+        return (
+            200,
+            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>"""
+</soap:Envelope>""",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     result = await run_scan_available_chain(

@@ -44,9 +44,7 @@ ACTION_PATTERN = re.compile(
 RELATES_TO_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?RelatesTo>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?RelatesTo>"
 )
-XADDR_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?XAddrs>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?XAddrs>"
-)
+XADDR_PATTERN = re.compile(r"<(?:[A-Za-z0-9_]+:)?XAddrs>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?XAddrs>")
 
 
 def extract_message_id(text: str) -> str:
@@ -402,7 +400,9 @@ def handle_discovery_packet(
         )
         return False
 
-    unsupported_level = logging.DEBUG if _is_recent_outbound_probe_id(message_id) else logging.WARNING
+    unsupported_level = (
+        logging.DEBUG if _is_recent_outbound_probe_id(message_id) else logging.WARNING
+    )
     log.log(
         unsupported_level,
         "Unsupported discovery action",
@@ -418,7 +418,9 @@ def _build_ws_discovery_client_socket() -> socket.socket:
     return sock
 
 
-async def _recv_discovery_match(sock: socket.socket, timeout_sec: float) -> tuple[str, str, list[str]] | None:
+async def _recv_discovery_match(
+    sock: socket.socket, timeout_sec: float
+) -> tuple[str, str, list[str]] | None:
     loop = asyncio.get_running_loop()
     try:
         data, addr = await asyncio.wait_for(loop.sock_recvfrom(sock, 8192), timeout=timeout_sec)
@@ -429,7 +431,9 @@ async def _recv_discovery_match(sock: socket.socket, timeout_sec: float) -> tupl
     relates_to = extract_relates_to(text)
     message_id = extract_message_id(text)
     xaddrs = extract_xaddrs(text)
-    ingress_level = logging.DEBUG if _is_recent_outbound_probe_id(relates_to or "") else logging.INFO
+    ingress_level = (
+        logging.DEBUG if _is_recent_outbound_probe_id(relates_to or "") else logging.INFO
+    )
     log.log(
         ingress_level,
         "Discovery match packet received",
@@ -498,7 +502,9 @@ async def discover_scanner_xaddr(
                         extra={"probe_message_id": probe_mid},
                     )
                 else:
-                    level = logging.DEBUG if _is_recent_outbound_probe_id(relates_to) else logging.INFO
+                    level = (
+                        logging.DEBUG if _is_recent_outbound_probe_id(relates_to) else logging.INFO
+                    )
                     log.log(
                         level,
                         "Discovery match ignored",

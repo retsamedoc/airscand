@@ -7,7 +7,12 @@ import uuid
 
 from aiohttp import web
 
-from app.ws_eventing_client import run_scan_available_chain
+from app.scanner_status_coordination import notify_scanner_state
+from app.ws_eventing_client import (
+    SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+    parse_scanner_status_summary_event,
+    run_scan_available_chain,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +35,7 @@ ACTION_UNSUBSCRIBE_RESPONSE = f"{NS_WSE}/UnsubscribeResponse"
 ACTION_CREATE_SCAN_JOB_RESPONSE = f"{NS_SCA}/CreateScanJobResponse"
 # Not defined in Microsoft WS-Scan element docs; used only as wsa:Action for SOAP-shaped HTTP ack to the device.
 ACTION_SCAN_AVAILABLE_EVENT_RESPONSE = f"{NS_SCA}/ScanAvailableEventResponse"
+ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE = f"{NS_SCA}/ScannerStatusSummaryEventResponse"
 
 ACTION_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?Action>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?Action>"
@@ -61,6 +67,7 @@ def _log_chain_result(task: asyncio.Task[dict[str, str | None]]) -> None:
                 "fault_subcode": result.get("fault_subcode"),
                 "retrieve_fault_subcode": result.get("retrieve_fault_subcode"),
                 "retrieve_elapsed_sec": result.get("retrieve_elapsed_sec"),
+                "scanner_idle_wait_result": result.get("scanner_idle_wait_result"),
             },
         )
     except asyncio.CancelledError:
@@ -157,6 +164,15 @@ def build_scan_available_event_ack_response(relates_to: str | None) -> str:
     """
     return _soap_response(
         action=ACTION_SCAN_AVAILABLE_EVENT_RESPONSE,
+        relates_to=relates_to,
+        body_xml="",
+    )
+
+
+def build_scanner_status_summary_event_ack_response(relates_to: str | None) -> str:
+    """Return a SOAP 1.2 envelope acknowledging ScannerStatusSummaryEvent delivery."""
+    return _soap_response(
+        action=ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE,
         relates_to=relates_to,
         body_xml="",
     )
@@ -303,6 +319,26 @@ async def handle_wsd(request: web.Request) -> web.Response:
             content_type="application/soap+xml",
             charset="utf-8",
         )
+    if action == SCANNER_STATUS_SUMMARY_EVENT_ACTION:
+        parsed = parse_scanner_status_summary_event(text)
+        scanner_state = parsed.get("scanner_state")
+        notify_scanner_state(scanner_state)
+        ack_xml = build_scanner_status_summary_event_ack_response(relates_to)
+        log.info(
+            f"{_short_soap_action(ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE) or 'ScannerStatusSummaryEventResponse'}",
+            extra={
+                "soap_leg": "server_response",
+                "soap_action": _short_soap_action(ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE),
+                "http_status": 200,
+                "bytes": len(ack_xml.encode("utf-8")),
+                "scanner_state": scanner_state,
+            },
+        )
+        return web.Response(
+            text=ack_xml,
+            content_type="application/soap+xml",
+            charset="utf-8",
+        )
     if action == ACTION_SCAN_AVAILABLE_EVENT:
         ack_xml = build_scan_available_event_ack_response(relates_to)
         scanner_xaddr = str(getattr(config, "scanner_xaddr", "") or "").strip()
@@ -323,21 +359,19 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 charset="utf-8",
             )
         from_address = f"urn:uuid:{config.uuid}" if getattr(config, "uuid", "") else None
-        subscription_id = str(
-            getattr(config, "scanner_eventing_subscription_id", "") or ""
-        ).strip()
+        subscription_id = str(getattr(config, "scanner_eventing_subscription_id", "") or "").strip()
         subscribe_dest = str(
             getattr(config, "scanner_subscribe_destination_token", "") or ""
         ).strip()
         dest_tokens_map = getattr(config, "scanner_subscribe_destination_tokens", None)
         if not isinstance(dest_tokens_map, dict):
             dest_tokens_map = {}
-        use_env_dest_only = bool(
-            getattr(config, "use_env_subscribe_destination_token_only", False)
-        )
+        use_env_dest_only = bool(getattr(config, "use_env_subscribe_destination_token_only", False))
         retry_invalid_dest = bool(
             getattr(config, "create_scan_job_retry_invalid_destination_token", True)
         )
+        wait_idle = bool(getattr(config, "wait_scanner_idle_after_retrieve", True))
+        idle_sec = float(getattr(config, "scanner_idle_wait_sec", 60.0))
         task = asyncio.create_task(
             run_scan_available_chain(
                 scanner_xaddr=scanner_xaddr,
@@ -348,6 +382,8 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 subscribe_destination_tokens=dest_tokens_map or None,
                 use_env_subscribe_destination_token_only=use_env_dest_only,
                 retry_create_without_destination_token_on_invalid_token=retry_invalid_dest,
+                wait_scanner_idle_after_retrieve=wait_idle,
+                scanner_idle_wait_sec=idle_sec,
             )
         )
         task.add_done_callback(_log_chain_result)
@@ -386,4 +422,3 @@ async def handle_wsd(request: web.Request) -> web.Response:
         },
     )
     return web.Response(text="OK", content_type="text/plain")
-

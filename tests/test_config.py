@@ -86,4 +86,3 @@ def test_config_discovery_env_overrides(monkeypatch: MonkeyPatch) -> None:
     assert cfg.metadata_version == 7
     assert cfg.app_sequence_instance_id == 99
     assert cfg.app_sequence_sequence_id == "urn:uuid:fixed-seq"
-

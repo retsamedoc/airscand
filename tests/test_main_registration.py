@@ -28,6 +28,7 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         scanner_subscribe_to_url="",
         scanner_eventing_subscribe_manager_url="",
         scanner_eventing_subscription_id="",
+        scanner_eventing_subscription_id_status="",
         scanner_subscribe_destination_tokens={},
         use_env_subscribe_destination_token_only=False,
     )
@@ -47,14 +48,23 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         subscribe_to_url: str | None = None,
         from_address: str | None = None,
         subscription_identifier: str | None = None,
+        filter_action: str | None = None,
+        scan_destinations: tuple[tuple[str, str], ...] | None = None,
     ) -> dict[str, str]:
         attempts["register"] += 1
         assert scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
         assert subscribe_to_url == "http://192.168.1.60:80/WDP/SCAN"
         assert notify_to == "http://192.168.1.50:5357/wsd"
         assert from_address == "urn:uuid:11111111-2222-3333-4444-555555555555"
+        if attempts["register"] == 1:
+            return {
+                "identifier": "sub-1",
+                "expires": "PT1H",
+                "subscribe_destination_token": "dest-from-subscribe",
+                "subscribe_destination_tokens": {"Scan": "dest-from-subscribe"},
+            }
         return {
-            "identifier": "sub-1",
+            "identifier": "sub-status-1",
             "expires": "PT1H",
             "subscribe_destination_token": "dest-from-subscribe",
             "subscribe_destination_tokens": {"Scan": "dest-from-subscribe"},
@@ -84,8 +94,9 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
     await _eventing_registration_loop(cfg)
     assert attempts["discover"] == 2
     assert attempts["preflight"] == 1
-    assert attempts["register"] == 1
+    assert attempts["register"] == 2
     assert cfg.scanner_eventing_subscription_id == "sub-1"
+    assert cfg.scanner_eventing_subscription_id_status == "sub-status-1"
     assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN"
     assert cfg.scanner_subscribe_destination_token == "dest-from-subscribe"
     assert cfg.scanner_subscribe_destination_tokens == {"Scan": "dest-from-subscribe"}
@@ -128,6 +139,7 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         scanner_subscribe_to_url="",
         scanner_eventing_subscribe_manager_url="",
         scanner_eventing_subscription_id="",
+        scanner_eventing_subscription_id_status="",
         scanner_subscribe_destination_token="",
         scanner_subscribe_destination_tokens={},
         use_env_subscribe_destination_token_only=False,
@@ -157,12 +169,15 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         subscribe_to_url: str | None = None,
         from_address: str | None = None,
         subscription_identifier: str | None = None,
+        filter_action: str | None = None,
+        scan_destinations: tuple[tuple[str, str], ...] | None = None,
     ) -> dict[str, str | None]:
         calls.append(subscribe_to_url)
+        n = len(calls)
         return {
             "status": "200",
             "fault_subcode": None,
-            "identifier": "sub-1",
+            "identifier": f"sub-{n}",
             "expires": "PT1H",
             "subscribe_destination_token": None,
         }
@@ -172,8 +187,12 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
     monkeypatch.setattr("main.register_with_scanner", fake_register)
 
     await _eventing_registration_loop(cfg)
-    assert calls[0] == "http://192.168.1.60:80/WDP/SCAN"
+    assert calls == [
+        "http://192.168.1.60:80/WDP/SCAN",
+        "http://192.168.1.60:80/WDP/SCAN",
+    ]
     assert cfg.scanner_eventing_subscription_id == "sub-1"
+    assert cfg.scanner_eventing_subscription_id_status == "sub-2"
     assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN"
     assert cfg.scanner_subscribe_destination_token == ""
     assert cfg.scanner_subscribe_destination_tokens == {}

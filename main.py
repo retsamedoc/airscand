@@ -11,6 +11,7 @@ from app.discovery import discover_scanner_xaddr, start_discovery
 from app.http_server import start_http_server
 from app.logging import setup_logging
 from app.ws_eventing_client import (
+    SCANNER_STATUS_SUMMARY_EVENT_ACTION,
     preflight_get_scanner_capabilities,
     register_with_scanner,
     unsubscribe_from_scanner,
@@ -95,6 +96,45 @@ async def _eventing_registration_loop(config: Config) -> None:
                     else:
                         setattr(config, "scanner_subscribe_destination_tokens", {})
                     setattr(config, "use_env_subscribe_destination_token_only", False)
+                    setattr(config, "scanner_eventing_subscription_id_status", "")
+                    status_sub_identifier = f"urn:uuid:{uuid.uuid4()}"
+                    try:
+                        status_result = await register_with_scanner(
+                            scanner_xaddr=scanner_xaddr,
+                            subscribe_to_url=subscribe_to_url,
+                            notify_to=notify_to,
+                            from_address=client_from_address,
+                            subscription_identifier=status_sub_identifier,
+                            filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+                        )
+                        st2 = int(status_result.get("status") or "0")
+                        if status_result.get("identifier") and (st2 == 0 or 200 <= st2 < 300):
+                            setattr(
+                                config,
+                                "scanner_eventing_subscription_id_status",
+                                str(status_result.get("identifier") or "").strip(),
+                            )
+                            log.info(
+                                "Scanner ScannerStatusSummaryEvent subscribe succeeded",
+                                extra={
+                                    "scanner_xaddr": scanner_xaddr,
+                                    "subscription_id_status": status_result.get("identifier"),
+                                },
+                            )
+                        else:
+                            log.warning(
+                                "Scanner ScannerStatusSummaryEvent subscribe missing id or non-success",
+                                extra={
+                                    "scanner_xaddr": scanner_xaddr,
+                                    "status": status_result.get("status"),
+                                    "fault_subcode": status_result.get("fault_subcode"),
+                                },
+                            )
+                    except Exception:
+                        log.exception(
+                            "Scanner ScannerStatusSummaryEvent subscribe failed",
+                            extra={"scanner_xaddr": scanner_xaddr},
+                        )
                     log.info(
                         "Scanner registration succeeded",
                         extra={
@@ -102,11 +142,17 @@ async def _eventing_registration_loop(config: Config) -> None:
                             "subscribe_to_url": subscribe_to_url,
                             "subscription_manager_url": mgr_url,
                             "subscription_id": result.get("identifier"),
-                            "subscribe_destination_token": result.get("subscribe_destination_token"),
+                            "subscribe_destination_token": result.get(
+                                "subscribe_destination_token"
+                            ),
                             "subscribe_destination_tokens_count": len(
                                 getattr(config, "scanner_subscribe_destination_tokens", {}) or {}
                             ),
                             "expires": result.get("expires"),
+                            "subscription_id_status": getattr(
+                                config, "scanner_eventing_subscription_id_status", ""
+                            )
+                            or None,
                         },
                     )
                     return
@@ -132,12 +178,22 @@ async def _shutdown_services(
     client_from_address = f"urn:uuid:{config.uuid}"
     mgr = str(getattr(config, "scanner_eventing_subscribe_manager_url", "") or "").strip()
     sub_id = str(getattr(config, "scanner_eventing_subscription_id", "") or "").strip()
+    sub_id_status = str(
+        getattr(config, "scanner_eventing_subscription_id_status", "") or ""
+    ).strip()
     try:
-        await unsubscribe_from_scanner(
-            manager_url=mgr,
-            subscription_id=sub_id,
-            from_address=client_from_address,
-        )
+        if sub_id_status:
+            await unsubscribe_from_scanner(
+                manager_url=mgr,
+                subscription_id=sub_id_status,
+                from_address=client_from_address,
+            )
+        if sub_id:
+            await unsubscribe_from_scanner(
+                manager_url=mgr,
+                subscription_id=sub_id,
+                from_address=client_from_address,
+            )
     except Exception:
         log.exception("WS-Eventing unsubscribe during shutdown failed")
     for task in tasks:

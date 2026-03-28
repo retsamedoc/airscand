@@ -8,6 +8,12 @@ import uuid
 
 from aiohttp import ClientError, ClientSession
 
+from app.scanner_status_coordination import (
+    await_scanner_idle_after_retrieve,
+    begin_retrieve_idle_wait,
+    end_retrieve_idle_wait,
+)
+
 NS_SOAP = "http://www.w3.org/2003/05/soap-envelope"
 NS_WSA = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
 NS_WSE = "http://schemas.xmlsoap.org/ws/2004/08/eventing"
@@ -16,6 +22,7 @@ NS_WSMAN = "http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
 NS_WST = "http://schemas.xmlsoap.org/ws/2004/09/transfer"
 FILTER_DIALECT_DEVPROF_ACTION = "http://schemas.xmlsoap.org/ws/2006/02/devprof/Action"
 SCAN_AVAILABLE_EVENT_ACTION = f"{NS_SCA}/ScanAvailableEvent"
+SCANNER_STATUS_SUMMARY_EVENT_ACTION = f"{NS_SCA}/ScannerStatusSummaryEvent"
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
 ACTION_UNSUBSCRIBE = f"{NS_WSE}/Unsubscribe"
@@ -74,9 +81,7 @@ FAULT_REASON_PATTERN = re.compile(
     re.DOTALL,
 )
 URI_TEXT_PATTERN = re.compile(r"https?://[A-Za-z0-9._:/-]+")
-JOB_ID_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?JobId>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?JobId>"
-)
+JOB_ID_PATTERN = re.compile(r"<(?:[A-Za-z0-9_]+:)?JobId>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?JobId>")
 JOB_TOKEN_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?JobToken>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?JobToken>"
 )
@@ -106,9 +111,7 @@ VALID_TICKET_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?ValidTicket>\s*(true|false)\s*</(?:[A-Za-z0-9_]+:)?ValidTicket>",
     re.IGNORECASE,
 )
-STATUS_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?Status>\s*([^<]+)\s*</(?:[A-Za-z0-9_]+:)?Status>"
-)
+STATUS_PATTERN = re.compile(r"<(?:[A-Za-z0-9_]+:)?Status>\s*([^<]+)\s*</(?:[A-Za-z0-9_]+:)?Status>")
 DESTINATION_TOKEN_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?DestinationToken>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?DestinationToken>"
 )
@@ -135,6 +138,15 @@ WSA_MESSAGE_ID_PATTERN = re.compile(
 WSA_ACTION_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?Action>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?Action>"
 )
+SCANNER_STATUS_SUMMARY_EVENT_INNER_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?ScannerStatusSummaryEvent\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?ScannerStatusSummaryEvent>",
+    re.DOTALL | re.IGNORECASE,
+)
+# ``ScannerState`` / ``State`` under ``ScannerStatus`` in WS-Scan status notifications.
+SCANNER_STATE_IN_STATUS_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?State>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?State>",
+    re.IGNORECASE,
+)
 
 
 def _extract_wsa_action(payload: str) -> str | None:
@@ -148,6 +160,7 @@ def _soap_action_short(action: str | None) -> str | None:
     if not action:
         return None
     return action.rstrip("/").rsplit("/", 1)[-1]
+
 
 SCAN_TICKET_TEMPLATE_XML = """      <sca:ScanTicket>
         <sca:JobDescription>
@@ -214,10 +227,14 @@ def build_subscribe_request(
 ) -> tuple[str, str]:
     """Build WS-Eventing Subscribe SOAP envelope."""
     mid = message_id or _new_message_id()
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     subscription_identifier = subscription_identifier or _new_message_id()
     ref_params = f"""          <wsa:ReferenceParameters>
             <wse:Identifier>{subscription_identifier}</wse:Identifier>
@@ -272,10 +289,14 @@ def build_unsubscribe_request(
 ) -> tuple[str, str]:
     """Build WS-Eventing Unsubscribe SOAP envelope for the subscription manager endpoint."""
     mid = message_id or _new_message_id()
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}">
   <soap:Header>
@@ -304,10 +325,14 @@ def build_get_request(
 ) -> tuple[str, str]:
     """Build WS-Transfer Get SOAP envelope."""
     mid = message_id or _new_message_id()
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wst="{NS_WST}">
   <soap:Header>
@@ -334,10 +359,14 @@ def build_validate_scan_ticket_request(
     """Build WS-Scan ValidateScanTicket SOAP envelope."""
     mid = message_id or _new_message_id()
     ticket_block = scan_ticket_xml if scan_ticket_xml is not None else SCAN_TICKET_TEMPLATE_XML
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:sca="{NS_SCA}">
   <soap:Header>
@@ -370,10 +399,14 @@ def build_create_scan_job_request(
     """Build minimal WS-Scan CreateScanJob SOAP envelope."""
     mid = message_id or _new_message_id()
     ticket_block = scan_ticket_xml if scan_ticket_xml is not None else SCAN_TICKET_TEMPLATE_XML
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     destination_token_xml = (
         f"      <sca:DestinationToken>{destination_token}</sca:DestinationToken>\n"
         if destination_token
@@ -419,10 +452,14 @@ def build_retrieve_image_request(
     ``DocumentDescription``).
     """
     mid = message_id or _new_message_id()
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:sca="{NS_SCA}">
   <soap:Header>
@@ -457,10 +494,14 @@ def build_get_job_status_request(
 ) -> tuple[str, str]:
     """Build WS-Scan GetJobStatus SOAP envelope."""
     mid = message_id or _new_message_id()
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:sca="{NS_SCA}">
   <soap:Header>
@@ -491,10 +532,14 @@ def build_get_scanner_elements_request(
 ) -> tuple[str, str]:
     """Build WS-Scan GetScannerElements SOAP envelope."""
     mid = message_id or _new_message_id()
-    from_line = f"""    <wsa:From>
+    from_line = (
+        f"""    <wsa:From>
       <wsa:Address>{from_address}</wsa:Address>
     </wsa:From>
-""" if from_address else ""
+"""
+        if from_address
+        else ""
+    )
     requested_elements_xml = "".join(
         f"      <sca:Name>{name}</sca:Name>\n" for name in element_names
     )
@@ -868,14 +913,24 @@ async def poll_get_job_status_until_ready(
     }
 
 
-
-
 def parse_retrieve_image_response(text: str) -> dict[str, str | None]:
     """Extract status and SOAP fault details from RetrieveImageResponse."""
     status_match = STATUS_PATTERN.search(text)
     details = parse_soap_fault(text)
     details["status"] = status_match.group(1).strip() if status_match else None
     return details
+
+
+def parse_scanner_status_summary_event(text: str) -> dict[str, str | None]:
+    """Extract ``ScannerState`` from ``ScannerStatusSummaryEvent`` SOAP body.
+
+    Status is global to the device (not job-scoped). The inner ``State`` element is typically
+    nested under ``ScannerStatus``.
+    """
+    block_m = SCANNER_STATUS_SUMMARY_EVENT_INNER_PATTERN.search(text)
+    scope = block_m.group(1) if block_m else text
+    sm = SCANNER_STATE_IN_STATUS_PATTERN.search(scope)
+    return {"scanner_state": sm.group(1).strip() if sm else None}
 
 
 def _format_embedded_scan_ticket_xml(scan_ticket_element: str) -> str:
@@ -1178,7 +1233,11 @@ async def preflight_get_scanner_capabilities(
     except asyncio.TimeoutError:
         log.warning(
             "Outbound WS-Transfer Get timed out",
-            extra={"scanner_xaddr": scanner_xaddr, "get_to_url": get_url, "timeout_sec": timeout_sec},
+            extra={
+                "scanner_xaddr": scanner_xaddr,
+                "get_to_url": get_url,
+                "timeout_sec": timeout_sec,
+            },
         )
         raise
     except ClientError as exc:
@@ -1481,6 +1540,8 @@ async def run_scan_available_chain(
     retry_create_without_destination_token_on_invalid_token: bool = True,
     poll_get_job_status_before_retrieve: bool = True,
     get_job_status_max_wait_sec: float = GET_JOB_STATUS_MAX_WAIT_SEC,
+    wait_scanner_idle_after_retrieve: bool = False,
+    scanner_idle_wait_sec: float = 60.0,
 ) -> dict[str, str | None]:
     """Execute ValidateScanTicket, CreateScanJob, GetJobStatus polling, then RetrieveImage."""
     target_url = resolve_wdp_scan_url(scanner_xaddr)
@@ -1624,7 +1685,6 @@ async def run_scan_available_chain(
     create_used_token = destination_token
     create_used_scan_identifier = scan_identifier
     create_fault_subcode = create_details.get("fault_subcode") or ""
-    create_retried_without_dest_token = False
     if (
         retry_create_without_destination_token_on_invalid_token
         and create_status >= 400
@@ -1660,7 +1720,6 @@ async def run_scan_available_chain(
         create_details = parse_create_scan_job_response(create_response_text)
         create_used_token = None
         create_used_scan_identifier = scan_identifier
-        create_retried_without_dest_token = True
 
     log.info(
         "CreateScanJob completed",
@@ -1674,7 +1733,9 @@ async def run_scan_available_chain(
             "fault_subcode": create_details.get("fault_subcode"),
         },
     )
-    create_failed = create_status < 200 or create_status >= 300 or bool(create_details.get("fault_code"))
+    create_failed = (
+        create_status < 200 or create_status >= 300 or bool(create_details.get("fault_code"))
+    )
     resolved_job_id = create_details.get("job_id")
     if create_failed or not resolved_job_id:
         return {
@@ -1776,12 +1837,34 @@ async def run_scan_available_chain(
         job_token=create_job_token,
         from_address=from_address,
     )
-    retrieve_status, retrieve_response_text = await _post_soap(
-        url=target_url,
-        payload=retrieve_payload,
-        timeout_sec=timeout_sec,
-    )
-    retrieve_details = parse_retrieve_image_response(retrieve_response_text)
+    begin_retrieve_idle_wait()
+    idle_wait_result: str | None = None
+    try:
+        retrieve_status, retrieve_response_text = await _post_soap(
+            url=target_url,
+            payload=retrieve_payload,
+            timeout_sec=timeout_sec,
+        )
+        retrieve_details = parse_retrieve_image_response(retrieve_response_text)
+        retrieve_ok = 200 <= retrieve_status < 300 and not retrieve_details.get("fault_code")
+        if retrieve_ok and wait_scanner_idle_after_retrieve and scanner_idle_wait_sec > 0:
+            got_idle = await await_scanner_idle_after_retrieve(scanner_idle_wait_sec)
+            idle_wait_result = "success" if got_idle else "timeout"
+            if got_idle:
+                log.info(
+                    "Scanner Idle after RetrieveImage (ScannerStatusSummaryEvent)",
+                    extra={
+                        "target_url": target_url,
+                        "job_id": resolved_job_id,
+                        "scanner_idle_wait_sec": scanner_idle_wait_sec,
+                    },
+                )
+        elif retrieve_ok:
+            idle_wait_result = "skipped"
+        else:
+            idle_wait_result = "not_applicable"
+    finally:
+        end_retrieve_idle_wait()
     retrieve_elapsed_sec = time.monotonic() - create_completed_monotonic
     retrieve_fault_subcode = retrieve_details.get("fault_subcode") or ""
     log.info(
@@ -1795,6 +1878,7 @@ async def run_scan_available_chain(
             "fault_subcode": retrieve_details.get("fault_subcode"),
             "retrieve_elapsed_sec": round(retrieve_elapsed_sec, 6),
             "within_retrieve_window_60s": retrieve_elapsed_sec <= 60.0,
+            "scanner_idle_wait_result": idle_wait_result,
         },
     )
     if retrieve_elapsed_sec > 60.0:
@@ -1817,7 +1901,10 @@ async def run_scan_available_chain(
                 "fault_subcode": retrieve_fault_subcode,
             },
         )
-    if "NoImagesAvailable" in retrieve_fault_subcode or "ClientErrorNoImagesAvailable" in retrieve_fault_subcode:
+    if (
+        "NoImagesAvailable" in retrieve_fault_subcode
+        or "ClientErrorNoImagesAvailable" in retrieve_fault_subcode
+    ):
         log.warning(
             "RetrieveImage fault no images available",
             extra={
@@ -1849,4 +1936,5 @@ async def run_scan_available_chain(
         "retrieve_fault_subcode": retrieve_details.get("fault_subcode"),
         "retrieve_fault_reason": retrieve_details.get("fault_reason"),
         "retrieve_elapsed_sec": f"{retrieve_elapsed_sec:.6f}",
+        "scanner_idle_wait_result": idle_wait_result,
     }

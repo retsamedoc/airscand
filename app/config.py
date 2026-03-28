@@ -44,6 +44,11 @@ class Config:
     eventing_notify_to_url: str = ""
     # When CreateScanJob fails with ClientErrorInvalidDestinationToken, retry once without DestinationToken.
     create_scan_job_retry_invalid_destination_token: bool = True
+    # Second WS-Eventing subscription id for ScannerStatusSummaryEvent (optional).
+    scanner_eventing_subscription_id_status: str = ""
+    # After successful RetrieveImage, wait for inbound ScannerStatusSummaryEvent Idle (global state).
+    wait_scanner_idle_after_retrieve: bool = True
+    scanner_idle_wait_sec: float = 60.0
 
     def __post_init__(self) -> None:
         """Resolve environment variables and derive runtime values."""
@@ -108,6 +113,17 @@ class Config:
             "WSD_CREATE_SCAN_JOB_RETRY_INVALID_DESTINATION_TOKEN",
             self.create_scan_job_retry_invalid_destination_token,
         )
+        self.scanner_eventing_subscription_id_status = os.getenv(
+            "WSD_EVENTING_SUBSCRIPTION_ID_STATUS",
+            self.scanner_eventing_subscription_id_status,
+        ).strip()
+        self.wait_scanner_idle_after_retrieve = _env_bool(
+            "WSD_WAIT_SCANNER_IDLE_AFTER_RETRIEVE",
+            self.wait_scanner_idle_after_retrieve,
+        )
+        raw_idle = os.getenv("WSD_SCANNER_IDLE_WAIT_SEC")
+        if raw_idle is not None and raw_idle.strip() != "":
+            self.scanner_idle_wait_sec = float(raw_idle.strip())
 
 
 def _get_or_create_persistent_uuid() -> str:

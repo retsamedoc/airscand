@@ -316,10 +316,7 @@ def test_handle_discovery_resolve_ignored_on_epr_mismatch() -> None:
 def test_discover_scanner_xaddr_uses_config_override() -> None:
     """Configured scanner_xaddr bypasses active discovery."""
     cfg = make_config(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
-    assert (
-        asyncio.run(discover_scanner_xaddr(cfg))
-        == "http://192.168.1.60:80/WSD/DEVICE"
-    )
+    assert asyncio.run(discover_scanner_xaddr(cfg)) == "http://192.168.1.60:80/WSD/DEVICE"
 
 
 def test_discover_scanner_xaddr_from_probe_matches(monkeypatch: MonkeyPatch) -> None:

@@ -115,6 +115,9 @@ When `airscand` receives `wsa:Action` `.../ScanAvailableEvent` on `/wsd`, it now
 5. Wait for `ValidateScanTicketResponse`
 6. Outbound `CreateScanJob` to scanner `http://<scanner>/WDP/SCAN` only after successful validation
 7. Outbound `RetrieveImage` using **JobId** and **JobToken** from `CreateScanJobResponse`
+8. Optional: after a successful `RetrieveImage` **HTTP** response, wait for inbound **`ScannerStatusSummaryEvent`** with **`ScannerState` Idle** (global device status, not job-scoped), subject to timeout and configuration
+
+**Pull + status events:** `RetrieveImageResponse` is always the **synchronous HTTP response** to `RetrieveImage`. **`ScannerStatusSummaryEvent`** is delivered separately to the subscriber’s `NotifyTo` URL and may show **Processing** while the scanner works and **Idle** when it is ready for the next operation. A second WS-Eventing **`Subscribe`** (filter on `…/ScannerStatusSummaryEvent`) may be required in addition to `ScanAvailableEvent` so those notifications are delivered.
 
 Notes:
 

@@ -204,7 +204,9 @@ Two possible modes:
 - Printer POSTs image to /scan
 
 #### Pull Model (fallback)
-- Daemon calls RetrieveImage
+- Daemon calls `RetrieveImage` to the scanner; the **HTTP response** carries `RetrieveImageResponse` (including image bytes when successful).
+- In parallel, the scanner may push **`ScannerStatusSummaryEvent`** notifications to the daemon’s event sink (`NotifyTo`, same path as `ScanAvailableEvent`). Those events carry **global** `ScannerState` (for example **Processing** while the device works, then **Idle** when the scanner is ready again)—they are **not** scoped to a specific `JobId`.
+- After a successful `RetrieveImage` HTTP response, the daemon may **wait** for a subsequent **`ScannerStatusSummaryEvent` with `ScannerState` Idle** (configurable timeout) so the pull chain aligns with “scanner returned to idle” before the next `ScanAvailableEvent`. The operator selects the scan destination on the device; `ScanAvailableEvent` is delivered to the subscriber for that destination.
 
 ### 7. Phased Development Plan
 #### Phase 0 — Baseline Setup
