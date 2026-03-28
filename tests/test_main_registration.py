@@ -62,12 +62,14 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
                 "expires": "PT1H",
                 "subscribe_destination_token": "dest-from-subscribe",
                 "subscribe_destination_tokens": {"Scan": "dest-from-subscribe"},
+                "subscription_manager_url": "http://192.168.1.60:80/WDP/SCAN/submgr",
             }
         return {
             "identifier": "sub-status-1",
             "expires": "PT1H",
             "subscribe_destination_token": "dest-from-subscribe",
             "subscribe_destination_tokens": {"Scan": "dest-from-subscribe"},
+            "subscription_manager_url": "http://192.168.1.60:80/WDP/SCAN/submgr-status",
         }
 
     async def fake_preflight_wdp(
@@ -97,7 +99,10 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
     assert attempts["register"] == 2
     assert cfg.scanner_eventing_subscription_id == "sub-1"
     assert cfg.scanner_eventing_subscription_id_status == "sub-status-1"
-    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN"
+    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/submgr"
+    assert cfg.scanner_eventing_subscribe_manager_url_status == (
+        "http://192.168.1.60:80/WDP/SCAN/submgr-status"
+    )
     assert cfg.scanner_subscribe_destination_token == "dest-from-subscribe"
     assert cfg.scanner_subscribe_destination_tokens == {"Scan": "dest-from-subscribe"}
     assert cfg.use_env_subscribe_destination_token_only is False
@@ -180,6 +185,7 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
             "identifier": f"sub-{n}",
             "expires": "PT1H",
             "subscribe_destination_token": None,
+            "subscription_manager_url": "http://192.168.1.60:80/WDP/SCAN/mgr",
         }
 
     monkeypatch.setattr("main.discover_scanner_xaddr", fake_discover)
@@ -193,7 +199,8 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
     ]
     assert cfg.scanner_eventing_subscription_id == "sub-1"
     assert cfg.scanner_eventing_subscription_id_status == "sub-2"
-    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN"
+    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/mgr"
+    assert cfg.scanner_eventing_subscribe_manager_url_status == "http://192.168.1.60:80/WDP/SCAN/mgr"
     assert cfg.scanner_subscribe_destination_token == ""
     assert cfg.scanner_subscribe_destination_tokens == {}
     assert cfg.use_env_subscribe_destination_token_only is False

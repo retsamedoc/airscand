@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import uuid
+from typing import Any
 
 from aiohttp import ClientError, ClientSession
 
@@ -15,6 +16,8 @@ from app.scanner_status_coordination import (
 )
 
 NS_SOAP = "http://www.w3.org/2003/05/soap-envelope"
+# SOAP 2004/08 WS-Addressing: keep for outbound scanner SOAP (Subscribe, Unsubscribe, WS-Scan).
+# W3C ``http://www.w3.org/2005/08/addressing`` broke Subscribe on hardware tested here.
 NS_WSA = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
 NS_WSE = "http://schemas.xmlsoap.org/ws/2004/08/eventing"
 NS_SCA = "http://schemas.microsoft.com/windows/2006/08/wdp/scan"
@@ -146,6 +149,11 @@ SCANNER_STATUS_SUMMARY_EVENT_INNER_PATTERN = re.compile(
 SCANNER_STATE_IN_STATUS_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?State>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?State>",
     re.IGNORECASE,
+)
+# ``wse:SubscriptionManager`` inner XML (WS-Eventing SubscribeResponse).
+SUBSCRIPTION_MANAGER_INNER_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?SubscriptionManager\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?SubscriptionManager>",
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -280,14 +288,46 @@ def build_subscribe_request(
     return mid, body
 
 
+def _effective_subscription_identifier_for_unsubscribe(
+    subscription_identifier: str,
+    reference_parameters_xml: str | None,
+) -> str | None:
+    """Resolve subscription id for Unsubscribe ``wse:Identifier`` header.
+
+    Prefer ``wse:Identifier`` / ``wsman:Identifier`` text from stored
+    ``ReferenceParameters`` XML; otherwise use ``SubscribeResponse`` / config id.
+    """
+    ref = (reference_parameters_xml or "").strip()
+    if ref:
+        m = IDENTIFIER_PATTERN.search(ref)
+        if m:
+            return m.group(1).strip()
+        loose = re.search(
+            r"<(?:[A-Za-z0-9_]+:)?Identifier>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?Identifier>",
+            ref,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if loose:
+            return loose.group(1).strip()
+    sub = (subscription_identifier or "").strip()
+    return sub if sub else None
+
+
 def build_unsubscribe_request(
     *,
     to_url: str,
-    subscription_identifier: str,
+    subscription_identifier: str = "",
+    reference_parameters_xml: str | None = None,
     from_address: str | None = None,
     message_id: str | None = None,
 ) -> tuple[str, str]:
-    """Build WS-Eventing Unsubscribe SOAP envelope for the subscription manager endpoint."""
+    """Build WS-Eventing Unsubscribe SOAP envelope for the subscription manager endpoint.
+
+    Uses a plain destination URI in ``wsa:To`` and a top-level ``wse:Identifier`` SOAP
+    header (interop with common WSD / WS-Scan stacks). Identifier text is taken from
+    stored ``ReferenceParameters`` XML when present, else from ``subscription_identifier``.
+    The ``Unsubscribe`` body is empty.
+    """
     mid = message_id or _new_message_id()
     from_line = (
         f"""    <wsa:From>
@@ -297,20 +337,28 @@ def build_unsubscribe_request(
         if from_address
         else ""
     )
+    addr = (to_url or "").strip()
+    eff_id = _effective_subscription_identifier_for_unsubscribe(
+        subscription_identifier,
+        reference_parameters_xml,
+    )
+    id_line = (
+        f"    <wse:Identifier>{eff_id}</wse:Identifier>\n"
+        if eff_id
+        else ""
+    )
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}">
   <soap:Header>
     <wsa:Action>{ACTION_UNSUBSCRIBE}</wsa:Action>
-    <wsa:To>{to_url}</wsa:To>
-    <wsa:MessageID>{mid}</wsa:MessageID>
+    <wsa:To>{addr}</wsa:To>
+{id_line}    <wsa:MessageID>{mid}</wsa:MessageID>
 {from_line}    <wsa:ReplyTo>
       <wsa:Address>{WSA_ANONYMOUS}</wsa:Address>
     </wsa:ReplyTo>
   </soap:Header>
   <soap:Body>
-    <wse:Unsubscribe>
-      <wse:Identifier>{subscription_identifier}</wse:Identifier>
-    </wse:Unsubscribe>
+    <wse:Unsubscribe/>
   </soap:Body>
 </soap:Envelope>
 """
@@ -602,30 +650,53 @@ def extract_subscribe_destination_token(text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def extract_subscription_manager_url(text: str) -> str | None:
-    """Extract ``wsa:Address`` inside ``wse:SubscriptionManager`` from SubscribeResponse."""
-    match = re.search(
-        r"<(?:[A-Za-z0-9_]+:)?SubscriptionManager\b[^>]*>"
-        r".*?"
+def extract_subscription_manager_epr(text: str) -> tuple[str | None, str | None]:
+    """Extract Subscription Manager EPR ``Address`` and optional ``ReferenceParameters`` XML.
+
+    Lifecycle operations (Renew, GetStatus, Unsubscribe) MUST target the manager
+    ``Address`` from ``SubscribeResponse``; identity is carried in ``ReferenceParameters``
+    when the device supplies them.
+    """
+    m = SUBSCRIPTION_MANAGER_INNER_PATTERN.search(text)
+    if not m:
+        return None, None
+    inner = m.group(1)
+    addr_m = re.search(
         r"<(?:[A-Za-z0-9_]+:)?Address>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?Address>",
-        text,
+        inner,
         re.DOTALL | re.IGNORECASE,
     )
-    return match.group(1).strip() if match else None
+    addr = addr_m.group(1).strip() if addr_m else None
+    ref_m = re.search(
+        r"<(?:[A-Za-z0-9_]+:)?ReferenceParameters\b[^>]*>.*?</(?:[A-Za-z0-9_]+:)?ReferenceParameters>",
+        inner,
+        re.DOTALL | re.IGNORECASE,
+    )
+    ref_xml = ref_m.group(0).strip() if ref_m else None
+    return addr, ref_xml
 
 
-def parse_subscribe_response(text: str) -> dict[str, str | None]:
+def extract_subscription_manager_url(text: str) -> str | None:
+    """Extract ``wsa:Address`` inside ``wse:SubscriptionManager`` from SubscribeResponse."""
+    addr, _ = extract_subscription_manager_epr(text)
+    return addr
+
+
+def parse_subscribe_response(text: str) -> dict[str, Any]:
     """Extract subscription details from SOAP response body."""
     identifier_match = IDENTIFIER_PATTERN.search(text)
     expires_match = EXPIRES_PATTERN.search(text)
     tokens_map = extract_subscribe_destination_tokens_by_client_context(text)
     subscribe_destination_token = extract_subscribe_destination_token(text)
+    mgr_addr, mgr_ref = extract_subscription_manager_epr(text)
     return {
         "identifier": identifier_match.group(1).strip() if identifier_match else None,
         "expires": expires_match.group(1).strip() if expires_match else None,
         "subscribe_destination_token": subscribe_destination_token,
         "subscribe_destination_tokens": tokens_map if tokens_map else None,
-        "subscription_manager_url": extract_subscription_manager_url(text),
+        "subscription_manager_url": mgr_addr,
+        "subscription_manager_address": mgr_addr,
+        "subscription_manager_reference_parameters_xml": mgr_ref,
     }
 
 
@@ -1341,16 +1412,36 @@ async def register_with_scanner(
 async def unsubscribe_from_scanner(
     *,
     manager_url: str,
-    subscription_id: str,
+    subscription_id: str = "",
+    reference_parameters_xml: str | None = None,
     from_address: str | None = None,
     timeout_sec: float = 5.0,
 ) -> dict[str, str | None]:
     """Send WS-Eventing Unsubscribe to the subscription manager endpoint."""
     trimmed_url = (manager_url or "").strip()
     trimmed_id = (subscription_id or "").strip()
-    if not trimmed_url or not trimmed_id:
+    if not trimmed_url:
         log.info(
-            "Skipping WS-Eventing unsubscribe (missing manager URL or subscription id)",
+            "Skipping WS-Eventing unsubscribe (missing subscription manager URL from SubscribeResponse)",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "subscription_id": trimmed_id,
+            },
+        )
+        return {
+            "status": "skipped",
+            "message_id": None,
+            "fault_code": None,
+            "fault_subcode": None,
+            "fault_reason": None,
+        }
+    eff_id = _effective_subscription_identifier_for_unsubscribe(
+        trimmed_id,
+        reference_parameters_xml if reference_parameters_xml else None,
+    )
+    if not eff_id:
+        log.info(
+            "Skipping WS-Eventing unsubscribe (cannot resolve subscription identifier)",
             extra={
                 "subscription_manager_url": trimmed_url,
                 "subscription_id": trimmed_id,
@@ -1366,6 +1457,7 @@ async def unsubscribe_from_scanner(
     message_id, payload = build_unsubscribe_request(
         to_url=trimmed_url,
         subscription_identifier=trimmed_id,
+        reference_parameters_xml=reference_parameters_xml if reference_parameters_xml else None,
         from_address=from_address,
     )
     log.info(

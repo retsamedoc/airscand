@@ -16,7 +16,9 @@ from app.ws_eventing_client import (
     ACTION_RETRIEVE_IMAGE,
     ACTION_VALIDATE_SCAN_TICKET,
     FILTER_DIALECT_DEVPROF_ACTION,
+    NS_WSA,
     SCAN_AVAILABLE_EVENT_ACTION,
+    WSA_ANONYMOUS,
     build_create_scan_job_request,
     build_get_job_status_request,
     build_get_request,
@@ -72,6 +74,7 @@ def test_build_subscribe_request_contains_notify_to_and_to_url() -> None:
     assert (
         "<wsa:Action>http://schemas.xmlsoap.org/ws/2004/08/eventing/Subscribe</wsa:Action>" in xml
     )
+    assert f'xmlns:wsa="{NS_WSA}"' in xml
     assert "<wsa:To>http://192.168.1.60:80/WSD/DEVICE</wsa:To>" in xml
     assert "<wsa:ReplyTo>" in xml
     assert "<wse:EndTo>" in xml
@@ -80,10 +83,7 @@ def test_build_subscribe_request_contains_notify_to_and_to_url() -> None:
     assert f'Dialect="{FILTER_DIALECT_DEVPROF_ACTION}"' in xml
     assert SCAN_AVAILABLE_EVENT_ACTION in xml
     assert "<sca:ScanDestinations>" in xml
-    assert (
-        "<wsa:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:Address>"
-        in xml
-    )
+    assert f"<wsa:Address>{WSA_ANONYMOUS}</wsa:Address>" in xml
     assert "<wsa:Address>http://192.168.1.50:5357/wsd</wsa:Address>" in xml
 
 
@@ -362,19 +362,74 @@ def test_parse_subscribe_response_extracts_subscription_manager_url() -> None:
     assert extract_subscription_manager_url(xml) == "http://192.168.1.60:80/WDP/SCAN/submgr"
     parsed = parse_subscribe_response(xml)
     assert parsed["subscription_manager_url"] == "http://192.168.1.60:80/WDP/SCAN/submgr"
+    assert parsed["subscription_manager_address"] == "http://192.168.1.60:80/WDP/SCAN/submgr"
+    assert parsed["subscription_manager_reference_parameters_xml"] is None
+
+
+def test_parse_subscribe_response_extracts_subscription_manager_reference_parameters() -> None:
+    """SubscribeResponse SubscriptionManager may include ReferenceParameters for lifecycle EPR."""
+    xml = f"""<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing"
+  xmlns:wsa="{NS_WSA}"
+  xmlns:wsman="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">
+  <soap:Body>
+    <wse:SubscribeResponse>
+      <wsman:Identifier>urn:uuid:sub-ref</wsman:Identifier>
+      <wse:SubscriptionManager>
+        <wsa:Address>http://192.168.1.60:80/WDP/submgr</wsa:Address>
+        <wsa:ReferenceParameters>
+          <wse:Identifier>urn:uuid:from-epr</wse:Identifier>
+        </wsa:ReferenceParameters>
+      </wse:SubscriptionManager>
+      <wse:Expires>PT1H</wse:Expires>
+    </wse:SubscribeResponse>
+  </soap:Body>
+</soap:Envelope>
+"""
+    parsed = parse_subscribe_response(xml)
+    assert parsed["subscription_manager_url"] == "http://192.168.1.60:80/WDP/submgr"
+    assert "<wse:Identifier>urn:uuid:from-epr</wse:Identifier>" in (
+        parsed["subscription_manager_reference_parameters_xml"] or ""
+    )
 
 
 def test_build_unsubscribe_request_includes_identifier_and_action() -> None:
-    """Unsubscribe envelope targets manager URL and carries subscription identifier."""
+    """Unsubscribe uses plain wsa:To URI and wse:Identifier header (not body)."""
     mid, body = build_unsubscribe_request(
-        to_url="http://192.168.1.60:80/WDP/SCAN",
+        to_url="http://192.168.1.60:80/WDP/SCAN/submgr",
         subscription_identifier="urn:uuid:sub-1",
         from_address="urn:uuid:11111111-2222-3333-4444-555555555555",
     )
+    assert f'xmlns:wsa="{NS_WSA}"' in body
     assert "Unsubscribe" in body
+    assert "<wse:Unsubscribe/>" in body
+    assert "<wse:Unsubscribe>\n      <wse:Identifier>" not in body
     assert mid in body
-    assert "urn:uuid:sub-1" in body
-    assert "http://192.168.1.60:80/WDP/SCAN" in body
+    assert "<wsa:EndpointReference>" not in body
+    assert "<wsa:ReferenceParameters>" not in body
+    assert "<wse:Identifier>urn:uuid:sub-1</wse:Identifier>" in body
+    assert "<wsa:To>http://192.168.1.60:80/WDP/SCAN/submgr</wsa:To>" in body
+    assert body.count("<wsa:To>") == 1
+    assert f"<wsa:Address>{WSA_ANONYMOUS}</wsa:Address>" in body
+
+
+def test_build_unsubscribe_request_prefers_epr_reference_parameters() -> None:
+    """When SubscribeResponse ReferenceParameters are provided, extract Identifier for wse: header."""
+    mid, body = build_unsubscribe_request(
+        to_url="http://device/SubMgr",
+        subscription_identifier="urn:uuid:ignored-if-epr-set",
+        reference_parameters_xml=(
+            f'<wsa:ReferenceParameters xmlns:wsa="{NS_WSA}">'
+            "<wse:Identifier>urn:uuid:device</wse:Identifier></wsa:ReferenceParameters>"
+        ),
+        message_id="urn:uuid:fixed",
+    )
+    assert "<wse:Identifier>urn:uuid:device</wse:Identifier>" in body
+    assert "urn:uuid:ignored-if-epr-set" not in body
+    assert "<wsa:To>http://device/SubMgr</wsa:To>" in body
+    assert "<wsa:EndpointReference>" not in body
+    assert mid == "urn:uuid:fixed"
 
 
 @pytest.mark.asyncio

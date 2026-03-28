@@ -80,9 +80,24 @@ async def _eventing_registration_loop(config: Config) -> None:
                 if result.get("identifier") and (status == 0 or 200 <= status < 300):
                     sub_id = str(result.get("identifier") or "").strip()
                     mgr_url = (result.get("subscription_manager_url") or "").strip()
+                    mgr_ref = (
+                        str(result.get("subscription_manager_reference_parameters_xml") or "").strip()
+                    )
                     if not mgr_url:
-                        mgr_url = subscribe_to_url
+                        log.warning(
+                            "SubscribeResponse missing SubscriptionManager address; "
+                            "outbound Unsubscribe will be skipped until resubscribe",
+                            extra={
+                                "scanner_xaddr": scanner_xaddr,
+                                "subscribe_to_url": subscribe_to_url,
+                            },
+                        )
                     setattr(config, "scanner_eventing_subscribe_manager_url", mgr_url)
+                    setattr(
+                        config,
+                        "scanner_eventing_subscribe_manager_reference_parameters_xml",
+                        mgr_ref,
+                    )
                     setattr(config, "scanner_eventing_subscription_id", sub_id)
                     dest_tok = str(result.get("subscribe_destination_token") or "").strip()
                     setattr(config, "scanner_subscribe_destination_token", dest_tok)
@@ -97,6 +112,12 @@ async def _eventing_registration_loop(config: Config) -> None:
                         setattr(config, "scanner_subscribe_destination_tokens", {})
                     setattr(config, "use_env_subscribe_destination_token_only", False)
                     setattr(config, "scanner_eventing_subscription_id_status", "")
+                    setattr(config, "scanner_eventing_subscribe_manager_url_status", "")
+                    setattr(
+                        config,
+                        "scanner_eventing_subscribe_manager_reference_parameters_xml_status",
+                        "",
+                    )
                     status_sub_identifier = f"urn:uuid:{uuid.uuid4()}"
                     try:
                         status_result = await register_with_scanner(
@@ -109,10 +130,30 @@ async def _eventing_registration_loop(config: Config) -> None:
                         )
                         st2 = int(status_result.get("status") or "0")
                         if status_result.get("identifier") and (st2 == 0 or 200 <= st2 < 300):
+                            mgr_s = (status_result.get("subscription_manager_url") or "").strip()
+                            mgr_ref_s = (
+                                str(
+                                    status_result.get("subscription_manager_reference_parameters_xml")
+                                    or ""
+                                ).strip()
+                            )
+                            if not mgr_s:
+                                log.warning(
+                                    "ScannerStatusSummary SubscribeResponse missing "
+                                    "SubscriptionManager address; Unsubscribe for that subscription "
+                                    "will be skipped",
+                                    extra={"scanner_xaddr": scanner_xaddr},
+                                )
                             setattr(
                                 config,
                                 "scanner_eventing_subscription_id_status",
                                 str(status_result.get("identifier") or "").strip(),
+                            )
+                            setattr(config, "scanner_eventing_subscribe_manager_url_status", mgr_s)
+                            setattr(
+                                config,
+                                "scanner_eventing_subscribe_manager_reference_parameters_xml_status",
+                                mgr_ref_s,
                             )
                             log.info(
                                 "Scanner ScannerStatusSummaryEvent subscribe succeeded",
@@ -177,6 +218,16 @@ async def _shutdown_services(
     """Unsubscribe from WS-Eventing, then cancel long-lived tasks (discovery sends Bye in ``finally``)."""
     client_from_address = f"urn:uuid:{config.uuid}"
     mgr = str(getattr(config, "scanner_eventing_subscribe_manager_url", "") or "").strip()
+    mgr_ref = str(
+        getattr(config, "scanner_eventing_subscribe_manager_reference_parameters_xml", "") or ""
+    ).strip()
+    mgr_status = str(
+        getattr(config, "scanner_eventing_subscribe_manager_url_status", "") or ""
+    ).strip()
+    mgr_ref_status = str(
+        getattr(config, "scanner_eventing_subscribe_manager_reference_parameters_xml_status", "")
+        or ""
+    ).strip()
     sub_id = str(getattr(config, "scanner_eventing_subscription_id", "") or "").strip()
     sub_id_status = str(
         getattr(config, "scanner_eventing_subscription_id_status", "") or ""
@@ -184,14 +235,16 @@ async def _shutdown_services(
     try:
         if sub_id_status:
             await unsubscribe_from_scanner(
-                manager_url=mgr,
+                manager_url=mgr_status,
                 subscription_id=sub_id_status,
+                reference_parameters_xml=mgr_ref_status or None,
                 from_address=client_from_address,
             )
         if sub_id:
             await unsubscribe_from_scanner(
                 manager_url=mgr,
                 subscription_id=sub_id,
+                reference_parameters_xml=mgr_ref or None,
                 from_address=client_from_address,
             )
     except Exception:

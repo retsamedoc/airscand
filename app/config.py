@@ -38,8 +38,13 @@ class Config:
     log_level: str = "INFO"
     log_json: bool = False
     scanner_subscribe_to_url: str = ""
-    # Effective subscribe POST URL; used for outbound Unsubscribe when SubscriptionManager is absent.
+    # Subscription Manager ``wsa:Address`` from SubscribeResponse (outbound Unsubscribe/Renew/GetStatus).
     scanner_eventing_subscribe_manager_url: str = ""
+    # Optional ``wsa:ReferenceParameters`` element XML from ``SubscriptionManager`` in SubscribeResponse.
+    scanner_eventing_subscribe_manager_reference_parameters_xml: str = ""
+    # Second subscription (ScannerStatusSummaryEvent): manager EPR from that SubscribeResponse.
+    scanner_eventing_subscribe_manager_url_status: str = ""
+    scanner_eventing_subscribe_manager_reference_parameters_xml_status: str = ""
     eventing_preflight_get: bool = True
     eventing_notify_to_url: str = ""
     # When CreateScanJob fails with ClientErrorInvalidDestinationToken, retry once without DestinationToken.
