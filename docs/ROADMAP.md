@@ -61,6 +61,7 @@
   - UDP WS-Discovery listener task
   - HTTP server task (currently `aiohttp`)
 - Improve SOAP parsing robustness (namespace-aware parsing for additional actions and richer fault handling).
+- Investigate and potentially replace the current logging system with [structlog](https://www.structlog.org/en/stable/index.html) (structured context, flexible rendering, stdlib integration).
 
 ### Re-evaluate after Phase 1–2: FastAPI/uvicorn option
 
