@@ -54,10 +54,10 @@ class Config:
     # After successful RetrieveImage, wait for inbound ScannerStatusSummaryEvent Idle (global state).
     wait_scanner_idle_after_retrieve: bool = True
     scanner_idle_wait_sec: float = 60.0
-    # When set, overrides ``ScannerProfile.retrieve_image_timeout_sec`` (see ``WSD_RETRIEVE_IMAGE_TIMEOUT_SEC``).
-    retrieve_image_timeout_sec: float | None = None
     # ``app.quirks.get_profile`` key (e.g. generic, epson_wf_3640); skeleton until post–Phase 5.
     scanner_profile: str = "epson_wf_3640"
+    # When set, overrides ``ScannerProfile.retrieve_image_timeout_sec`` (see ``WSD_RETRIEVE_IMAGE_TIMEOUT_SEC``).
+    retrieve_image_timeout_sec: float | None = None
 
     def __post_init__(self) -> None:
         """Resolve environment variables and derive runtime values."""
@@ -133,10 +133,10 @@ class Config:
         raw_idle = os.getenv("WSD_SCANNER_IDLE_WAIT_SEC")
         if raw_idle is not None and raw_idle.strip() != "":
             self.scanner_idle_wait_sec = float(raw_idle.strip())
+        self.scanner_profile = os.getenv("WSD_SCANNER_PROFILE", self.scanner_profile).strip()
         raw_retrieve = os.getenv("WSD_RETRIEVE_IMAGE_TIMEOUT_SEC")
         if raw_retrieve is not None and raw_retrieve.strip() != "":
             self.retrieve_image_timeout_sec = float(raw_retrieve.strip())
-        self.scanner_profile = os.getenv("WSD_SCANNER_PROFILE", self.scanner_profile).strip()
 
 
 def _get_or_create_persistent_uuid() -> str:

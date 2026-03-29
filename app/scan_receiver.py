@@ -1,4 +1,4 @@
-"""Inbound scan receiver and persistence helpers."""
+"""Inbound scan receiver (push `/scan`) handler."""
 
 from __future__ import annotations
 
