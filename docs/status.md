@@ -31,7 +31,9 @@
   - Empty payloads are rejected with explicit `400` response
   - Save logs include bytes, content type, and detected file extension
   - Automated tests now cover successful persistence and error paths
-  - Completion date: **2026-03-26**
+  - Device-initiated capture persists images under **`WSD_OUTPUT_DIR`** (default `./scans`) from the outbound **RetrieveImage** / MTOM path when configured for the scan chain
+  - **Hardware validation:** **Epson WF-3640** — scan from the printer front panel to this host; image saved under `scans/` with no warnings or failures observed across modules (completion checkpoint: **2026-03-28**)
+  - Earlier milestone completion date: **2026-03-26**
 
 - **Next focus (Phase 5):**
   - Improve SOAP parsing robustness and richer fault handling

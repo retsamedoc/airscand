@@ -1,7 +1,10 @@
 """Scanner vendor profiles for WS-Scan interoperability.
 
-Per-profile chain defaults (e.g. GetJobStatus polling) live here; further SOAP/timing
-tweaks may follow; see ``docs/protocol/vendor_quirks.md`` and ``docs/ROADMAP.md``.
+Shared types and the **generic** profile live here. Vendor-specific profiles live under
+``app/quirks/<vendor>.py`` (e.g. :mod:`app.quirks.epson`) and are registered below for
+:func:`get_profile`.
+
+See ``docs/protocol/vendor_quirks.md`` and ``docs/ROADMAP.md``.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ class ScannerProfile:
     description: str = ""
     # When False, skip GetJobStatus polling before RetrieveImage (device does not implement it reliably).
     poll_get_job_status_before_retrieve: bool = True
+    # aiohttp total timeout for RetrieveImage MTOM/chunked body read (seconds).
+    retrieve_image_timeout_sec: float = 5.0
 
 
 PROFILE_GENERIC = ScannerProfile(
@@ -34,12 +39,7 @@ PROFILE_GENERIC = ScannerProfile(
     description="Default interoperability profile (no vendor-specific overrides).",
 )
 
-# Epson WorkForce WF-3640: GetJobStatus is not usable; go straight to RetrieveImage after CreateScanJob.
-PROFILE_EPSON_WF_3640 = ScannerProfile(
-    key="epson_wf_3640",
-    description="Epson WorkForce WF-3640 (tested); GetJobStatus not supported.",
-    poll_get_job_status_before_retrieve=False,
-)
+from .epson import PROFILE_EPSON_WF_3640
 
 _PROFILES: dict[str, ScannerProfile] = {
     PROFILE_GENERIC.key: PROFILE_GENERIC,

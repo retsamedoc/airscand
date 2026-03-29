@@ -58,6 +58,29 @@ _FAKE_GET_JOB_STATUS_COMPLETED_XML = """<soap:Envelope xmlns:soap="http://www.w3
   </sca:GetJobStatusResponse></soap:Body>
 </soap:Envelope>"""
 
+_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
+</soap:Envelope>"""
+
+
+def _fake_retrieve_image_from_xml(
+    xml: str,
+    *,
+    status: int = 200,
+    content_type: str = "application/soap+xml; charset=utf-8",
+):
+    """Build a coroutine that mocks `_post_soap_retrieve_image` for scan chain tests."""
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        assert ACTION_RETRIEVE_IMAGE in payload
+        return (status, xml.encode("utf-8"), content_type)
+
+    return fake_post_soap_retrieve_image
+
+
 if TYPE_CHECKING:
     from _pytest.logging import LogCaptureFixture
     from _pytest.monkeypatch import MonkeyPatch
@@ -1073,6 +1096,7 @@ async def test_get_scanner_elements_metadata_retries_when_invalid_args(
 async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> None:
     """Validate then Create chain returns create result on success."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1105,30 +1129,33 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId><sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        assert ACTION_RETRIEVE_IMAGE in payload
+        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
     )
-    assert len(calls) == 4
+    assert len(calls) == 3
     assert ACTION_GET_SCANNER_ELEMENTS in calls[0]
     assert ACTION_VALIDATE_SCAN_TICKET in calls[1]
     assert ACTION_CREATE_SCAN_JOB in calls[2]
     assert "<sca:DestinationToken>dest-42</sca:DestinationToken>" in calls[2]
     assert "<sca:JobName>DeviceTicketName</sca:JobName>" in calls[1]
     assert "<sca:JobName>DeviceTicketName</sca:JobName>" in calls[2]
-    assert ACTION_RETRIEVE_IMAGE in calls[3]
-    assert "<sca:JobId>job-42</sca:JobId>" in calls[3]
-    assert "<sca:JobToken>jtok-42</sca:JobToken>" in calls[3]
-    assert "<sca:DocumentNumber>1</sca:DocumentNumber>" in calls[3]
+    assert len(retrieve_payloads) == 1
+    assert ACTION_RETRIEVE_IMAGE in retrieve_payloads[0]
+    assert "<sca:JobId>job-42</sca:JobId>" in retrieve_payloads[0]
+    assert "<sca:JobToken>jtok-42</sca:JobToken>" in retrieve_payloads[0]
+    assert "<sca:DocumentNumber>1</sca:DocumentNumber>" in retrieve_payloads[0]
     assert result["validate_http_status"] == "200"
     assert result["create_http_status"] == "200"
     assert result["retrieve_http_status"] == "200"
@@ -1185,17 +1212,16 @@ async def test_run_scan_available_chain_idle_wait_success(monkeypatch: MonkeyPat
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>j</sca:JobId><sca:JobToken>t</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
 
     async def instant_idle(_timeout: float) -> bool:
         return True
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     monkeypatch.setattr(
         "app.ws_eventing_client.await_scanner_idle_after_retrieve",
         instant_idle,
@@ -1241,17 +1267,16 @@ async def test_run_scan_available_chain_idle_wait_timeout(monkeypatch: MonkeyPat
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>j</sca:JobId><sca:JobToken>t</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
 
     async def never_idle(_timeout: float) -> bool:
         return False
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     monkeypatch.setattr(
         "app.ws_eventing_client.await_scanner_idle_after_retrieve",
         never_idle,
@@ -1271,6 +1296,7 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
 ) -> None:
     """When polling is enabled, GetJobStatus runs after CreateScanJob and before RetrieveImage."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1303,28 +1329,30 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
             )
         if ACTION_GET_JOB_STATUS in payload:
             return 200, _FAKE_GET_JOB_STATUS_COMPLETED_XML
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
 
     async def instant_sleep(_delay: float) -> None:
         return None
 
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+
     monkeypatch.setattr("app.ws_eventing_client.asyncio.sleep", instant_sleep)
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=True,
         get_job_status_max_wait_sec=30.0,
     )
-    assert len(calls) == 5
+    assert len(calls) == 4
     assert ACTION_GET_JOB_STATUS in calls[3]
-    assert ACTION_RETRIEVE_IMAGE in calls[4]
-    assert "<sca:JobId>job-42</sca:JobId>" in calls[4]
+    assert len(retrieve_payloads) == 1
+    assert ACTION_RETRIEVE_IMAGE in retrieve_payloads[0]
+    assert "<sca:JobId>job-42</sca:JobId>" in retrieve_payloads[0]
     assert result["retrieve_http_status"] == "200"
 
 
@@ -1364,15 +1392,13 @@ async def test_run_scan_available_chain_prefers_subscribe_destination_token_over
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-sub</sca:JobId><sca:JobToken>jtok-sub</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         subscribe_destination_token="Client3478",
@@ -1412,15 +1438,13 @@ async def test_run_scan_available_chain_selects_token_by_event_client_context(
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-cc</sca:JobId><sca:JobToken>jtok-cc</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     event_xml = (
         "<sca:ScanAvailableEvent>"
         "<sca:ClientContext>ScanToEmail</sca:ClientContext>"
@@ -1446,6 +1470,7 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
 ) -> None:
     """Win10-style flow: when no subscribe token, DestinationToken follows validate wsa:MessageID."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     validate_xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -1476,15 +1501,16 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-msg</sca:JobId><sca:JobToken>jtok-msg</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
@@ -1494,7 +1520,7 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
         in calls[2]
     )
     assert "body-token-secondary" not in calls[2]
-    assert "<sca:JobToken>jtok-msg</sca:JobToken>" in calls[3]
+    assert "<sca:JobToken>jtok-msg</sca:JobToken>" in retrieve_payloads[0]
     assert result["job_id"] == "job-msg"
 
 
@@ -1597,6 +1623,7 @@ async def test_run_scan_available_chain_uses_event_destination_token(
 ) -> None:
     """Event payload destination token is used when validate response omits one."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1618,22 +1645,23 @@ async def test_run_scan_available_chain_uses_event_destination_token(
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-77</sca:JobId><sca:JobToken>jtok-77</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<sca:ScanAvailableEvent><sca:DestinationToken>event-token</sca:DestinationToken></sca:ScanAvailableEvent>",
         poll_get_job_status_before_retrieve=False,
     )
     assert "<sca:DestinationToken>event-token</sca:DestinationToken>" in calls[2]
-    assert "<sca:JobToken>jtok-77</sca:JobToken>" in calls[3]
+    assert "<sca:JobToken>jtok-77</sca:JobToken>" in retrieve_payloads[0]
     assert result["destination_token"] == "event-token"
     assert result["retrieve_http_status"] == "200"
 
@@ -1759,15 +1787,13 @@ async def test_run_scan_available_chain_prefers_event_subscription_identifier_ov
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-ev</sca:JobId><sca:JobToken>jtok-ev</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload=event_xml,
@@ -1786,6 +1812,7 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
 ) -> None:
     """ScanIdentifier is forwarded when destination token is absent."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1799,15 +1826,24 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
   <soap:Body><wscn:ValidateScanTicketResponse><wscn:ValidationInfo><wscn:ValidTicket>true</wscn:ValidTicket></wscn:ValidationInfo></wscn:ValidateScanTicketResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-99</sca:JobId><sca:JobToken>jtok-99</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
-        )
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>9CAED324E3C0_417441412_5</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
@@ -1819,7 +1855,7 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
         "<sca:DestinationToken>4bda57f5-1d9e-4c3d-871b-2e9ab12c8fd4</sca:DestinationToken>"
         in calls[2]
     )
-    assert "<sca:JobToken>jtok-99</sca:JobToken>" in calls[3]
+    assert "<sca:JobToken>jtok-99</sca:JobToken>" in retrieve_payloads[0]
     assert result["scan_identifier"] == "9CAED324E3C0_417441412_5"
 
 
@@ -1829,6 +1865,7 @@ async def test_run_scan_available_chain_retries_create_without_token_on_invalid_
 ) -> None:
     """CreateScanJob retries once without token fields on invalid-token fault."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1860,26 +1897,28 @@ async def test_run_scan_available_chain_retries_create_without_token_on_invalid_
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-retry</sca:JobId><sca:JobToken>jtok-retry</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>sid-retry-1</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
         poll_get_job_status_before_retrieve=False,
     )
-    assert len(calls) == 5
+    assert len(calls) == 4
     assert "<sca:DestinationToken>dest-bad</sca:DestinationToken>" in calls[2]
     assert "<sca:ScanIdentifier>sid-retry-1</sca:ScanIdentifier>" in calls[2]
     assert "<sca:DestinationToken>" not in calls[3]
     assert "<sca:ScanIdentifier>sid-retry-1</sca:ScanIdentifier>" in calls[3]
-    assert ACTION_RETRIEVE_IMAGE in calls[4]
+    assert len(retrieve_payloads) == 1
+    assert ACTION_RETRIEVE_IMAGE in retrieve_payloads[0]
     assert result["create_http_status"] == "200"
     assert result["job_id"] == "job-retry"
     assert result["retrieve_http_status"] == "200"
@@ -2001,15 +2040,13 @@ async def test_run_scan_available_chain_continues_when_metadata_probe_times_out(
   <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId><sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
 </soap:Envelope>""",
             )
-        return (
-            200,
-            """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
-  <soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse></soap:Body>
-</soap:Envelope>""",
-        )
+        raise AssertionError("unexpected SOAP request")
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,

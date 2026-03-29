@@ -247,11 +247,12 @@ Two possible modes:
 
 #### Phase 4 — Image Capture (Core Goal)
 - Implement /scan
-- Save files
+- Save files (including device-initiated chain output under configured output directory)
 
 ##### Success Criteria
 
 - Scanned image saved to disk
+- Status: complete — validated on **Epson WF-3640** (front-panel scan, file under `scans/`, clean run **2026-03-28**)
 
 #### Phase 5 — Hardening
 - XML parsing

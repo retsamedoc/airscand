@@ -60,7 +60,7 @@ def test_detect_file_type_unknown() -> None:
 @pytest.mark.asyncio
 async def test_handle_scan_persists_payload(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """Scan payload is saved to output directory with detected extension."""
-    monkeypatch.setattr("app.scan_receiver.uuid.uuid4", lambda: "fixed-id")
+    monkeypatch.setattr("app.scan_storage.uuid.uuid4", lambda: "fixed-id")
     config = _test_config(tmp_path)
     request = DummyRequest(
         body=b"%PDF-1.7\nbinary-data",

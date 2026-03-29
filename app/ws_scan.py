@@ -69,6 +69,8 @@ def _log_chain_result(task: asyncio.Task[dict[str, str | None]]) -> None:
                 "retrieve_fault_subcode": result.get("retrieve_fault_subcode"),
                 "retrieve_elapsed_sec": result.get("retrieve_elapsed_sec"),
                 "scanner_idle_wait_result": result.get("scanner_idle_wait_result"),
+                "saved_scan_path": result.get("saved_scan_path"),
+                "saved_scan_bytes": result.get("saved_scan_bytes"),
             },
         )
     except asyncio.CancelledError:
@@ -376,10 +378,17 @@ async def handle_wsd(request: web.Request) -> web.Response:
         scanner_profile = get_profile(
             str(getattr(config, "scanner_profile", "") or "").strip() or "epson_wf_3640"
         )
+        cfg_retrieve_timeout = getattr(config, "retrieve_image_timeout_sec", None)
+        retrieve_timeout = (
+            float(cfg_retrieve_timeout)
+            if cfg_retrieve_timeout is not None
+            else float(scanner_profile.retrieve_image_timeout_sec)
+        )
         task = asyncio.create_task(
             run_scan_available_chain(
                 scanner_xaddr=scanner_xaddr,
                 scan_available_payload=text,
+                retrieve_image_timeout_sec=retrieve_timeout,
                 from_address=from_address,
                 eventing_subscription_identifier=subscription_id or None,
                 subscribe_destination_token=subscribe_dest or None,
@@ -392,6 +401,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 wait_scanner_idle_after_retrieve=wait_idle,
                 scanner_idle_wait_sec=idle_sec,
                 scanner_profile=scanner_profile,
+                output_dir=getattr(config, "output_dir", None),
             )
         )
         task.add_done_callback(_log_chain_result)

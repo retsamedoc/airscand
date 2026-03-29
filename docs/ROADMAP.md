@@ -37,7 +37,8 @@
 - Empty upload payloads are rejected with explicit `400` responses.
 - Scan save logging now includes byte size, input content type, and detected file extension.
 - Added automated coverage for `/scan` success path and error handling (empty payload, invalid config).
-- Completion date: **2026-03-26**
+- **Field validation:** **Epson WF-3640** — document scanned from the device front panel; output file written under the configured scans directory; run completed with no warnings or failures logged (**2026-03-28**).
+- Completion date: **2026-03-26** (implementation); **2026-03-28** (hardware checkpoint above)
 
 #### Phase 1 env vars used
 

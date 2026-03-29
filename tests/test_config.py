@@ -72,6 +72,19 @@ def test_config_persistent_sequence_id(monkeypatch: MonkeyPatch, tmp_path: Path)
     assert cfg2.app_sequence_sequence_id == cfg1.app_sequence_sequence_id
 
 
+def test_config_retrieve_image_timeout_env_optional(monkeypatch: MonkeyPatch) -> None:
+    """WSD_RETRIEVE_IMAGE_TIMEOUT_SEC overrides profile when set; unset leaves None."""
+    monkeypatch.delenv("WSD_RETRIEVE_IMAGE_TIMEOUT_SEC", raising=False)
+    from app.config import Config
+
+    cfg = Config()
+    assert cfg.retrieve_image_timeout_sec is None
+
+    monkeypatch.setenv("WSD_RETRIEVE_IMAGE_TIMEOUT_SEC", "90")
+    cfg2 = Config()
+    assert cfg2.retrieve_image_timeout_sec == 90.0
+
+
 def test_config_discovery_env_overrides(monkeypatch: MonkeyPatch) -> None:
     """Discovery-specific environment variables are respected."""
     monkeypatch.setenv("WSD_HELLO_INTERVAL_SEC", "0")

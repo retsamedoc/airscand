@@ -41,6 +41,8 @@ If you immediately call `RetrieveImage`, you may get:
 
 ## Epson
 
+Epson-specific scanner profiles (e.g. WF-3640) and any future **Epson-wide** defaults live in [`app/quirks/epson.py`](../../app/quirks/epson.py); the registry in [`app/quirks/__init__.py`](../../app/quirks/__init__.py) imports them for `get_profile`.
+
 ### **1. Strict Parameter Expectations**
 
 * Rejects unknown or optional fields
@@ -79,6 +81,8 @@ If you immediately call `RetrieveImage`, you may get:
 **Client Requirement**
 
 * Do not rely on `GetJobStatus` before `RetrieveImage`; proceed to image retrieval after `CreateScanJob` and use retry/backoff there if needed.
+
+* **RetrieveImage read timeout:** the `generic` scanner profile uses a **5s** aiohttp timeout for the RetrieveImage response body (chunked MTOM); the **`epson_wf_3640`** profile uses **60s**. Set **`WSD_RETRIEVE_IMAGE_TIMEOUT_SEC`** to override both.
 
 ## Canon
 
