@@ -1136,10 +1136,16 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
         assert ACTION_RETRIEVE_IMAGE in payload
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
@@ -1338,11 +1344,17 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
         *, url: str, payload: str, timeout_sec: float
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client.asyncio.sleep", instant_sleep)
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=True,
@@ -1507,10 +1519,16 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
         *, url: str, payload: str, timeout_sec: float
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
@@ -1651,10 +1669,16 @@ async def test_run_scan_available_chain_uses_event_destination_token(
         *, url: str, payload: str, timeout_sec: float
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<sca:ScanAvailableEvent><sca:DestinationToken>event-token</sca:DestinationToken></sca:ScanAvailableEvent>",
@@ -1840,10 +1864,16 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
         *, url: str, payload: str, timeout_sec: float
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>9CAED324E3C0_417441412_5</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
@@ -1903,10 +1933,16 @@ async def test_run_scan_available_chain_retries_create_without_token_on_invalid_
         *, url: str, payload: str, timeout_sec: float
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>sid-retry-1</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",

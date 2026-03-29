@@ -346,11 +346,7 @@ def build_unsubscribe_request(
         subscription_identifier,
         reference_parameters_xml,
     )
-    id_line = (
-        f"    <wse:Identifier>{eff_id}</wse:Identifier>\n"
-        if eff_id
-        else ""
-    )
+    id_line = f"    <wse:Identifier>{eff_id}</wse:Identifier>\n" if eff_id else ""
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}">
   <soap:Header>
@@ -2055,7 +2051,9 @@ async def run_scan_available_chain(
             payload=retrieve_payload,
             timeout_sec=retrieve_image_timeout_sec,
         )
-        soap_text, image_bytes, image_part_ct = parse_retrieve_image_mtom(retrieve_body, retrieve_ct)
+        soap_text, image_bytes, image_part_ct = parse_retrieve_image_mtom(
+            retrieve_body, retrieve_ct
+        )
         retrieve_details = parse_retrieve_image_response(soap_text)
         fault = retrieve_details.get("fault_code")
         status_val = (retrieve_details.get("status") or "").strip().lower()

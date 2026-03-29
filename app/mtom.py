@@ -53,7 +53,9 @@ def extract_xop_include_cid(soap_xml: str) -> str | None:
     return match.group(1).strip()
 
 
-def parse_multipart_related_parts(body: bytes, content_type_header: str) -> list[tuple[dict[str, str], bytes]]:
+def parse_multipart_related_parts(
+    body: bytes, content_type_header: str
+) -> list[tuple[dict[str, str], bytes]]:
     """Split a multipart/related body using the outer ``Content-Type`` (with boundary)."""
     raw = (
         b"MIME-Version: 1.0\r\n"
@@ -108,7 +110,11 @@ def parse_retrieve_image_mtom(
     soap_headers: dict[str, str] = {}
     for hdrs, payload in part_list:
         ctype = (hdrs.get("Content-Type") or hdrs.get("Content-type") or "").lower()
-        if "xml" in ctype or payload.lstrip().startswith(b"<?xml") or payload.lstrip().startswith(b"<soap:"):
+        if (
+            "xml" in ctype
+            or payload.lstrip().startswith(b"<?xml")
+            or payload.lstrip().startswith(b"<soap:")
+        ):
             try:
                 soap_xml = payload.decode("utf-8")
             except UnicodeDecodeError:

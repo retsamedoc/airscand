@@ -43,7 +43,11 @@ def _build_mtom_http_body(*, boundary: str, soap_xml: str, image_bytes: bytes, c
     chunks.append(b"Content-Type: application/xop+xml\r\n\r\n")
     chunks.append(soap_xml.encode("utf-8"))
     chunks.append(f"\r\n--{boundary}\r\n".encode("ascii"))
-    chunks.append(f"Content-Type:image/jpeg\r\nContent-Transfer-Encoding:binary\r\nContent-ID:<{cid}>\r\n\r\n".encode("ascii"))
+    chunks.append(
+        f"Content-Type:image/jpeg\r\nContent-Transfer-Encoding:binary\r\nContent-ID:<{cid}>\r\n\r\n".encode(
+            "ascii"
+        )
+    )
     chunks.append(image_bytes)
     chunks.append(f"\r\n--{boundary}--\r\n".encode("ascii"))
     return b"".join(chunks)
@@ -85,14 +89,18 @@ def test_parse_retrieve_image_mtom_non_multipart_returns_soap_only() -> None:
         "<soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse>"
         "</soap:Body></soap:Envelope>"
     )
-    soap_text, image_bytes, image_ct = parse_retrieve_image_mtom(xml.encode("utf-8"), "application/soap+xml")
+    soap_text, image_bytes, image_ct = parse_retrieve_image_mtom(
+        xml.encode("utf-8"), "application/soap+xml"
+    )
     assert "Success" in soap_text
     assert image_bytes is None
     assert image_ct is None
 
 
 @pytest.mark.asyncio
-async def test_run_scan_available_chain_saves_mtom_image(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+async def test_run_scan_available_chain_saves_mtom_image(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     """When the scanner returns MTOM, image bytes are written under ``output_dir``."""
     calls: list[str] = []
     boundary = "b_mtom_save"
@@ -131,7 +139,9 @@ async def test_run_scan_available_chain_saves_mtom_image(tmp_path: Path, monkeyp
         return (200, mtom_body, outer_ct)
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     monkeypatch.setattr("app.scan_storage.uuid.uuid4", lambda: "mtom-test-id")
 
     result = await run_scan_available_chain(

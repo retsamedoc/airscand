@@ -1,16 +1,28 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-
 *.egg-info/
 dist/
 build/
 
+# Testing / coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Linters / caches
+.ruff_cache/
+.cache/
+
+# Documentation build (MkDocs default)
+site/
+
+# Local / scratch
 research/
 scans/
+
+# Cursor session debug logs (rules under .cursor/ may be committed)
+.cursor/debug*.log

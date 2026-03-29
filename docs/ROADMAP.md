@@ -57,6 +57,11 @@
 - Discovery responder still only handles the minimal probe path, not full WS-* compliance.
 - WS-Scan SOAP actions still use minimal placeholder behavior and need fuller protocol responses.
 
+### Documentation and policy
+
+- Create contributing developer documentation.
+- Add SECURITY.md policy.
+
 ### Near-term (Phase 5 focus)
 
 - When **multi-page** scan testing starts, re-evaluate **RetrieveImage** `DocumentDescription` handling: today we send a fixed `DocumentNumber` (default `1`) inside `DocumentDescription`; multi-page jobs may require per-document numbering, multiple `RetrieveImage` calls, or values taken from `CreateScanJobResponse` / job status.

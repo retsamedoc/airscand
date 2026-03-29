@@ -60,4 +60,3 @@ def test_epson_module_reexports_profile() -> None:
     from app.quirks.epson import PROFILE_EPSON_WF_3640 as ep
 
     assert ep.key == "epson_wf_3640"
-

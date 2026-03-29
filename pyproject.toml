@@ -16,6 +16,12 @@ dev = [
   "pytest-cov>=5.0",
   "ruff>=0.13.0",
 ]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-auto-refresh-build-pages>=1.0.3",
+    "mkdocs-material>=9.7.6",
+    "mkdocs-open-in-new-tab>=1.0.8",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -27,4 +33,19 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["F", "I"]
+select = ["F", "I", "D"]
+# Incremental docstrings: enforce Google-style on existing docstrings (pydocstyle D2xx+);
+# do not require new module/class/function docstrings on all legacy code (D1xx ignored).
+ignore = [
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "D105",
+  "D106",
+  "D107",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

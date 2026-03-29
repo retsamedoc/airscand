@@ -1,0 +1,39 @@
+name: Quality Checks
+
+on:
+  push:
+    paths:
+      - "main.py"
+      - "app/**"
+      - "pyproject.toml"
+      - ".github/workflows/quality.yaml"
+  pull_request:
+    paths:
+      - "main.py"
+      - "app/**"
+      - "pyproject.toml"
+      - ".github/workflows/quality.yaml"
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ruff
+        run: pip install "ruff>=0.5.0"
+
+      - name: Ruff check (all)
+        run: ruff check .
+
+      - name: Ruff format check (all)
+        run: ruff format --check .
