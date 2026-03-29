@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import runpy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
+import main
 from main import _eventing_registration_loop, _resolve_subscribe_to_url
 
 if TYPE_CHECKING:
@@ -31,6 +33,9 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         scanner_eventing_subscription_id_status="",
         scanner_subscribe_destination_tokens={},
         use_env_subscribe_destination_token_only=False,
+        eventing_renew_after_fraction=0.9,
+        eventing_renew_min_sleep_sec=5.0,
+        eventing_renew_fallback_duration_sec=3600.0,
     )
     attempts = {"discover": 0, "register": 0, "preflight": 0}
 
@@ -38,7 +43,9 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         attempts["discover"] += 1
         if attempts["discover"] < 2:
             return None
-        return "http://192.168.1.60:80/WSD/DEVICE"
+        if attempts["discover"] == 2:
+            return "http://192.168.1.60:80/WSD/DEVICE"
+        return None
 
     async def fake_register(
         *,
@@ -85,27 +92,39 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         assert from_address == "urn:uuid:11111111-2222-3333-4444-555555555555"
         return {"suggested_subscribe_to_url": None, "message_id": "urn:uuid:get-1"}
 
-    async def fake_sleep(_seconds: float) -> None:
-        return None
+    maintenance_done = asyncio.Event()
 
-    monkeypatch.setattr("main.discover_scanner_xaddr", fake_discover)
-    monkeypatch.setattr("main.preflight_get_scanner_capabilities", fake_preflight_wdp)
-    monkeypatch.setattr("main.register_with_scanner", fake_register)
-    monkeypatch.setattr("main.asyncio.sleep", fake_sleep)
+    async def fake_maintenance(_config: object, *, client_from_address: str) -> None:
+        maintenance_done.set()
 
-    await _eventing_registration_loop(cfg)
-    assert attempts["discover"] == 2
-    assert attempts["preflight"] == 1
-    assert attempts["register"] == 2
-    assert cfg.scanner_eventing_subscription_id == "sub-1"
-    assert cfg.scanner_eventing_subscription_id_status == "sub-status-1"
-    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/submgr"
-    assert cfg.scanner_eventing_subscribe_manager_url_status == (
-        "http://192.168.1.60:80/WDP/SCAN/submgr-status"
-    )
-    assert cfg.scanner_subscribe_destination_token == "dest-from-subscribe"
-    assert cfg.scanner_subscribe_destination_tokens == {"Scan": "dest-from-subscribe"}
-    assert cfg.use_env_subscribe_destination_token_only is False
+    monkeypatch.setattr(main, "discover_scanner_xaddr", fake_discover)
+    monkeypatch.setattr(main, "preflight_get_scanner_capabilities", fake_preflight_wdp)
+    monkeypatch.setattr(main, "register_with_scanner", fake_register)
+    orig_maintenance = main._eventing_maintenance_loop
+    main._eventing_maintenance_loop = fake_maintenance  # type: ignore[method-assign]
+    try:
+        task = asyncio.create_task(_eventing_registration_loop(cfg))
+        await asyncio.wait_for(maintenance_done.wait(), timeout=5.0)
+        assert attempts["discover"] == 2
+        assert attempts["preflight"] == 1
+        assert attempts["register"] == 2
+        assert cfg.scanner_eventing_subscription_id == "sub-1"
+        assert cfg.scanner_eventing_subscription_id_status == "sub-status-1"
+        assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/submgr"
+        assert cfg.scanner_eventing_subscribe_manager_url_status == (
+            "http://192.168.1.60:80/WDP/SCAN/submgr-status"
+        )
+        assert cfg.scanner_subscribe_destination_token == "dest-from-subscribe"
+        assert cfg.scanner_subscribe_destination_tokens == {"Scan": "dest-from-subscribe"}
+        assert cfg.use_env_subscribe_destination_token_only is False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        main._eventing_maintenance_loop = orig_maintenance  # type: ignore[method-assign]
 
 
 def test_resolve_subscribe_to_url_prefers_explicit_override() -> None:
@@ -148,11 +167,18 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         scanner_subscribe_destination_token="",
         scanner_subscribe_destination_tokens={},
         use_env_subscribe_destination_token_only=False,
+        eventing_renew_after_fraction=0.9,
+        eventing_renew_min_sleep_sec=5.0,
+        eventing_renew_fallback_duration_sec=3600.0,
     )
     calls = []
+    discover_calls = {"n": 0}
 
-    async def fake_discover(_config: object) -> str:
-        return "http://192.168.1.60:80/WSD/DEVICE"
+    async def fake_discover(_config: object) -> str | None:
+        discover_calls["n"] += 1
+        if discover_calls["n"] == 1:
+            return "http://192.168.1.60:80/WSD/DEVICE"
+        return None
 
     async def fake_preflight(
         *,
@@ -188,24 +214,40 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
             "subscription_manager_url": "http://192.168.1.60:80/WDP/SCAN/mgr",
         }
 
-    monkeypatch.setattr("main.discover_scanner_xaddr", fake_discover)
-    monkeypatch.setattr("main.preflight_get_scanner_capabilities", fake_preflight)
-    monkeypatch.setattr("main.register_with_scanner", fake_register)
+    maintenance_done = asyncio.Event()
 
-    await _eventing_registration_loop(cfg)
-    assert calls == [
-        "http://192.168.1.60:80/WDP/SCAN",
-        "http://192.168.1.60:80/WDP/SCAN",
-    ]
-    assert cfg.scanner_eventing_subscription_id == "sub-1"
-    assert cfg.scanner_eventing_subscription_id_status == "sub-2"
-    assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/mgr"
-    assert (
-        cfg.scanner_eventing_subscribe_manager_url_status == "http://192.168.1.60:80/WDP/SCAN/mgr"
-    )
-    assert cfg.scanner_subscribe_destination_token == ""
-    assert cfg.scanner_subscribe_destination_tokens == {}
-    assert cfg.use_env_subscribe_destination_token_only is False
+    async def fake_maintenance(_config: object, *, client_from_address: str) -> None:
+        maintenance_done.set()
+
+    monkeypatch.setattr(main, "discover_scanner_xaddr", fake_discover)
+    monkeypatch.setattr(main, "preflight_get_scanner_capabilities", fake_preflight)
+    monkeypatch.setattr(main, "register_with_scanner", fake_register)
+    orig_maintenance = main._eventing_maintenance_loop
+    main._eventing_maintenance_loop = fake_maintenance  # type: ignore[method-assign]
+    try:
+        task = asyncio.create_task(_eventing_registration_loop(cfg))
+        await asyncio.wait_for(maintenance_done.wait(), timeout=5.0)
+        assert calls == [
+            "http://192.168.1.60:80/WDP/SCAN",
+            "http://192.168.1.60:80/WDP/SCAN",
+        ]
+        assert cfg.scanner_eventing_subscription_id == "sub-1"
+        assert cfg.scanner_eventing_subscription_id_status == "sub-2"
+        assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/mgr"
+        assert (
+            cfg.scanner_eventing_subscribe_manager_url_status == "http://192.168.1.60:80/WDP/SCAN/mgr"
+        )
+        assert cfg.scanner_subscribe_destination_token == ""
+        assert cfg.scanner_subscribe_destination_tokens == {}
+        assert cfg.use_env_subscribe_destination_token_only is False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        main._eventing_maintenance_loop = orig_maintenance  # type: ignore[method-assign]
 
 
 def test_main_entrypoint_handles_keyboard_interrupt(

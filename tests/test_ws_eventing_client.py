@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,6 +14,7 @@ from app.ws_eventing_client import (
     ACTION_GET,
     ACTION_GET_JOB_STATUS,
     ACTION_GET_SCANNER_ELEMENTS,
+    ACTION_RENEW,
     ACTION_RETRIEVE_IMAGE,
     ACTION_VALIDATE_SCAN_TICKET,
     FILTER_DIALECT_DEVPROF_ACTION,
@@ -23,6 +25,7 @@ from app.ws_eventing_client import (
     build_get_job_status_request,
     build_get_request,
     build_get_scanner_elements_request,
+    build_renew_request,
     build_retrieve_image_request,
     build_subscribe_request,
     build_unsubscribe_request,
@@ -36,6 +39,8 @@ from app.ws_eventing_client import (
     parse_get_job_status_response,
     parse_get_response,
     parse_get_scanner_elements_response,
+    parse_iso8601_duration_to_seconds,
+    parse_renew_response,
     parse_retrieve_image_response,
     parse_scanner_status_summary_event,
     parse_soap_fault,
@@ -43,6 +48,7 @@ from app.ws_eventing_client import (
     parse_validate_scan_ticket_response,
     preflight_get_scanner_capabilities,
     register_with_scanner,
+    renew_subscription,
     resolve_scan_ticket_xml_for_chain,
     resolve_subscribe_destination_token_for_chain,
     resolve_wdp_scan_url,
@@ -415,6 +421,79 @@ def test_parse_subscribe_response_extracts_subscription_manager_reference_parame
     assert "<wse:Identifier>urn:uuid:from-epr</wse:Identifier>" in (
         parsed["subscription_manager_reference_parameters_xml"] or ""
     )
+
+
+def test_parse_iso8601_duration_to_seconds_common_forms() -> None:
+    """Duration parser handles PT*, P*D, and combined P0Y0M0DT* forms."""
+    assert parse_iso8601_duration_to_seconds("PT1H") == 3600.0
+    assert parse_iso8601_duration_to_seconds("PT45M") == 45 * 60.0
+    assert parse_iso8601_duration_to_seconds("P1D") == 86400.0
+    assert parse_iso8601_duration_to_seconds("P0Y0M0DT30H0M0S") == 30 * 3600.0
+
+
+def test_parse_renew_response_reads_expires() -> None:
+    """RenewResponse carries granted wse:Expires."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing">
+  <soap:Body>
+    <wse:RenewResponse>
+      <wse:Expires>PT2H</wse:Expires>
+    </wse:RenewResponse>
+  </soap:Body>
+</soap:Envelope>"""
+    assert parse_renew_response(xml)["expires"] == "PT2H"
+
+
+def test_build_renew_request_includes_renew_action_and_expires_body() -> None:
+    """Renew uses subscription manager To URI, wse:Identifier header, and Renew body."""
+    mid, body = build_renew_request(
+        to_url="http://192.168.1.60:80/WDP/SCAN/submgr",
+        subscription_identifier="urn:uuid:sub-1",
+        from_address="urn:uuid:11111111-2222-3333-4444-555555555555",
+        requested_expires="PT1H",
+        message_id="urn:uuid:renew-1",
+    )
+    assert ACTION_RENEW in body
+    assert mid == "urn:uuid:renew-1"
+    assert "<wse:Renew>" in body
+    assert "<wse:Expires>PT1H</wse:Expires>" in body
+    assert "<wse:Identifier>urn:uuid:sub-1</wse:Identifier>" in body
+    assert "<wsa:To>http://192.168.1.60:80/WDP/SCAN/submgr</wsa:To>" in body
+    assert f"<wsa:Address>{WSA_ANONYMOUS}</wsa:Address>" in body
+
+
+@pytest.mark.asyncio
+async def test_renew_subscription_parses_response(monkeypatch: MonkeyPatch) -> None:
+    """renew_subscription POSTs Renew and merges Expires from RenewResponse."""
+
+    async def fake_post_soap(
+        *,
+        url: str,
+        payload: str,
+        timeout_sec: float,
+    ) -> tuple[int, str]:
+        assert url == "http://192.168.1.60:80/WDP/SCAN/submgr"
+        assert "Renew" in payload
+        assert "urn:uuid:sub-1" in payload
+        body = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body>
+    <wse:RenewResponse xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing">
+      <wse:Expires>PT1H</wse:Expires>
+    </wse:RenewResponse>
+  </soap:Body>
+</soap:Envelope>"""
+        return 200, body
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    result = await renew_subscription(
+        manager_url="http://192.168.1.60:80/WDP/SCAN/submgr",
+        subscription_id="urn:uuid:sub-1",
+        from_address="urn:uuid:client",
+    )
+    assert result.get("status") == "200"
+    assert result.get("expires") == "PT1H"
 
 
 def test_build_unsubscribe_request_includes_identifier_and_action() -> None:
@@ -2100,3 +2179,84 @@ async def test_run_scan_available_chain_continues_when_metadata_probe_times_out(
     assert result["probe_http_status"] is None
     assert result["create_http_status"] == "200"
     assert result["retrieve_http_status"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_destination_subdir_and_post_hooks(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Destination config routes saves under a subdir and runs post-processing hooks."""
+    from app.destinations import ScanDestination, ScanDestinationConfig
+
+    hook_paths: list[Path] = []
+
+    def _hook(p: Path) -> None:
+        hook_paths.append(p)
+
+    dests = (
+        ScanDestination(
+            "Photos",
+            "Scan",
+            ScanDestinationConfig(output_subdir="photos"),
+            post_processing_hooks=[_hook],
+        ),
+    )
+    gse_xml = """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:ScannerConfiguration><sca:Platen>true</sca:Platen></sca:ScannerConfiguration>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>"""
+    scan_payload = (
+        '<sca:ScanAvailableEvent xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">'
+        "<sca:ClientContext>Scan</sca:ClientContext></sca:ScanAvailableEvent>"
+    )
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, gse_xml
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            assert "airscand destination scan" in payload
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            assert "airscand destination scan" in payload
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-sub</sca:JobId><sca:JobToken>tok-sub</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    def fake_parse_mtom(
+        body: bytes,
+        content_type: str | None,
+    ) -> tuple[str, bytes | None, str | None]:
+        return (_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML, b"\xff\xd8fakejpeg", "image/jpeg")
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
+    monkeypatch.setattr("app.ws_eventing_client.parse_retrieve_image_mtom", fake_parse_mtom)
+    monkeypatch.setattr("app.scan_storage.uuid.uuid4", lambda: "subdir-hook-id")
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        scan_available_payload=scan_payload,
+        poll_get_job_status_before_retrieve=False,
+        output_dir=tmp_path,
+        scan_destinations=dests,
+    )
+    assert result.get("saved_scan_path") == str(tmp_path / "photos" / "scan_subdir-hook-id.jpg")
+    assert len(hook_paths) == 1
+    assert hook_paths[0] == Path(result.get("saved_scan_path") or "")
+    assert result.get("ticket_validation_ok") == "true"

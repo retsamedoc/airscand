@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from aiohttp import ClientError
 
+from app.destinations import DEFAULT_DESTINATIONS, ScanDestination, lookup_destination
 from app.mtom import parse_retrieve_image_mtom
 from app.quirks import ScannerProfile
 from app.scan_storage import save_scan_file
@@ -20,9 +22,15 @@ from app.scanner_status_coordination import (
 from app.soap import namespaces
 from app.soap.builders import eventing as eventing_builders
 from app.soap.fault import parse_soap_fault
+from app.soap.parsers import capabilities as scanner_capabilities
 from app.soap.parsers import eventing as eventing_parsers
 from app.soap.parsers import scan as scan_parsers
 from app.soap.parsers import transfer as transfer_parsers
+
+parse_scanner_capabilities = scanner_capabilities.parse_scanner_capabilities
+# Re-export for callers/tests.
+InputSourceCapabilities = scanner_capabilities.InputSourceCapabilities
+ScannerCapabilities = scanner_capabilities.ScannerCapabilities
 from app.soap.transport import default_soap_http_client
 
 # Re-export namespace constants for tests and main (explicit aliases satisfy static analysis).
@@ -31,6 +39,7 @@ ACTION_GET = namespaces.ACTION_GET
 ACTION_GET_JOB_STATUS = namespaces.ACTION_GET_JOB_STATUS
 ACTION_GET_SCANNER_ELEMENTS = namespaces.ACTION_GET_SCANNER_ELEMENTS
 ACTION_RETRIEVE_IMAGE = namespaces.ACTION_RETRIEVE_IMAGE
+ACTION_RENEW = namespaces.ACTION_RENEW
 ACTION_SUBSCRIBE = namespaces.ACTION_SUBSCRIBE
 ACTION_UNSUBSCRIBE = namespaces.ACTION_UNSUBSCRIBE
 ACTION_VALIDATE_SCAN_TICKET = namespaces.ACTION_VALIDATE_SCAN_TICKET
@@ -52,10 +61,13 @@ GET_JOB_STATUS_MAX_INTERVAL_SEC = scan_parsers.GET_JOB_STATUS_MAX_INTERVAL_SEC
 GET_JOB_STATUS_MAX_WAIT_SEC = scan_parsers.GET_JOB_STATUS_MAX_WAIT_SEC
 SCANNER_METADATA_ELEMENT_PREFIX = scan_parsers.SCANNER_METADATA_ELEMENT_PREFIX
 SCANNER_METADATA_ELEMENT_NAMES = scan_parsers.SCANNER_METADATA_ELEMENT_NAMES
-SCANNER_METADATA_ELEMENT_NAMES_NO_DEFAULT_TICKET = scan_parsers.SCANNER_METADATA_ELEMENT_NAMES_NO_DEFAULT_TICKET
+SCANNER_METADATA_ELEMENT_NAMES_NO_DEFAULT_TICKET = (
+    scan_parsers.SCANNER_METADATA_ELEMENT_NAMES_NO_DEFAULT_TICKET
+)
 DEFAULT_SCAN_DESTINATIONS = eventing_builders.DEFAULT_SCAN_DESTINATIONS
 SCAN_TICKET_TEMPLATE_XML = scan_parsers.SCAN_TICKET_TEMPLATE_XML
 
+build_renew_request = eventing_builders.build_renew_request
 build_subscribe_request = eventing_builders.build_subscribe_request
 build_unsubscribe_request = eventing_builders.build_unsubscribe_request
 build_get_request = transfer_parsers.build_get_request
@@ -70,6 +82,8 @@ extract_subscribe_destination_tokens_by_client_context = (
 extract_subscribe_destination_token = eventing_parsers.extract_subscribe_destination_token
 extract_subscription_manager_epr = eventing_parsers.extract_subscription_manager_epr
 extract_subscription_manager_url = eventing_parsers.extract_subscription_manager_url
+parse_iso8601_duration_to_seconds = eventing_parsers.parse_iso8601_duration_to_seconds
+parse_renew_response = eventing_parsers.parse_renew_response
 parse_subscribe_response = eventing_parsers.parse_subscribe_response
 parse_get_response = transfer_parsers.parse_get_response
 parse_validate_scan_ticket_response = scan_parsers.parse_validate_scan_ticket_response
@@ -78,11 +92,18 @@ parse_get_job_status_response = scan_parsers.parse_get_job_status_response
 parse_retrieve_image_response = scan_parsers.parse_retrieve_image_response
 parse_scanner_status_summary_event = scan_parsers.parse_scanner_status_summary_event
 parse_get_scanner_elements_response = scan_parsers.parse_get_scanner_elements_response
+build_scan_ticket_from_destination_config = scan_parsers.build_scan_ticket_from_destination_config
+validate_scan_ticket_against_capabilities = scan_parsers.validate_scan_ticket_against_capabilities
+apply_scanner_configuration_to_scan_ticket_xml = (
+    scan_parsers.apply_scanner_configuration_to_scan_ticket_xml
+)
 resolve_scan_ticket_xml_for_chain = scan_parsers.resolve_scan_ticket_xml_for_chain
 resolve_wdp_scan_url = scan_parsers.resolve_wdp_scan_url
 extract_destination_token = scan_parsers.extract_destination_token
 extract_client_context = scan_parsers.extract_client_context
-resolve_subscribe_destination_token_for_chain = scan_parsers.resolve_subscribe_destination_token_for_chain
+resolve_subscribe_destination_token_for_chain = (
+    scan_parsers.resolve_subscribe_destination_token_for_chain
+)
 extract_soap_envelope_message_id = scan_parsers.extract_soap_envelope_message_id
 extract_scan_identifier = scan_parsers.extract_scan_identifier
 extract_event_subscription_identifier = scan_parsers.extract_event_subscription_identifier
@@ -263,6 +284,7 @@ async def poll_get_job_status_until_ready(
         "terminal_failure": False,
     }
 
+
 async def preflight_get_scanner_capabilities(
     *,
     scanner_xaddr: str,
@@ -272,7 +294,9 @@ async def preflight_get_scanner_capabilities(
 ) -> dict[str, str | None]:
     """Query scanner capabilities and parse helpful endpoint hints."""
     get_url = get_to_url or scanner_xaddr
-    message_id, payload = transfer_parsers.build_get_request(to_url=get_url, from_address=from_address)
+    message_id, payload = transfer_parsers.build_get_request(
+        to_url=get_url, from_address=from_address
+    )
     log.info(
         "Outbound WS-Transfer Get sending",
         extra={
@@ -526,6 +550,127 @@ async def unsubscribe_from_scanner(
         raise
 
 
+async def renew_subscription(
+    *,
+    manager_url: str,
+    subscription_id: str = "",
+    reference_parameters_xml: str | None = None,
+    from_address: str | None = None,
+    requested_expires: str = "PT1H",
+    timeout_sec: float = 5.0,
+) -> dict[str, str | None]:
+    """Send WS-Eventing Renew to the subscription manager endpoint."""
+    trimmed_url = (manager_url or "").strip()
+    trimmed_id = (subscription_id or "").strip()
+    if not trimmed_url:
+        log.info(
+            "Skipping WS-Eventing renew (missing subscription manager URL)",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "subscription_id": trimmed_id,
+            },
+        )
+        return {
+            "status": "skipped",
+            "message_id": None,
+            "expires": None,
+            "fault_code": None,
+            "fault_subcode": None,
+            "fault_reason": None,
+        }
+    eff_id = _effective_subscription_identifier_for_unsubscribe(
+        trimmed_id,
+        reference_parameters_xml if reference_parameters_xml else None,
+    )
+    if not eff_id:
+        log.info(
+            "Skipping WS-Eventing renew (cannot resolve subscription identifier)",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "subscription_id": trimmed_id,
+            },
+        )
+        return {
+            "status": "skipped",
+            "message_id": None,
+            "expires": None,
+            "fault_code": None,
+            "fault_subcode": None,
+            "fault_reason": None,
+        }
+    message_id, payload = eventing_builders.build_renew_request(
+        to_url=trimmed_url,
+        subscription_identifier=trimmed_id,
+        reference_parameters_xml=reference_parameters_xml if reference_parameters_xml else None,
+        from_address=from_address,
+        requested_expires=requested_expires,
+    )
+    log.info(
+        "Outbound WS-Eventing renew sending",
+        extra={
+            "subscription_manager_url": trimmed_url,
+            "subscription_id": trimmed_id,
+            "message_id": message_id,
+            "timeout_sec": timeout_sec,
+        },
+    )
+    try:
+        status, response_text = await _post_soap(
+            url=trimmed_url,
+            payload=payload,
+            timeout_sec=timeout_sec,
+        )
+        parsed = eventing_parsers.parse_renew_response(response_text)
+        details = parse_soap_fault(response_text)
+        details.update(parsed)
+        details.update({"status": str(status), "message_id": message_id})
+        if status < 200 or status >= 300:
+            log.warning(
+                "Outbound WS-Eventing renew returned non-success status",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "status": status,
+                    "fault_subcode": details.get("fault_subcode"),
+                    "fault_reason": details.get("fault_reason"),
+                },
+            )
+        elif details.get("fault_code"):
+            log.warning(
+                "Outbound WS-Eventing renew SOAP fault",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "fault_subcode": details.get("fault_subcode"),
+                    "fault_reason": details.get("fault_reason"),
+                },
+            )
+        else:
+            log.info(
+                "Outbound WS-Eventing renew completed",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "subscription_id": trimmed_id,
+                    "status": status,
+                    "expires": details.get("expires"),
+                },
+            )
+        return details
+    except asyncio.TimeoutError:
+        log.warning(
+            "Outbound WS-Eventing renew timed out",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "timeout_sec": timeout_sec,
+            },
+        )
+        raise
+    except ClientError as exc:
+        log.warning(
+            "Outbound WS-Eventing renew transport error",
+            extra={"subscription_manager_url": trimmed_url, "error": str(exc)},
+        )
+        raise
+
+
 def _get_scanner_elements_should_retry_after_invalid_args(
     status: int,
     details: dict[str, str | None],
@@ -649,6 +794,7 @@ async def run_scan_available_chain(
     scanner_idle_wait_sec: float = 60.0,
     scanner_profile: ScannerProfile | None = None,
     output_dir: str | Path | None = None,
+    scan_destinations: Sequence[ScanDestination] | None = None,
 ) -> dict[str, str | None]:
     """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage.
 
@@ -675,6 +821,8 @@ async def run_scan_available_chain(
         "default_scan_ticket": None,
         "scanner_configuration": None,
         "scanner_status": None,
+        "ticket_validation_ok": None,
+        "ticket_validation_issues": None,
     }
     try:
         metadata_details = await get_scanner_elements_metadata(
@@ -701,10 +849,38 @@ async def run_scan_available_chain(
             "Scanner metadata probe failed; continuing scan chain",
             extra={"target_url": target_url, "error": str(exc)},
         )
-    scan_ticket_xml = scan_parsers.resolve_scan_ticket_xml_for_chain(
-        scanner_metadata.get("default_scan_ticket"),
-        scanner_metadata.get("scanner_configuration"),
+
+    event_payload = scan_available_payload or ""
+    event_client_context = scan_parsers.extract_client_context(event_payload)
+    parsed_caps = parse_scanner_capabilities(scanner_metadata.get("scanner_configuration"))
+    dest_seq = scan_destinations if scan_destinations is not None else DEFAULT_DESTINATIONS
+    resolved_dest = lookup_destination(event_client_context, dest_seq)
+
+    if resolved_dest is not None and resolved_dest.config is not None:
+        scan_ticket_xml = scan_parsers.build_scan_ticket_from_destination_config(
+            resolved_dest.config,
+            parsed_caps,
+        )
+        scan_ticket_xml = scan_parsers.apply_scanner_configuration_to_scan_ticket_xml(
+            scan_ticket_xml,
+            scanner_metadata.get("scanner_configuration"),
+        )
+    else:
+        scan_ticket_xml = scan_parsers.resolve_scan_ticket_xml_for_chain(
+            scanner_metadata.get("default_scan_ticket"),
+            scanner_metadata.get("scanner_configuration"),
+        )
+
+    ticket_validation = scan_parsers.validate_scan_ticket_against_capabilities(
+        scan_ticket_xml,
+        parsed_caps,
     )
+    issues_list = ticket_validation.get("issues") or []
+    scanner_metadata["ticket_validation_ok"] = "true" if ticket_validation.get("ok") else "false"
+    scanner_metadata["ticket_validation_issues"] = (
+        ",".join(str(x) for x in issues_list) if issues_list else None
+    )
+
     validate_message_id, validate_payload = scan_parsers.build_validate_scan_ticket_request(
         to_url=target_url,
         from_address=from_address,
@@ -716,18 +892,20 @@ async def run_scan_available_chain(
         timeout_sec=timeout_sec,
     )
     validate_details = scan_parsers.parse_validate_scan_ticket_response(validate_response_text)
-    validate_response_message_id = scan_parsers.extract_soap_envelope_message_id(validate_response_text)
-    event_payload = scan_available_payload or ""
+    validate_response_message_id = scan_parsers.extract_soap_envelope_message_id(
+        validate_response_text
+    )
     scan_identifier = scan_parsers.extract_scan_identifier(event_payload)
     subscription_token = (eventing_subscription_identifier or "").strip() or None
-    event_subscription_identifier = scan_parsers.extract_event_subscription_identifier(event_payload)
+    event_subscription_identifier = scan_parsers.extract_event_subscription_identifier(
+        event_payload
+    )
     sub_dest = scan_parsers.resolve_subscribe_destination_token_for_chain(
         event_payload=event_payload,
         subscribe_destination_tokens=subscribe_destination_tokens,
         subscribe_destination_token=subscribe_destination_token,
         use_env_subscribe_destination_token_only=use_env_subscribe_destination_token_only,
     )
-    event_client_context = scan_parsers.extract_client_context(event_payload)
     # Precedence: SubscribeResponse tokens (per ClientContext when map present), then event hints,
     # then validate response (MessageID heuristic and body token), then persisted WS-Eventing id.
     destination_token = (
@@ -992,9 +1170,20 @@ async def run_scan_available_chain(
         )
         if retrieve_ok and output_dir is not None and image_bytes:
             try:
-                path = save_scan_file(Path(output_dir), image_bytes, content_type=image_part_ct)
+                out_subdir: str | None = None
+                if resolved_dest is not None and resolved_dest.config is not None:
+                    out_subdir = resolved_dest.config.output_subdir
+                path = save_scan_file(
+                    Path(output_dir),
+                    image_bytes,
+                    content_type=image_part_ct,
+                    subdir=out_subdir,
+                )
                 saved_scan_path_str = str(path)
                 saved_scan_bytes_val = len(image_bytes)
+                if resolved_dest is not None:
+                    for hook in resolved_dest.post_processing_hooks:
+                        hook(path)
             except OSError:
                 log.exception(
                     "Failed to persist RetrieveImage payload",

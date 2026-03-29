@@ -63,12 +63,21 @@ def save_scan_file(
     data: bytes,
     *,
     content_type: str | None = None,
+    subdir: str | None = None,
 ) -> Path:
-    """Write scan bytes under ``output_dir`` with a unique name; prefer MIME for extension."""
+    """Write scan bytes under ``output_dir`` with a unique name; prefer MIME for extension.
+
+    Args:
+        output_dir: Base directory for scans.
+        data: Raw file bytes.
+        content_type: Optional MIME hint for extension selection.
+        subdir: Optional subdirectory under ``output_dir`` (created if missing).
+    """
+    base = output_dir / subdir if subdir else output_dir
     ext = extension_from_mime(content_type) or detect_file_type(data)
     filename = f"scan_{uuid.uuid4()}.{ext}"
-    path = output_dir / filename
-    output_dir.mkdir(parents=True, exist_ok=True)
+    path = base / filename
+    base.mkdir(parents=True, exist_ok=True)
     write_scan_atomically(path, data)
     log.info(
         "Scan saved",

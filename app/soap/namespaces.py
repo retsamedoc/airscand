@@ -23,6 +23,7 @@ SCAN_AVAILABLE_EVENT_ACTION = f"{NS_SCA}/ScanAvailableEvent"
 SCANNER_STATUS_SUMMARY_EVENT_ACTION = f"{NS_SCA}/ScannerStatusSummaryEvent"
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
+ACTION_RENEW = f"{NS_WSE}/Renew"
 ACTION_UNSUBSCRIBE = f"{NS_WSE}/Unsubscribe"
 ACTION_GET = f"{NS_WST}/Get"
 ACTION_VALIDATE_SCAN_TICKET = f"{NS_SCA}/ValidateScanTicket"

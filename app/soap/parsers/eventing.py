@@ -5,6 +5,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+_SECONDS_PER_DAY = 86400.0
+_SECONDS_PER_WEEK = 7 * _SECONDS_PER_DAY
+# Calendar approximations for Y/M when scanners emit full ISO date components.
+_SECONDS_PER_MONTH = 30 * _SECONDS_PER_DAY
+_SECONDS_PER_YEAR = 365.25 * _SECONDS_PER_DAY
+
 IDENTIFIER_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?Identifier>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?Identifier>"
 )
@@ -30,6 +36,7 @@ SUBSCRIPTION_MANAGER_INNER_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?SubscriptionManager\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?SubscriptionManager>",
     re.DOTALL | re.IGNORECASE,
 )
+
 
 def effective_subscription_identifier_for_unsubscribe(
     subscription_identifier: str,
@@ -125,4 +132,72 @@ def parse_subscribe_response(text: str) -> dict[str, Any]:
         "subscription_manager_url": mgr_addr,
         "subscription_manager_address": mgr_addr,
         "subscription_manager_reference_parameters_xml": mgr_ref,
+    }
+
+
+def parse_iso8601_duration_to_seconds(expires: str) -> float:
+    """Parse an XML ``xs:duration`` / ISO 8601 duration string to seconds.
+
+    Supports common scanner forms such as ``PT1H``, ``PT45M``, ``P1D``, and
+    ``P0Y0M0DT30H0M0S``. Year and month components use calendar approximations.
+
+    Args:
+        expires: Duration string, typically from ``wse:Expires``.
+
+    Returns:
+        Non-negative duration in seconds.
+
+    Raises:
+        ValueError: If the string is empty or cannot be parsed as a duration.
+    """
+    text = expires.strip()
+    if not text:
+        msg = "empty duration string"
+        raise ValueError(msg)
+    if text[0] not in "Pp":
+        msg = f"not an ISO 8601 duration: {expires!r}"
+        raise ValueError(msg)
+    rest = text[1:]
+    if rest.startswith("T") or rest.startswith("t"):
+        date_part, time_part = "", rest[1:]
+    elif "T" in rest or "t" in rest:
+        lower = rest.lower()
+        idx = lower.index("t")
+        date_part, time_part = rest[:idx], rest[idx + 1 :]
+    else:
+        date_part, time_part = rest, ""
+
+    total = 0.0
+    for match in re.finditer(r"(\d+(?:\.\d+)?)([YMWDymwd])", date_part):
+        value = float(match.group(1))
+        unit = match.group(2).upper()
+        if unit == "Y":
+            total += value * _SECONDS_PER_YEAR
+        elif unit == "M":
+            total += value * _SECONDS_PER_MONTH
+        elif unit == "W":
+            total += value * _SECONDS_PER_WEEK
+        elif unit == "D":
+            total += value * _SECONDS_PER_DAY
+    for match in re.finditer(r"(\d+(?:\.\d+)?)([HMShms])", time_part):
+        value = float(match.group(1))
+        unit = match.group(2).upper()
+        if unit == "H":
+            total += value * 3600.0
+        elif unit == "M":
+            total += value * 60.0
+        elif unit == "S":
+            total += value
+
+    if total < 0:
+        msg = f"negative duration: {expires!r}"
+        raise ValueError(msg)
+    return total
+
+
+def parse_renew_response(text: str) -> dict[str, Any]:
+    """Extract granted expiration from a WS-Eventing RenewResponse body."""
+    expires_match = EXPIRES_PATTERN.search(text)
+    return {
+        "expires": expires_match.group(1).strip() if expires_match else None,
     }

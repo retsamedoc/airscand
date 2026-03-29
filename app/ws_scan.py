@@ -357,6 +357,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 scanner_idle_wait_sec=idle_sec,
                 scanner_profile=scanner_profile,
                 output_dir=getattr(config, "output_dir", None),
+                scan_destinations=getattr(config, "scan_destinations", None),
             )
         )
         task.add_done_callback(_log_chain_result)

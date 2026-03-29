@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from app.destinations import DEFAULT_DESTINATIONS, subscribe_tuple_destinations
 from app.soap.addressing import new_message_id
 from app.soap.envelope import build_outbound_client_envelope
 from app.soap.namespaces import (
+    ACTION_RENEW,
     ACTION_SUBSCRIBE,
     ACTION_UNSUBSCRIBE,
     FILTER_DIALECT_DEVPROF_ACTION,
@@ -14,13 +16,7 @@ from app.soap.namespaces import (
 )
 from app.soap.parsers.eventing import effective_subscription_identifier_for_unsubscribe
 
-DEFAULT_SCAN_DESTINATIONS = (
-    ("Scan to airscand", "Scan"),
-    ("Scan for Print to airscand", "ScanToPrint"),
-    ("Scan for E-mail to airscand", "ScanToEmail"),
-    ("Scan for Fax to airscand", "ScanToFax"),
-    ("Scan for OCR to airscand", "ScanToOCR"),
-)
+DEFAULT_SCAN_DESTINATIONS = subscribe_tuple_destinations(DEFAULT_DESTINATIONS)
 
 
 def build_subscribe_request(
@@ -70,6 +66,38 @@ def build_subscribe_request(
         from_address=from_address,
         reply_to_anonymous=True,
         between_to_and_message_id="",
+    )
+
+
+def build_renew_request(
+    *,
+    to_url: str,
+    subscription_identifier: str = "",
+    reference_parameters_xml: str | None = None,
+    from_address: str | None = None,
+    requested_expires: str = "PT1H",
+    message_id: str | None = None,
+) -> tuple[str, str]:
+    """Build WS-Eventing Renew SOAP envelope for the subscription manager endpoint."""
+    addr = (to_url or "").strip()
+    eff_id = effective_subscription_identifier_for_unsubscribe(
+        subscription_identifier,
+        reference_parameters_xml,
+    )
+    id_line = f"    <wse:Identifier>{eff_id}</wse:Identifier>\n" if eff_id else ""
+    body_inner = f"""    <wse:Renew>
+      <wse:Expires>{requested_expires}</wse:Expires>
+    </wse:Renew>
+"""
+    return build_outbound_client_envelope(
+        xmlns_extra={"wse": NS_WSE},
+        action=ACTION_RENEW,
+        to_url=addr,
+        body_inner_xml=body_inner,
+        message_id=message_id,
+        from_address=from_address,
+        reply_to_anonymous=True,
+        between_to_and_message_id=id_line,
     )
 
 

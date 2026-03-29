@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import signal
+import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -12,14 +13,170 @@ from app.http_server import start_http_server
 from app.logging import setup_logging
 from app.ws_eventing_client import (
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+    parse_iso8601_duration_to_seconds,
     preflight_get_scanner_capabilities,
     register_with_scanner,
+    renew_subscription,
     unsubscribe_from_scanner,
 )
 
 __all__ = ["main"]
 
 log = logging.getLogger(__name__)
+
+
+def _renew_delay_seconds(expires_raw: str, config: Config) -> float:
+    """Seconds to wait before Renew: ``fraction * lease_duration`` from parsed ``Expires``."""
+    fraction = config.eventing_renew_after_fraction
+    fallback = config.eventing_renew_fallback_duration_sec
+    trimmed = (expires_raw or "").strip()
+    try:
+        dur = parse_iso8601_duration_to_seconds(trimmed) if trimmed else fallback
+    except ValueError:
+        log.warning(
+            "Unparsable WS-Eventing Expires %r; using fallback duration",
+            expires_raw,
+            extra={"fallback_sec": fallback},
+        )
+        dur = fallback
+    if dur <= 0:
+        dur = fallback
+    return max(0.0, fraction * float(dur))
+
+
+def _renew_result_ok(details: dict[str, str | None]) -> bool:
+    """Return True when Renew returned HTTP success without SOAP fault."""
+    if details.get("status") == "skipped":
+        return False
+    try:
+        st = int(str(details.get("status") or "0"))
+    except ValueError:
+        return False
+    if st != 0 and not (200 <= st < 300):
+        return False
+    return not bool(details.get("fault_code"))
+
+
+async def _unsubscribe_eventing_best_effort(config: Config, client_from_address: str) -> None:
+    """Best-effort Unsubscribe for ScannerStatusSummary then ScanAvailable subscriptions."""
+    mgr = str(getattr(config, "scanner_eventing_subscribe_manager_url", "") or "").strip()
+    mgr_ref = str(
+        getattr(config, "scanner_eventing_subscribe_manager_reference_parameters_xml", "") or ""
+    ).strip()
+    mgr_status = str(
+        getattr(config, "scanner_eventing_subscribe_manager_url_status", "") or ""
+    ).strip()
+    mgr_ref_status = str(
+        getattr(config, "scanner_eventing_subscribe_manager_reference_parameters_xml_status", "")
+        or ""
+    ).strip()
+    sub_id = str(getattr(config, "scanner_eventing_subscription_id", "") or "").strip()
+    sub_id_status = str(
+        getattr(config, "scanner_eventing_subscription_id_status", "") or ""
+    ).strip()
+    try:
+        if sub_id_status:
+            await unsubscribe_from_scanner(
+                manager_url=mgr_status,
+                subscription_id=sub_id_status,
+                reference_parameters_xml=mgr_ref_status or None,
+                from_address=client_from_address,
+            )
+        if sub_id:
+            await unsubscribe_from_scanner(
+                manager_url=mgr,
+                subscription_id=sub_id,
+                reference_parameters_xml=mgr_ref or None,
+                from_address=client_from_address,
+            )
+    except Exception:
+        log.exception("WS-Eventing best-effort unsubscribe failed")
+
+
+async def _eventing_maintenance_loop(config: Config, *, client_from_address: str) -> None:
+    """Sleep until lease fraction elapses, Renew each due subscription; exit on first Renew failure."""
+    primary_next: float | None = None
+    status_next: float | None = None
+
+    def _recompute_deadlines() -> None:
+        nonlocal primary_next, status_next
+        exp_p = (getattr(config, "scanner_eventing_subscribe_expires", "") or "").strip()
+        primary_next = time.monotonic() + _renew_delay_seconds(exp_p, config)
+        if (getattr(config, "scanner_eventing_subscription_id_status", "") or "").strip():
+            exp_s = (getattr(config, "scanner_eventing_subscribe_expires_status", "") or "").strip()
+            status_next = time.monotonic() + _renew_delay_seconds(exp_s, config)
+        else:
+            status_next = None
+
+    _recompute_deadlines()
+
+    while True:
+        candidates = [x for x in [primary_next, status_next] if x is not None]
+        if not candidates:
+            log.warning("Eventing maintenance has no renew deadlines; resubscribing")
+            return
+        wake_at = min(candidates)
+        sleep_sec = max(0.0, wake_at - time.monotonic())
+        if sleep_sec > 0:
+            await asyncio.sleep(sleep_sec)
+
+        now = time.monotonic()
+        epsilon = 1e-3
+
+        if primary_next is not None and primary_next <= now + epsilon:
+            res = await renew_subscription(
+                manager_url=config.scanner_eventing_subscribe_manager_url,
+                subscription_id=config.scanner_eventing_subscription_id,
+                reference_parameters_xml=config.scanner_eventing_subscribe_manager_reference_parameters_xml
+                or None,
+                from_address=client_from_address,
+            )
+            if not _renew_result_ok(res):
+                log.warning(
+                    "Primary WS-Eventing subscription renew failed; resubscribing",
+                    extra={
+                        "status": res.get("status"),
+                        "fault_subcode": res.get("fault_subcode"),
+                    },
+                )
+                await _unsubscribe_eventing_best_effort(config, client_from_address)
+                return
+            exp = (res.get("expires") or "").strip() or getattr(
+                config, "scanner_eventing_subscribe_expires", ""
+            )
+            setattr(config, "scanner_eventing_subscribe_expires", str(exp).strip())
+            primary_next = time.monotonic() + _renew_delay_seconds(
+                getattr(config, "scanner_eventing_subscribe_expires", "") or "",
+                config,
+            )
+
+        now = time.monotonic()
+        if status_next is not None and status_next <= now + epsilon:
+            res = await renew_subscription(
+                manager_url=config.scanner_eventing_subscribe_manager_url_status,
+                subscription_id=config.scanner_eventing_subscription_id_status,
+                reference_parameters_xml=config.scanner_eventing_subscribe_manager_reference_parameters_xml_status
+                or None,
+                from_address=client_from_address,
+            )
+            if not _renew_result_ok(res):
+                log.warning(
+                    "ScannerStatusSummary WS-Eventing subscription renew failed; resubscribing",
+                    extra={
+                        "status": res.get("status"),
+                        "fault_subcode": res.get("fault_subcode"),
+                    },
+                )
+                await _unsubscribe_eventing_best_effort(config, client_from_address)
+                return
+            exp = (res.get("expires") or "").strip() or getattr(
+                config, "scanner_eventing_subscribe_expires_status", ""
+            )
+            setattr(config, "scanner_eventing_subscribe_expires_status", str(exp).strip())
+            status_next = time.monotonic() + _renew_delay_seconds(
+                getattr(config, "scanner_eventing_subscribe_expires_status", "") or "",
+                config,
+            )
 
 
 def _resolve_subscribe_to_url(config: Config, scanner_xaddr: str) -> str:
@@ -99,6 +256,11 @@ async def _eventing_registration_loop(config: Config) -> None:
                         mgr_ref,
                     )
                     setattr(config, "scanner_eventing_subscription_id", sub_id)
+                    setattr(
+                        config,
+                        "scanner_eventing_subscribe_expires",
+                        str(result.get("expires") or "").strip(),
+                    )
                     dest_tok = str(result.get("subscribe_destination_token") or "").strip()
                     setattr(config, "scanner_subscribe_destination_token", dest_tok)
                     raw_map = result.get("subscribe_destination_tokens")
@@ -112,6 +274,7 @@ async def _eventing_registration_loop(config: Config) -> None:
                         setattr(config, "scanner_subscribe_destination_tokens", {})
                     setattr(config, "use_env_subscribe_destination_token_only", False)
                     setattr(config, "scanner_eventing_subscription_id_status", "")
+                    setattr(config, "scanner_eventing_subscribe_expires_status", "")
                     setattr(config, "scanner_eventing_subscribe_manager_url_status", "")
                     setattr(
                         config,
@@ -153,6 +316,11 @@ async def _eventing_registration_loop(config: Config) -> None:
                                 "scanner_eventing_subscribe_manager_reference_parameters_xml_status",
                                 mgr_ref_s,
                             )
+                            setattr(
+                                config,
+                                "scanner_eventing_subscribe_expires_status",
+                                str(status_result.get("expires") or "").strip(),
+                            )
                             log.info(
                                 "Scanner ScannerStatusSummaryEvent subscribe succeeded",
                                 extra={
@@ -161,6 +329,7 @@ async def _eventing_registration_loop(config: Config) -> None:
                                 },
                             )
                         else:
+                            setattr(config, "scanner_eventing_subscribe_expires_status", "")
                             log.warning(
                                 "Scanner ScannerStatusSummaryEvent subscribe missing id or non-success",
                                 extra={
@@ -194,7 +363,18 @@ async def _eventing_registration_loop(config: Config) -> None:
                             or None,
                         },
                     )
-                    return
+                    await _eventing_maintenance_loop(
+                        config, client_from_address=client_from_address
+                    )
+                    log.info(
+                        "Eventing lease maintenance ended; resubscribing",
+                        extra={"scanner_xaddr": scanner_xaddr},
+                    )
+                    backoff_sec = 2.0
+                    await asyncio.sleep(backoff_sec)
+                    continue
+        except asyncio.CancelledError:
+            raise
         except Exception:
             log.exception(
                 "Scanner registration attempt failed",
@@ -215,38 +395,7 @@ async def _shutdown_services(
 ) -> None:
     """Unsubscribe from WS-Eventing, then cancel long-lived tasks (discovery sends Bye in ``finally``)."""
     client_from_address = f"urn:uuid:{config.uuid}"
-    mgr = str(getattr(config, "scanner_eventing_subscribe_manager_url", "") or "").strip()
-    mgr_ref = str(
-        getattr(config, "scanner_eventing_subscribe_manager_reference_parameters_xml", "") or ""
-    ).strip()
-    mgr_status = str(
-        getattr(config, "scanner_eventing_subscribe_manager_url_status", "") or ""
-    ).strip()
-    mgr_ref_status = str(
-        getattr(config, "scanner_eventing_subscribe_manager_reference_parameters_xml_status", "")
-        or ""
-    ).strip()
-    sub_id = str(getattr(config, "scanner_eventing_subscription_id", "") or "").strip()
-    sub_id_status = str(
-        getattr(config, "scanner_eventing_subscription_id_status", "") or ""
-    ).strip()
-    try:
-        if sub_id_status:
-            await unsubscribe_from_scanner(
-                manager_url=mgr_status,
-                subscription_id=sub_id_status,
-                reference_parameters_xml=mgr_ref_status or None,
-                from_address=client_from_address,
-            )
-        if sub_id:
-            await unsubscribe_from_scanner(
-                manager_url=mgr,
-                subscription_id=sub_id,
-                reference_parameters_xml=mgr_ref or None,
-                from_address=client_from_address,
-            )
-    except Exception:
-        log.exception("WS-Eventing unsubscribe during shutdown failed")
+    await _unsubscribe_eventing_best_effort(config, client_from_address)
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

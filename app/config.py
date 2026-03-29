@@ -6,6 +6,8 @@ import uuid as uuidlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.destinations import DEFAULT_DESTINATIONS, ScanDestination
+
 
 @dataclass
 class Config:
@@ -51,6 +53,15 @@ class Config:
     create_scan_job_retry_invalid_destination_token: bool = True
     # Second WS-Eventing subscription id for ScannerStatusSummaryEvent (optional).
     scanner_eventing_subscription_id_status: str = ""
+    # Last granted ``wse:Expires`` raw strings from Subscribe/Renew (ops / renew scheduling).
+    scanner_eventing_subscribe_expires: str = ""
+    scanner_eventing_subscribe_expires_status: str = ""
+    # Renew after this fraction of the parsed lease duration (0 < x < 1).
+    eventing_renew_after_fraction: float = 0.9
+    # Minimum sleep when a computed renew delay would otherwise be zero (avoids busy-loop).
+    eventing_renew_min_sleep_sec: float = 5.0
+    # If ``Expires`` is missing or unparsable, assume this many seconds for scheduling.
+    eventing_renew_fallback_duration_sec: float = 3600.0
     # After successful RetrieveImage, wait for inbound ScannerStatusSummaryEvent Idle (global state).
     wait_scanner_idle_after_retrieve: bool = True
     scanner_idle_wait_sec: float = 60.0
@@ -58,6 +69,10 @@ class Config:
     retrieve_image_timeout_sec: float | None = None
     # ``app.quirks.get_profile`` key (e.g. generic, epson_wf_3640); skeleton until post–Phase 5.
     scanner_profile: str = "epson_wf_3640"
+    # Per-destination scan settings and output routing (see ``app.destinations``).
+    scan_destinations: tuple[ScanDestination, ...] = field(
+        default_factory=lambda: DEFAULT_DESTINATIONS,
+    )
 
     def __post_init__(self) -> None:
         """Resolve environment variables and derive runtime values."""
@@ -137,6 +152,18 @@ class Config:
         if raw_retrieve is not None and raw_retrieve.strip() != "":
             self.retrieve_image_timeout_sec = float(raw_retrieve.strip())
         self.scanner_profile = os.getenv("WSD_SCANNER_PROFILE", self.scanner_profile).strip()
+
+        raw_frac = os.getenv("WSD_EVENTING_RENEW_AFTER_FRACTION")
+        if raw_frac is not None and raw_frac.strip() != "":
+            parsed = float(raw_frac.strip())
+            if 0.0 < parsed < 1.0:
+                self.eventing_renew_after_fraction = parsed
+        raw_min = os.getenv("WSD_EVENTING_RENEW_MIN_SLEEP_SEC")
+        if raw_min is not None and raw_min.strip() != "":
+            self.eventing_renew_min_sleep_sec = float(raw_min.strip())
+        raw_fb = os.getenv("WSD_EVENTING_RENEW_FALLBACK_DURATION_SEC")
+        if raw_fb is not None and raw_fb.strip() != "":
+            self.eventing_renew_fallback_duration_sec = float(raw_fb.strip())
 
 
 def _get_or_create_persistent_uuid() -> str:

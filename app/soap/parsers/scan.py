@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
+from app.destinations import ScanDestinationConfig
 from app.soap.addressing import WSA_MESSAGE_ID_PATTERN
 from app.soap.envelope import build_outbound_client_envelope
 from app.soap.fault import parse_soap_fault
@@ -14,6 +16,13 @@ from app.soap.namespaces import (
     ACTION_RETRIEVE_IMAGE,
     ACTION_VALIDATE_SCAN_TICKET,
     NS_SCA,
+)
+from app.soap.parsers.capabilities import (
+    InputSourceCapabilities,
+    ScannerCapabilities,
+    clamp_resolution_to_capabilities,
+    input_source_capabilities_for_name,
+    pick_color_entry,
 )
 from app.soap.parsers.eventing import (
     CLIENT_CONTEXT_PATTERN,
@@ -82,6 +91,37 @@ SCANNER_STATE_IN_STATUS_PATTERN = re.compile(
     r"<(?:[A-Za-z0-9_]+:)?State>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?State>",
     re.IGNORECASE,
 )
+
+TICKET_INPUT_SOURCE_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?InputSource\b[^>]*>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?InputSource>",
+    re.IGNORECASE,
+)
+TICKET_RESOLUTION_BLOCK_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?Resolution\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?Resolution>",
+    re.DOTALL | re.IGNORECASE,
+)
+TICKET_COLOR_PROCESSING_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?ColorProcessing\b[^>]*>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?ColorProcessing>",
+    re.IGNORECASE,
+)
+TICKET_SCAN_REGION_WIDTH_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?ScanRegionWidth>\s*(\d+)\s*</(?:[A-Za-z0-9_]+:)?ScanRegionWidth>",
+    re.IGNORECASE,
+)
+TICKET_SCAN_REGION_HEIGHT_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?ScanRegionHeight>\s*(\d+)\s*</(?:[A-Za-z0-9_]+:)?ScanRegionHeight>",
+    re.IGNORECASE,
+)
+TICKET_WIDTH_EL_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?Width>\s*(\d+)\s*</(?:[A-Za-z0-9_]+:)?Width>",
+    re.IGNORECASE,
+)
+TICKET_HEIGHT_EL_PATTERN = re.compile(
+    r"<(?:[A-Za-z0-9_]+:)?Height>\s*(\d+)\s*</(?:[A-Za-z0-9_]+:)?Height>",
+    re.IGNORECASE,
+)
+
+_log = logging.getLogger(__name__)
 
 SCAN_TICKET_TEMPLATE_XML = """      <sca:ScanTicket>
         <sca:JobDescription>
@@ -269,7 +309,9 @@ def build_get_scanner_elements_request(
     from_address: str | None = None,
 ) -> tuple[str, str]:
     """Build WS-Scan GetScannerElements SOAP envelope."""
-    requested_elements_xml = "".join(f"      <sca:Name>{name}</sca:Name>\n" for name in element_names)
+    requested_elements_xml = "".join(
+        f"      <sca:Name>{name}</sca:Name>\n" for name in element_names
+    )
     body_inner = f"""    <sca:GetScannerElementsRequest>
       <sca:RequestedElements>
 {requested_elements_xml}      </sca:RequestedElements>
@@ -447,6 +489,9 @@ def _apply_scanner_configuration_to_scan_ticket_xml(
     return scan_ticket_block[: m.start(2)] + replacement + scan_ticket_block[m.end(2) :]
 
 
+apply_scanner_configuration_to_scan_ticket_xml = _apply_scanner_configuration_to_scan_ticket_xml
+
+
 def resolve_scan_ticket_xml_for_chain(
     default_scan_ticket_fragment: str | None,
     scanner_configuration_fragment: str | None = None,
@@ -461,6 +506,149 @@ def resolve_scan_ticket_xml_for_chain(
         else:
             base = _format_embedded_scan_ticket_xml(inner)
     return _apply_scanner_configuration_to_scan_ticket_xml(base, scanner_configuration_fragment)
+
+
+def _clamp_paper_to_capabilities(
+    width: int,
+    height: int,
+    src_caps: InputSourceCapabilities | None,
+) -> tuple[int, int]:
+    """Clamp paper/region dimensions to scanner min/max when advertised."""
+    if src_caps is None:
+        return (width, height)
+    out_w, out_h = width, height
+    if src_caps.max_width is not None:
+        out_w = min(out_w, src_caps.max_width)
+    if src_caps.max_height is not None:
+        out_h = min(out_h, src_caps.max_height)
+    if src_caps.min_width is not None:
+        out_w = max(out_w, src_caps.min_width)
+    if src_caps.min_height is not None:
+        out_h = max(out_h, src_caps.min_height)
+    return (out_w, out_h)
+
+
+def build_scan_ticket_from_destination_config(
+    config: ScanDestinationConfig,
+    caps: ScannerCapabilities | None,
+) -> str:
+    """Build a ``ScanTicket`` XML fragment from destination settings, clamped to capabilities."""
+    src_caps = input_source_capabilities_for_name(caps, config.input_source)
+    rw, rh = clamp_resolution_to_capabilities(config.dpi_width, config.dpi_height, src_caps)
+    color = pick_color_entry(config.color_processing, src_caps)
+    pw, ph = _clamp_paper_to_capabilities(config.paper_width, config.paper_height, src_caps)
+    fmt = config.format
+    src = config.input_source
+    return f"""      <sca:ScanTicket>
+        <sca:JobDescription>
+          <sca:JobName>airscand destination scan</sca:JobName>
+          <sca:JobOriginatingUserName>airscand</sca:JobOriginatingUserName>
+          <sca:JobInformation>Scan from {src}</sca:JobInformation>
+        </sca:JobDescription>
+        <sca:DocumentParameters>
+          <sca:Format sca:MustHonor="true">{fmt}</sca:Format>
+          <sca:ImagesToTransfer sca:MustHonor="true">1</sca:ImagesToTransfer>
+          <sca:InputSource sca:MustHonor="true">{src}</sca:InputSource>
+          <sca:InputSize sca:MustHonor="true">
+            <sca:InputMediaSize>
+              <sca:Width>{pw}</sca:Width>
+              <sca:Height>{ph}</sca:Height>
+            </sca:InputMediaSize>
+          </sca:InputSize>
+          <sca:Exposure sca:MustHonor="true">
+            <sca:ExposureSettings>
+              <sca:Contrast>0</sca:Contrast>
+              <sca:Brightness>0</sca:Brightness>
+            </sca:ExposureSettings>
+          </sca:Exposure>
+          <sca:Scaling sca:MustHonor="true">
+            <sca:ScalingWidth>100</sca:ScalingWidth>
+            <sca:ScalingHeight>100</sca:ScalingHeight>
+          </sca:Scaling>
+          <sca:Rotation sca:MustHonor="true">0</sca:Rotation>
+          <sca:MediaSides>
+            <sca:MediaFront>
+              <sca:ScanRegion>
+                <sca:ScanRegionXOffset sca:MustHonor="true">0</sca:ScanRegionXOffset>
+                <sca:ScanRegionYOffset sca:MustHonor="true">0</sca:ScanRegionYOffset>
+                <sca:ScanRegionWidth>{pw}</sca:ScanRegionWidth>
+                <sca:ScanRegionHeight>{ph}</sca:ScanRegionHeight>
+              </sca:ScanRegion>
+              <sca:ColorProcessing sca:MustHonor="true">{color}</sca:ColorProcessing>
+              <sca:Resolution sca:MustHonor="true">
+                <sca:Width>{rw}</sca:Width>
+                <sca:Height>{rh}</sca:Height>
+              </sca:Resolution>
+            </sca:MediaFront>
+          </sca:MediaSides>
+        </sca:DocumentParameters>
+      </sca:ScanTicket>"""
+
+
+def validate_scan_ticket_against_capabilities(
+    scan_ticket_xml: str,
+    caps: ScannerCapabilities | None,
+) -> dict[str, object]:
+    """Check ticket resolution, color, and region against parsed scanner capabilities.
+
+    Logs a warning for each issue. Validation is advisory: callers still send the ticket.
+
+    Args:
+        scan_ticket_xml: Inner or full XML containing ``ScanTicket`` content.
+        caps: Parsed capabilities, or None when metadata was unavailable.
+
+    Returns:
+        Dict with ``ok`` (bool), ``issues`` (list of short machine-readable codes), and
+        ``warnings`` (same strings, for structured logging).
+    """
+    issues: list[str] = []
+    if caps is None:
+        return {"ok": True, "issues": issues, "warnings": list(issues)}
+
+    src_m = TICKET_INPUT_SOURCE_PATTERN.search(scan_ticket_xml)
+    input_source = src_m.group(1).strip() if src_m else "Platen"
+    sc = input_source_capabilities_for_name(caps, input_source)
+    if sc is None:
+        issues.append(f"unknown_input_source:{input_source}")
+    elif not sc.enabled:
+        issues.append(f"input_source_disabled:{input_source}")
+
+    res_m = TICKET_RESOLUTION_BLOCK_PATTERN.search(scan_ticket_xml)
+    if res_m:
+        inner = res_m.group(1) or ""
+        wm = TICKET_WIDTH_EL_PATTERN.search(inner)
+        hm = TICKET_HEIGHT_EL_PATTERN.search(inner)
+        if wm and hm:
+            rw, rh = int(wm.group(1)), int(hm.group(1))
+            if sc and sc.resolutions and (rw, rh) not in sc.resolutions:
+                issues.append(f"resolution_not_listed:{rw}x{rh}")
+
+    col_m = TICKET_COLOR_PROCESSING_PATTERN.search(scan_ticket_xml)
+    if col_m and sc and sc.color_entries:
+        col = col_m.group(1).strip()
+        if col not in sc.color_entries:
+            issues.append(f"color_not_listed:{col}")
+
+    rw_m = TICKET_SCAN_REGION_WIDTH_PATTERN.search(scan_ticket_xml)
+    rh_m = TICKET_SCAN_REGION_HEIGHT_PATTERN.search(scan_ticket_xml)
+    if rw_m and rh_m and sc:
+        rww, rhh = int(rw_m.group(1)), int(rh_m.group(1))
+        if sc.min_width is not None and rww < sc.min_width:
+            issues.append(f"scan_region_width_below_min:{rww}<{sc.min_width}")
+        if sc.min_height is not None and rhh < sc.min_height:
+            issues.append(f"scan_region_height_below_min:{rhh}<{sc.min_height}")
+        if sc.max_width is not None and rww > sc.max_width:
+            issues.append(f"scan_region_width_above_max:{rww}>{sc.max_width}")
+        if sc.max_height is not None and rhh > sc.max_height:
+            issues.append(f"scan_region_height_above_max:{rhh}>{sc.max_height}")
+
+    for code in issues:
+        _log.warning(
+            "Scan ticket does not match advertised capabilities",
+            extra={"scan_ticket_issue": code},
+        )
+
+    return {"ok": not issues, "issues": issues, "warnings": list(issues)}
 
 
 def parse_get_scanner_elements_response(text: str) -> dict[str, str | None]:
