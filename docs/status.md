@@ -36,7 +36,8 @@
   - Earlier milestone completion date: **2026-03-26**
 
 - **Next focus (Phase 5):**
-  - Improve SOAP parsing robustness and richer fault handling
+  - **SOAP mini-library** (`app/soap/`): shared namespaces, envelope, `SoapHttpClient`, parsers; orchestration stays in `ws_eventing_client.py`
+  - Improve SOAP parsing robustness (namespace-aware parsing for more actions; see `docs/ROADMAP.md`)
 
 ## Configuration (environment variables)
 

@@ -5,27 +5,37 @@ import logging
 import re
 import socket
 import time
-import uuid
 
 from app.config import Config
+from app.soap.addressing import new_message_id
+from app.soap.envelope import build_discovery_probe_envelope, discovery_probe_xmlns
+from app.soap.namespaces import (
+    ACTION_BYE,
+    ACTION_HELLO,
+    ACTION_PROBE,
+    ACTION_PROBE_MATCHES,
+    ACTION_RESOLVE,
+    ACTION_RESOLVE_MATCHES,
+    NS_PUB,
+    NS_SOAP,
+    NS_WSA,
+    NS_WSCN,
+    NS_WSD,
+    NS_WSDP,
+    WSA_ANONYMOUS,
+)
+from app.soap.parsers.discovery import (
+    extract_action,
+    extract_message_id_or_unknown,
+    extract_relates_to,
+    extract_xaddrs,
+)
 
 MULTICAST_GROUP = "239.255.255.250"
 PORT = 3702
 
-NS_SOAP = "http://www.w3.org/2003/05/soap-envelope"
-NS_WSA = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
-NS_WSA_ROLE_ANONYMOUS = "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous"
-NS_WSD = "http://schemas.xmlsoap.org/ws/2005/04/discovery"
-NS_WSDP = "http://schemas.xmlsoap.org/ws/2006/02/devprof"
-NS_PUB = "http://schemas.microsoft.com/windows/pub/2005/07"
-NS_WSCN = "http://schemas.microsoft.com/windows/2006/08/wdp/scan"
-
-ACTION_PROBE = "http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe"
-ACTION_RESOLVE = "http://schemas.xmlsoap.org/ws/2005/04/discovery/Resolve"
-ACTION_PROBE_MATCHES = "http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches"
-ACTION_RESOLVE_MATCHES = "http://schemas.xmlsoap.org/ws/2005/04/discovery/ResolveMatches"
-ACTION_HELLO = "http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello"
-ACTION_BYE = "http://schemas.xmlsoap.org/ws/2005/04/discovery/Bye"
+# Backward-compatible alias (same behavior as legacy ``extract_message_id``).
+extract_message_id = extract_message_id_or_unknown
 
 # Self-probe filter tuning knobs. Keep these near the top for easy policy changes.
 SELF_PROBE_TTL_SEC = 300.0
@@ -34,45 +44,6 @@ SELF_PROBE_CACHE_MAX = 256
 log = logging.getLogger(__name__)
 
 _recent_outbound_probe_ids: dict[str, float] = {}
-
-MESSAGE_ID_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?MessageID>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?MessageID>"
-)
-ACTION_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?Action>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?Action>"
-)
-RELATES_TO_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?RelatesTo>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?RelatesTo>"
-)
-XADDR_PATTERN = re.compile(r"<(?:[A-Za-z0-9_]+:)?XAddrs>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?XAddrs>")
-
-
-def extract_message_id(text: str) -> str:
-    match = MESSAGE_ID_PATTERN.search(text)
-    if not match:
-        return "uuid:unknown"
-    return match.group(1).strip()
-
-
-def extract_action(text: str) -> str | None:
-    match = ACTION_PATTERN.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
-def extract_relates_to(text: str) -> str | None:
-    match = RELATES_TO_PATTERN.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
-def extract_xaddrs(text: str) -> list[str]:
-    match = XADDR_PATTERN.search(text)
-    if not match:
-        return []
-    return [part.strip() for part in match.group(1).split() if part.strip()]
 
 
 def extract_resolve_epr_address(text: str) -> str | None:
@@ -103,54 +74,42 @@ def build_xaddr(config: Config) -> str:
     return f"http://{config.advertise_addr}:{config.port}{config.endpoint_path}"
 
 
-def _new_message_id() -> str:
-    return f"urn:uuid:{uuid.uuid4()}"
-
-
 def build_probe(message_id: str | None = None) -> tuple[str, str]:
-    mid = message_id or _new_message_id()
-    body = f"""<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wsd="{NS_WSD}" xmlns:wscn="{NS_WSCN}">
-  <soap:Header>
-    <wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
-    <wsa:Action>{ACTION_PROBE}</wsa:Action>
-    <wsa:MessageID>{mid}</wsa:MessageID>
-  </soap:Header>
-  <soap:Body>
-    <wsd:Probe>
+    mid = message_id or new_message_id()
+    body_inner = """    <wsd:Probe>
       <wsd:Types>wscn:ScanDeviceType</wsd:Types>
-    </wsd:Probe>
-  </soap:Body>
-</soap:Envelope>
-"""
+    </wsd:Probe>"""
+    body = build_discovery_probe_envelope(
+        action=ACTION_PROBE,
+        to_uri="urn:schemas-xmlsoap-org:ws:2005:04:discovery",
+        message_id=mid,
+        body_inner_xml=body_inner,
+        xmlns_extra=discovery_probe_xmlns(),
+    )
     return mid, body
 
 
 def build_resolve(endpoint_reference: str, message_id: str | None = None) -> tuple[str, str]:
-    mid = message_id or _new_message_id()
-    body = f"""<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wsd="{NS_WSD}">
-  <soap:Header>
-    <wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
-    <wsa:Action>{ACTION_RESOLVE}</wsa:Action>
-    <wsa:MessageID>{mid}</wsa:MessageID>
-  </soap:Header>
-  <soap:Body>
-    <wsd:Resolve>
+    mid = message_id or new_message_id()
+    body_inner = f"""    <wsd:Resolve>
       <wsa:EndpointReference>
         <wsa:Address>{endpoint_reference}</wsa:Address>
       </wsa:EndpointReference>
-    </wsd:Resolve>
-  </soap:Body>
-</soap:Envelope>
-"""
+    </wsd:Resolve>"""
+    body = build_discovery_probe_envelope(
+        action=ACTION_RESOLVE,
+        to_uri="urn:schemas-xmlsoap-org:ws:2005:04:discovery",
+        message_id=mid,
+        body_inner_xml=body_inner,
+        xmlns_extra={"wsd": NS_WSD},
+    )
     return mid, body
 
 
 def build_hello(config: Config, message_number: int) -> str:
     """Build a WS-Discovery Hello announcement payload."""
     xaddr = build_xaddr(config)
-    msg_id = _new_message_id()
+    msg_id = new_message_id()
     sequence_id = getattr(config, "app_sequence_sequence_id", "") or our_epr(config)
     instance_id = getattr(config, "app_sequence_instance_id", 1)
     meta = getattr(config, "metadata_version", 1)
@@ -178,7 +137,7 @@ def build_hello(config: Config, message_number: int) -> str:
 
 def build_bye(config: Config, message_number: int) -> str:
     """Build a WS-Discovery Bye message (departure announcement)."""
-    msg_id = _new_message_id()
+    msg_id = new_message_id()
     sequence_id = getattr(config, "app_sequence_sequence_id", "") or our_epr(config)
     instance_id = getattr(config, "app_sequence_instance_id", 1)
     meta = getattr(config, "metadata_version", 1)
@@ -213,14 +172,14 @@ def build_probe_match(
     outbound_message_id: str | None = None,
 ) -> str:
     """Build ProbeMatches response payload."""
-    mid = outbound_message_id or _new_message_id()
+    mid = outbound_message_id or new_message_id()
     meta = getattr(config, "metadata_version", 1)
     types = _probe_match_types()
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsdp="{NS_WSDP}" xmlns:wsa="{NS_WSA}" xmlns:wsd="{NS_WSD}" xmlns:pub="{NS_PUB}" xmlns:wscn="{NS_WSCN}">
   <soap:Header>
-    <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</wsa:Action>
-    <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
+    <wsa:Action>{ACTION_PROBE_MATCHES}</wsa:Action>
+    <wsa:To>{WSA_ANONYMOUS}</wsa:To>
     <wsa:MessageID>{mid}</wsa:MessageID>
     <wsa:RelatesTo>{relates_to}</wsa:RelatesTo>
   </soap:Header>
@@ -247,14 +206,14 @@ def build_resolve_matches(
     outbound_message_id: str | None = None,
 ) -> str:
     """Build ResolveMatches response payload."""
-    mid = outbound_message_id or _new_message_id()
+    mid = outbound_message_id or new_message_id()
     meta = getattr(config, "metadata_version", 1)
     types = _probe_match_types()
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsdp="{NS_WSDP}" xmlns:wsa="{NS_WSA}" xmlns:wsd="{NS_WSD}" xmlns:pub="{NS_PUB}" xmlns:wscn="{NS_WSCN}">
   <soap:Header>
-    <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/ResolveMatches</wsa:Action>
-    <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
+    <wsa:Action>{ACTION_RESOLVE_MATCHES}</wsa:Action>
+    <wsa:To>{WSA_ANONYMOUS}</wsa:To>
     <wsa:MessageID>{mid}</wsa:MessageID>
     <wsa:RelatesTo>{relates_to}</wsa:RelatesTo>
   </soap:Header>

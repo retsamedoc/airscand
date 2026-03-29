@@ -820,7 +820,9 @@ async def test_preflight_get_posts_and_parses_response(monkeypatch: MonkeyPatch)
             captured["data"] = data.decode("utf-8")
             return DummyResponse()
 
-    monkeypatch.setattr("app.ws_eventing_client.ClientSession", lambda: DummySession())
+    monkeypatch.setattr("app.soap.transport._shared_session", None)
+    monkeypatch.setattr("app.soap.transport._default_client", None)
+    monkeypatch.setattr("app.soap.transport.ClientSession", lambda: DummySession())
     result = await preflight_get_scanner_capabilities(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         get_to_url="http://192.168.1.60:80/WDP/SCAN",
@@ -877,7 +879,9 @@ async def test_register_with_scanner_posts_and_parses_response(monkeypatch: Monk
             captured["timeout"] = timeout
             return DummyResponse()
 
-    monkeypatch.setattr("app.ws_eventing_client.ClientSession", lambda: DummySession())
+    monkeypatch.setattr("app.soap.transport._shared_session", None)
+    monkeypatch.setattr("app.soap.transport._default_client", None)
+    monkeypatch.setattr("app.soap.transport.ClientSession", lambda: DummySession())
 
     result = await register_with_scanner(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
@@ -945,7 +949,9 @@ async def test_register_with_scanner_logs_non2xx_and_missing_identifier(
         ) -> DummyResponse:
             return DummyResponse()
 
-    monkeypatch.setattr("app.ws_eventing_client.ClientSession", lambda: DummySession())
+    monkeypatch.setattr("app.soap.transport._shared_session", None)
+    monkeypatch.setattr("app.soap.transport._default_client", None)
+    monkeypatch.setattr("app.soap.transport.ClientSession", lambda: DummySession())
     result = await register_with_scanner(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         notify_to="http://192.168.1.50:5357/wsd",
@@ -974,7 +980,9 @@ async def test_register_with_scanner_logs_timeout(
         def post(self, url: str, data: bytes, headers: dict[str, str], timeout: float) -> object:
             raise asyncio.TimeoutError()
 
-    monkeypatch.setattr("app.ws_eventing_client.ClientSession", lambda: DummySession())
+    monkeypatch.setattr("app.soap.transport._shared_session", None)
+    monkeypatch.setattr("app.soap.transport._default_client", None)
+    monkeypatch.setattr("app.soap.transport.ClientSession", lambda: DummySession())
     with pytest.raises(asyncio.TimeoutError):
         await register_with_scanner(
             scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",

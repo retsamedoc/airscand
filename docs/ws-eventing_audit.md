@@ -2,7 +2,7 @@
 
 This report compares the current **airscand** WS-Eventing-related code to the normative compliance contract in the **WS-Eventing Compliance Specification (AI-Oriented)** (subscription lifecycle, message formats, delivery semantics, faults, leasing, filtering, security SHOULDs, and checklist §11).
 
-**Scope:** Outbound subscriber behavior in [`app/ws_eventing_client.py`](../app/ws_eventing_client.py) and [`main.py`](../main.py); inbound event-sink / minimal subscription-manager behavior in [`app/ws_scan.py`](../app/ws_scan.py); configuration in [`app/config.py`](../app/config.py). WS-Discovery and WS-Scan are out of scope except where they touch eventing.
+**Scope:** Outbound subscriber behavior in [`app/ws_eventing_client.py`](../app/ws_eventing_client.py) (orchestration) and [`app/soap/parsers/eventing.py`](../app/soap/parsers/eventing.py) (Subscribe/Unsubscribe XML + parse helpers), [`app/soap/parsers/transfer.py`](../app/soap/parsers/transfer.py) (WS-Transfer **Get** preflight), plus [`main.py`](../main.py); inbound event-sink / minimal subscription-manager behavior in [`app/ws_scan.py`](../app/ws_scan.py); configuration in [`app/config.py`](../app/config.py). WS-Discovery and WS-Scan are out of scope except where they touch eventing.
 
 **Roles in this codebase**
 
@@ -149,7 +149,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ### 11. XML parsing is regex-based for eventing (violates robustness implied by §11.1)
 
-**Code:** [`app/ws_eventing_client.py`](../app/ws_eventing_client.py) (`IDENTIFIER_PATTERN`, `EXPIRES_PATTERN`, `parse_soap_fault`, etc.) and [`app/ws_scan.py`](../app/ws_scan.py) (`extract_action`, `extract_message_id`) use regex on serialized XML.
+**Code:** [`app/soap/parsers/eventing.py`](../app/soap/parsers/eventing.py) (`IDENTIFIER_PATTERN`, `EXPIRES_PATTERN`, …), [`app/soap/fault.py`](../app/soap/fault.py) (`parse_soap_fault`), and [`app/ws_scan.py`](../app/ws_scan.py) (`extract_action`, `extract_message_id` via [`app/soap/addressing.py`](../app/soap/addressing.py)) use regex on serialized XML.
 
 **Risk:** Namespace prefix changes, reordering, or wrapping break extraction; wrong `Identifier` match is possible if multiple elements exist.
 
@@ -225,12 +225,12 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 | Requirement area | Evidence |
 |------------------|----------|
-| Correct primary namespace `http://schemas.xmlsoap.org/ws/2004/08/eventing` | `NS_WSE` in [`app/ws_eventing_client.py`](../app/ws_eventing_client.py), [`app/ws_scan.py`](../app/ws_scan.py) |
+| Correct primary namespace `http://schemas.xmlsoap.org/ws/2004/08/eventing` | `NS_WSE` in [`app/soap/namespaces.py`](../app/soap/namespaces.py), [`app/ws_scan.py`](../app/ws_scan.py) |
 | WS-Addressing headers on outbound `Subscribe` (`Action`, `To`, `MessageID`, `ReplyTo`) | [`build_subscribe_request`](../app/ws_eventing_client.py) |
 | Push delivery mode on wire | `Delivery Mode=".../DeliveryModes/Push"` in [`build_subscribe_request`](../app/ws_eventing_client.py) |
 | `Subscribe` + `SubscribeResponse` (shapes) | Client + [`build_eventing_subscribe_response`](../app/ws_scan.py) |
 | Inbound action dispatch for Renew / GetStatus / Unsubscribe (response shapes only) | [`handle_wsd`](../app/ws_scan.py) |
-| Client fault extraction for retry policy | [`parse_soap_fault`](../app/ws_eventing_client.py); `_eventing_registration_loop` in [`main.py`](../main.py) retries via rediscovery/backoff only (no alternate `subscribe_to_url` loop on `wsa:DestinationUnreachable` in the reviewed revision) |
+| Client fault extraction for retry policy | [`parse_soap_fault`](../app/soap/fault.py); `_eventing_registration_loop` in [`main.py`](../main.py) retries via rediscovery/backoff only (no alternate `subscribe_to_url` loop on `wsa:DestinationUnreachable` in the reviewed revision) |
 | Store subscription id after success | `scanner_eventing_subscription_id` in [`main.py`](../main.py), [`app/config.py`](../app/config.py) |
 | `ScanAvailableEvent` sink HTTP response (SOAP 1.2 ack) | [`build_scan_available_event_ack_response`](../app/ws_scan.py), [`handle_wsd`](../app/ws_scan.py) |
 

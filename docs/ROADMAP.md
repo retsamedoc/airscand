@@ -1,90 +1,77 @@
 ## ROADMAP
 
-### Phase 1 closeout (Discovery) - complete
+This roadmap tracks **remaining** work by timeline and references detailed context in:
+- [`docs/wia_client_audit.md`](wia_client_audit.md)
+- [`docs/ws-scan_audit.md`](ws-scan_audit.md)
+- [`docs/ws-eventing_audit.md`](ws-eventing_audit.md)
 
-- WS-Discovery Probe response now returns namespace-correct `ProbeMatches`.
-- `wsa:RelatesTo` is correlated to inbound probe `wsa:MessageID`.
-- `XAddrs` is built from an explicit advertised address (`WSD_ADVERTISE_ADDR`) with fallbacks.
-- Discovery logging now includes sender address, extracted message ID, and advertised `XAddrs`.
-- Added automated coverage for ProbeMatch generation and Probe->ProbeMatches responder behavior.
-- Important: discovery-only closeout is a preliminary milestone; scanner workflow validation still requires Phase 2 WS-Eventing registration.
+### Near-term
 
-### Phase 2 closeout (HTTP + WS-Eventing registration) - complete
+- **WS-Eventing lifecycle correctness (critical)**: implement real subscription state for inbound `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` and return proper SOAP faults instead of placeholder success paths.  
+  See `ws-eventing_audit` critical/high items (§1, §4, §5, §12).
+- **Outbound eventing lease management (critical)**: persist manager EPR + expiry from `SubscribeResponse`; schedule `Renew`; implement clean subscription teardown behavior.  
+  See `ws-eventing_audit` critical items (§2, §3, §7).
+- **SOAP response correctness on sink endpoint**: replace plain-text fallback responses for unsupported SOAP actions with SOAP fault responses.  
+  See `ws-eventing_audit` medium item (§9).
+- **Subscribe contract enforcement**: validate delivery mode/filter/expiration and align `NotifyTo`/`EndTo` handling with profile expectations.  
+  See `ws-eventing_audit` high/medium items (§5, §6, §8, §13).
+- **Transport timeout split**: add env/config-driven connect/read timeout controls in `SoapHttpClient` (current single timeout remains).  
+  See `wia_client_audit` §3 checklist.
+- **Roadmap/documentation hygiene**: keep all changed implementation locations (`app/soap/*`, orchestration in `ws_eventing_client`) reflected in architecture/design/status and all audit references.
 
-- Outbound registration loop now runs WS-Transfer preflight (`Get`) followed by WS-Eventing `Subscribe`.
-- Default subscribe target is Win10-aligned WDP scan endpoint on scanner host (`/WDP/SCAN`) with fallback/override controls.
-- Subscribe envelope now includes WSD/WDP scan fields needed for Epson interoperability (`From`, `EndTo`, `NotifyTo`, filter, and scan destinations).
-- Fault-aware retries remain in place across registration attempts (`wsa:DestinationUnreachable` is logged with structured diagnostics).
-- Manual validation: scanner registration succeeds and host can be selected as a scan destination.
-- Completion date: **2026-03-26**
-- Tested device models: **Epson WF-3640**
+### Mid-term
 
-### Phase 3 closeout (WS-Scan basics) - complete
+- **WIA operation hardening**:
+  - Multi-XAddr failover after discovery (try all candidate XAddrs in order).
+  - Retrieve-image integrity and truncation handling / retry policy.
+  - Explicit idempotent retry policy for SOAP operations.
+  See `wia_client_audit` high/medium checklist.
+- **WS-Scan follow-through**:
+  - Confirm/adjust Probe `Types` interop choice where needed.
+  - Cache `GetScannerElements` where safe across subscriptions/events.
+  See `wia_client_audit` low/clarify items and `ws-scan_audit` remaining medium/low issues.
+- **Eventing parsing robustness**: expand namespace-aware XML handling on critical eventing paths beyond regex parsing.
+  See `ws-eventing_audit` medium item (§11).
+- **Compliance-oriented tests**: add contract coverage for eventing lifecycle, fault mapping, renewal/status behavior, and subscription-end semantics.
+  See `ws-eventing_audit` low item (§17).
+- **WS-Scan handler hardening details**: add missing guardrails noted in audit deltas (e.g., handler assumptions) and document intentional deviations.
+  See `ws-scan_audit` remaining low items.
 
-- HTTP SOAP handler now supports WS-Scan `CreateScanJob` and `ScanAvailableEvent` in addition to WS-Eventing actions.
-- `ScanAvailableEvent` now returns an immediate generic HTTP `200 OK` and triggers asynchronous outbound scanner calls.
-- Outbound chain now follows WF-3640 flow: `ValidateScanTicket` (fixed Win10-like template), then `CreateScanJob`, then `RetrieveImage` to scanner `/WDP/SCAN`.
-- Outbound chain now also issues best-effort `GetScannerElements` before validation to collect `ScannerDescription`, `DefaultScanTicket`, `ScannerConfiguration`, and `ScannerStatus` for observability.
-- `RetrieveImageRequest` now sends `JobId` from `CreateScanJobResponse`, `JobToken` from resolved destination token, and default `DocumentDescription` value `1`.
-- Inbound `CreateScanJob` requests return a minimal SOAP `CreateScanJobResponse` with `sca:JobId`.
-- WS-Addressing correlation is preserved with `wsa:RelatesTo` mapped from inbound `wsa:MessageID`.
-- Added automated coverage for CreateScanJob response generation and end-to-end action dispatch behavior.
-- Completion date: **2026-03-26**
+### Far-term
 
-### Phase 4 closeout (Image capture core goal) - complete
+- **Explicit client state machine** for scan lifecycle (`Idle -> CapabilitiesLoaded -> JobCreated -> Polling -> Retrieving -> terminal`) with transition guards and clearer failure handling.
+  See `wia_client_audit` §8.
+- **CancelJob and abandoned-job cleanup** (still out of scope for the mini-library refactor but tracked as product work).  
+  See `wia_client_audit` §7.5 / §8.
+- **Vendor profile growth**: extend `app/quirks` and `docs/protocol/vendor_quirks.md` as more hardware is validated.
 
-- `/scan` payload persistence is now hardened with atomic write semantics (temp file + replace).
-- Empty upload payloads are rejected with explicit `400` responses.
-- Scan save logging now includes byte size, input content type, and detected file extension.
-- Added automated coverage for `/scan` success path and error handling (empty payload, invalid config).
-- **Field validation:** **Epson WF-3640** — document scanned from the device front panel; output file written under the configured scans directory; run completed with no warnings or failures logged (**2026-03-28**).
-- Completion date: **2026-03-26** (implementation); **2026-03-28** (hardware checkpoint above)
+### Future
 
-#### Phase 1 env vars used
+- **Security and metadata posture**:
+  - Document and/or implement stronger eventing subscription protections.
+  - Clarify metadata/WSDL strategy if full standards alignment becomes a goal.
+  See `ws-eventing_audit` low items.
+- **Developer docs/policy**:
+  - Add CONTRIBUTING guidance.
+  - Add `SECURITY.md`.
+- **Logging architecture**: evaluate whether moving to [`structlog`](https://www.structlog.org/en/stable/index.html) materially improves operations.
 
-- `WSD_HOST`: HTTP bind host.
-- `WSD_PORT`: HTTP bind port.
-- `WSD_ENDPOINT`: WS-Scan SOAP endpoint path.
-- `WSD_SCAN_PATH`: scan upload endpoint path.
-- `WSD_OUTPUT_DIR`: output directory for uploaded scan files.
-- `WSD_UUID`: optional explicit persistent identity UUID.
-- `WSD_ADVERTISE_ADDR`: LAN-reachable address/host to publish in `XAddrs`.
-- `WSD_SCANNER_PROFILE`: scanner quirks profile key for ``app/quirks`` (default `epson_wf_3640`; use `generic` for protocol-default behavior).
+## Done
 
-#### Known limitations (Phase 2+)
+- **Platform/server decision**: keep `aiohttp`; `uvicorn/gunicorn` path is closed (not planned).
+- SOAP mini-library introduced under `app/soap/` (namespaces, addressing, envelope, fault, transport, parsers).
+- `ws_eventing_client` thinned to orchestration + compatibility re-exports.
+- Discovery and ws-scan paths updated to consume shared SOAP helpers.
+- Shared `ClientSession` reuse is in place via `SoapHttpClient`.
+- GetJobStatus polling and RetrieveImage gating are implemented when profile-enabled.
+- `app/soap/xmlutil.py` starter hooks and tests are in place for phase-2 XML work.
+- Documentation refresh completed for architecture/design/status/README and audit path references.
+- Phase 1-4 implementation milestones and Epson WF-3640 validation completed.
 
-- SOAP parsing remains intentionally lightweight and string-based.
-- Discovery responder still only handles the minimal probe path, not full WS-* compliance.
-- WS-Scan SOAP actions still use minimal placeholder behavior and need fuller protocol responses.
+### Historical completion details
 
-### Documentation and policy
-
-- Create contributing developer documentation.
-- Add SECURITY.md policy.
-
-### Near-term (Phase 5 focus)
-
-- When **multi-page** scan testing starts, re-evaluate **RetrieveImage** `DocumentDescription` handling: today we send a fixed `DocumentNumber` (default `1`) inside `DocumentDescription`; multi-page jobs may require per-document numbering, multiple `RetrieveImage` calls, or values taken from `CreateScanJobResponse` / job status.
-- Keep the current **single-process** architecture: one asyncio loop running
-  - UDP WS-Discovery listener task
-  - HTTP server task (currently `aiohttp`)
-- Improve SOAP parsing robustness (namespace-aware parsing for additional actions and richer fault handling).
-- Investigate and potentially replace the current logging system with [structlog](https://www.structlog.org/en/stable/index.html) (structured context, flexible rendering, stdlib integration).
-- **Vendor quirks:** ``WSD_SCANNER_PROFILE`` selects a profile from ``app/quirks/`` (default ``epson_wf_3640`` for the tested WorkForce; that profile skips ``GetJobStatus`` polling before ``RetrieveImage``). **Post–Phase 5:** further ``docs/protocol/vendor_quirks.md`` behaviors (timeouts, SOAP minimalism, retries) per profile once additional hardware is available.
-
-### Re-evaluate after Phase 1–2: FastAPI/uvicorn option
-
-If the HTTP surface grows (more SOAP actions, validation, middleware, debug tooling), consider switching the HTTP server from `aiohttp` to **FastAPI + uvicorn**, while still keeping **one asyncio loop** for discovery + HTTP.
-
-#### Why we didn’t do this in Phase 0
-
-- Discovery is a singleton-ish UDP multicast responder; typical web-server scaling (multi-worker) can cause duplicate responses and confusing behavior.
-- uvicorn/gunicorn lifecycle + signals are simplest when they own the process; embedding them increases complexity early.
-- Phase 0 goal is “starts cleanly” + observability, not framework choice.
-
-#### Decision constraints (when revisiting)
-
-- If using a process manager (gunicorn), ensure **only one** discovery responder exists.
-- Prefer **single-worker** HTTP until discovery is split into a separate service/process.
-- Ensure graceful shutdown stops both HTTP and discovery cleanly.
+- WS-Discovery Probe/Resolve response correctness and correlation.
+- WS-Eventing registration loop with preflight `Get` and subscribe retries.
+- WS-Scan device-initiated chain (`ValidateScanTicket -> CreateScanJob -> RetrieveImage`) and metadata probe flow.
+- `/scan` persistence hardening (atomic writes, empty payload rejection, improved logging, tests).
 

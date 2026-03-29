@@ -2,26 +2,25 @@
 
 import asyncio
 import logging
-import re
 import uuid
 
 from aiohttp import web
 
 from app.quirks import get_profile
 from app.scanner_status_coordination import notify_scanner_state
-from app.ws_eventing_client import (
+from app.soap.addressing import extract_action, extract_message_id_optional, soap_action_short
+from app.soap.envelope import build_inbound_response_envelope
+from app.soap.namespaces import (
+    NS_SCA,
+    NS_WSE,
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+)
+from app.ws_eventing_client import (
     parse_scanner_status_summary_event,
     run_scan_available_chain,
 )
 
 log = logging.getLogger(__name__)
-
-NS_SOAP = "http://www.w3.org/2003/05/soap-envelope"
-NS_WSA = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
-NS_WSE = "http://schemas.xmlsoap.org/ws/2004/08/eventing"
-NS_WSMAN = "http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
-NS_SCA = "http://schemas.microsoft.com/windows/2006/08/wdp/scan"
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
 ACTION_RENEW = f"{NS_WSE}/Renew"
@@ -37,13 +36,6 @@ ACTION_CREATE_SCAN_JOB_RESPONSE = f"{NS_SCA}/CreateScanJobResponse"
 # Not defined in Microsoft WS-Scan element docs; used only as wsa:Action for SOAP-shaped HTTP ack to the device.
 ACTION_SCAN_AVAILABLE_EVENT_RESPONSE = f"{NS_SCA}/ScanAvailableEventResponse"
 ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE = f"{NS_SCA}/ScannerStatusSummaryEventResponse"
-
-ACTION_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?Action>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?Action>"
-)
-MESSAGE_ID_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?MessageID>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?MessageID>"
-)
 
 
 def _log_chain_result(task: asyncio.Task[dict[str, str | None]]) -> None:
@@ -79,54 +71,9 @@ def _log_chain_result(task: asyncio.Task[dict[str, str | None]]) -> None:
         log.exception("ScanAvailable follow-up chain failed")
 
 
-def extract_action(text: str) -> str | None:
-    """Extract WS-Addressing Action value from SOAP payload."""
-    match = ACTION_PATTERN.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
 def extract_message_id(text: str) -> str | None:
     """Extract WS-Addressing MessageID value from SOAP payload."""
-    match = MESSAGE_ID_PATTERN.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
-def _short_soap_action(action: str | None) -> str | None:
-    """Last path segment of a SOAP Action URI for compact logs."""
-    if not action:
-        return None
-    return action.rstrip("/").rsplit("/", 1)[-1]
-
-
-def _new_message_id() -> str:
-    return f"urn:uuid:{uuid.uuid4()}"
-
-
-def _soap_response(
-    *,
-    action: str,
-    relates_to: str | None,
-    body_xml: str = "",
-    outbound_message_id: str | None = None,
-) -> str:
-    mid = outbound_message_id or _new_message_id()
-    relates_line = f"    <wsa:RelatesTo>{relates_to}</wsa:RelatesTo>\n" if relates_to else ""
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}" xmlns:wsman="{NS_WSMAN}" xmlns:sca="{NS_SCA}">
-  <soap:Header>
-    <wsa:Action>{action}</wsa:Action>
-    <wsa:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:To>
-    <wsa:MessageID>{mid}</wsa:MessageID>
-{relates_line}  </soap:Header>
-  <soap:Body>
-{body_xml}
-  </soap:Body>
-</soap:Envelope>
-"""
+    return extract_message_id_optional(text)
 
 
 def build_eventing_subscribe_response(relates_to: str | None, xaddr: str) -> str:
@@ -138,25 +85,33 @@ def build_eventing_subscribe_response(relates_to: str | None, xaddr: str) -> str
       </wse:SubscriptionManager>
       <wse:Expires>PT1H</wse:Expires>
     </wse:SubscribeResponse>"""
-    return _soap_response(action=ACTION_SUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body)
+    return build_inbound_response_envelope(
+        action=ACTION_SUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body
+    )
 
 
 def build_eventing_renew_response(relates_to: str | None) -> str:
     """Build SOAP RenewResponse payload."""
     body = "    <wse:RenewResponse><wse:Expires>PT1H</wse:Expires></wse:RenewResponse>"
-    return _soap_response(action=ACTION_RENEW_RESPONSE, relates_to=relates_to, body_xml=body)
+    return build_inbound_response_envelope(
+        action=ACTION_RENEW_RESPONSE, relates_to=relates_to, body_xml=body
+    )
 
 
 def build_eventing_get_status_response(relates_to: str | None) -> str:
     """Build SOAP GetStatusResponse payload."""
     body = "    <wse:GetStatusResponse><wse:Expires>PT1H</wse:Expires></wse:GetStatusResponse>"
-    return _soap_response(action=ACTION_GET_STATUS_RESPONSE, relates_to=relates_to, body_xml=body)
+    return build_inbound_response_envelope(
+        action=ACTION_GET_STATUS_RESPONSE, relates_to=relates_to, body_xml=body
+    )
 
 
 def build_eventing_unsubscribe_response(relates_to: str | None) -> str:
     """Build SOAP UnsubscribeResponse payload."""
     body = "    <wse:UnsubscribeResponse/>"
-    return _soap_response(action=ACTION_UNSUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body)
+    return build_inbound_response_envelope(
+        action=ACTION_UNSUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body
+    )
 
 
 def build_scan_available_event_ack_response(relates_to: str | None) -> str:
@@ -165,7 +120,7 @@ def build_scan_available_event_ack_response(relates_to: str | None) -> str:
     Uses WS-Addressing headers with ``RelatesTo`` matching the notification ``wsa:MessageID`` and
     ``application/soap+xml`` content type, instead of a bare ``text/plain`` body.
     """
-    return _soap_response(
+    return build_inbound_response_envelope(
         action=ACTION_SCAN_AVAILABLE_EVENT_RESPONSE,
         relates_to=relates_to,
         body_xml="",
@@ -174,7 +129,7 @@ def build_scan_available_event_ack_response(relates_to: str | None) -> str:
 
 def build_scanner_status_summary_event_ack_response(relates_to: str | None) -> str:
     """Return a SOAP 1.2 envelope acknowledging ScannerStatusSummaryEvent delivery."""
-    return _soap_response(
+    return build_inbound_response_envelope(
         action=ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE,
         relates_to=relates_to,
         body_xml="",
@@ -200,7 +155,7 @@ def build_create_scan_job_response(
         <sca:Format>exif</sca:Format>
       </sca:DocumentFinalParameters>
     </sca:CreateScanJobResponse>"""
-    return _soap_response(
+    return build_inbound_response_envelope(
         action=ACTION_CREATE_SCAN_JOB_RESPONSE,
         relates_to=relates_to,
         body_xml=body,
@@ -217,10 +172,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
     xaddr = f"http://{config.advertise_addr}:{config.port}{config.endpoint_path}"
 
     log.info(
-        f"{_short_soap_action(action) or 'unknown'}",
+        f"{soap_action_short(action) or 'unknown'}",
         extra={
             "soap_leg": "server_request",
-            "soap_action": _short_soap_action(action),
+            "soap_action": soap_action_short(action),
             "wsa_message_id": relates_to,
             "bytes": len(body),
             "content_type": request.content_type,
@@ -237,10 +192,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
             log.warning("Subscribe request missing MessageID")
         response_xml = build_eventing_subscribe_response(relates_to, xaddr)
         log.info(
-            f"{_short_soap_action(ACTION_SUBSCRIBE_RESPONSE) or 'SubscribeResponse'}",
+            f"{soap_action_short(ACTION_SUBSCRIBE_RESPONSE) or 'SubscribeResponse'}",
             extra={
                 "soap_leg": "server_response",
-                "soap_action": _short_soap_action(ACTION_SUBSCRIBE_RESPONSE),
+                "soap_action": soap_action_short(ACTION_SUBSCRIBE_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
             },
@@ -255,10 +210,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
             log.warning("Renew request missing MessageID")
         response_xml = build_eventing_renew_response(relates_to)
         log.info(
-            f"{_short_soap_action(ACTION_RENEW_RESPONSE) or 'RenewResponse'}",
+            f"{soap_action_short(ACTION_RENEW_RESPONSE) or 'RenewResponse'}",
             extra={
                 "soap_leg": "server_response",
-                "soap_action": _short_soap_action(ACTION_RENEW_RESPONSE),
+                "soap_action": soap_action_short(ACTION_RENEW_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
             },
@@ -273,10 +228,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
             log.warning("GetStatus request missing MessageID")
         response_xml = build_eventing_get_status_response(relates_to)
         log.info(
-            f"{_short_soap_action(ACTION_GET_STATUS_RESPONSE) or 'GetStatusResponse'}",
+            f"{soap_action_short(ACTION_GET_STATUS_RESPONSE) or 'GetStatusResponse'}",
             extra={
                 "soap_leg": "server_response",
-                "soap_action": _short_soap_action(ACTION_GET_STATUS_RESPONSE),
+                "soap_action": soap_action_short(ACTION_GET_STATUS_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
             },
@@ -291,10 +246,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
             log.warning("Unsubscribe request missing MessageID")
         response_xml = build_eventing_unsubscribe_response(relates_to)
         log.info(
-            f"{_short_soap_action(ACTION_UNSUBSCRIBE_RESPONSE) or 'UnsubscribeResponse'}",
+            f"{soap_action_short(ACTION_UNSUBSCRIBE_RESPONSE) or 'UnsubscribeResponse'}",
             extra={
                 "soap_leg": "server_response",
-                "soap_action": _short_soap_action(ACTION_UNSUBSCRIBE_RESPONSE),
+                "soap_action": soap_action_short(ACTION_UNSUBSCRIBE_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
             },
@@ -309,10 +264,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
             log.warning("CreateScanJob request missing MessageID")
         response_xml = build_create_scan_job_response(relates_to)
         log.info(
-            f"{_short_soap_action(ACTION_CREATE_SCAN_JOB_RESPONSE) or 'CreateScanJobResponse'}",
+            f"{soap_action_short(ACTION_CREATE_SCAN_JOB_RESPONSE) or 'CreateScanJobResponse'}",
             extra={
                 "soap_leg": "server_response",
-                "soap_action": _short_soap_action(ACTION_CREATE_SCAN_JOB_RESPONSE),
+                "soap_action": soap_action_short(ACTION_CREATE_SCAN_JOB_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
             },
@@ -328,10 +283,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
         notify_scanner_state(scanner_state)
         ack_xml = build_scanner_status_summary_event_ack_response(relates_to)
         log.info(
-            f"{_short_soap_action(ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE) or 'ScannerStatusSummaryEventResponse'}",
+            f"{soap_action_short(ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE) or 'ScannerStatusSummaryEventResponse'}",
             extra={
                 "soap_leg": "server_response",
-                "soap_action": _short_soap_action(ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE),
+                "soap_action": soap_action_short(ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE),
                 "http_status": 200,
                 "bytes": len(ack_xml.encode("utf-8")),
                 "scanner_state": scanner_state,
@@ -348,10 +303,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
         if not scanner_xaddr:
             log.warning("ScanAvailableEvent received but scanner_xaddr is not configured")
             log.info(
-                f"{_short_soap_action(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE) or 'ScanAvailableEventResponse'}",
+                f"{soap_action_short(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE) or 'ScanAvailableEventResponse'}",
                 extra={
                     "soap_leg": "server_response",
-                    "soap_action": _short_soap_action(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE),
+                    "soap_action": soap_action_short(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE),
                     "http_status": 200,
                     "bytes": len(ack_xml.encode("utf-8")),
                 },
@@ -406,10 +361,10 @@ async def handle_wsd(request: web.Request) -> web.Response:
         )
         task.add_done_callback(_log_chain_result)
         log.info(
-            f"{_short_soap_action(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE) or 'ScanAvailableEventResponse'}",
+            f"{soap_action_short(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE) or 'ScanAvailableEventResponse'}",
             extra={
                 "soap_leg": "server_response",
-                "soap_action": _short_soap_action(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE),
+                "soap_action": soap_action_short(ACTION_SCAN_AVAILABLE_EVENT_RESPONSE),
                 "http_status": 200,
                 "bytes": len(ack_xml.encode("utf-8")),
             },

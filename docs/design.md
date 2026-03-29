@@ -96,17 +96,16 @@ Responsibilities
 #### Technology
 - aiohttp (async, lightweight, testable)
 
-### 5.3 SOAP Handling (soap.py)
- #### Responsibilities
-- Parse incoming SOAP XML
-- Extract:
-  - ```wsa:Action```
-  - ```wsa:MessageID```
-- Generate SOAP responses
+### 5.3 SOAP handling (`app/soap/`)
 
-#### Implementation Strategy
-- Phase 1: string matching
-- Phase 2: lxml + XPath
+#### Responsibilities
+- Shared SOAP 1.2 envelope construction, WS-Addressing headers, fault parsing
+- HTTP transport for text SOAP and binary/MTOM **RetrieveImage** responses
+- Operation-specific parsers grouped under `app/soap/parsers/` (scan, discovery, eventing, transfer)
+
+#### Implementation strategy
+- Phase 1: string-based bodies with shared envelope helpers (current)
+- Phase 2: ElementTree for selected headers/faults (`app/soap/xmlutil.py` hooks); optional lxml if needed later
 
 ### 5.4 WS-Scan Handler (ws_scan.py)
 #### Responsibilities

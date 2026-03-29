@@ -10,7 +10,7 @@ The daemon runs on a Linux host on the same LAN as the scanner. It:
 - Serves **HTTP** (default port **5357**) for inbound SOAP on the WSD path and optional **push** scan uploads on `/scan`.
 - Acts as a **WS-Eventing** client toward the scanner: subscribes for notifications, then drives the **WS-Scan** pull chain when a **ScanAvailableEvent** arrives at the sink.
 
-The high-level pipeline in the design spec (discovery → HTTP SOAP → WS-Scan → storage) matches the implementation; outbound registration and the device-initiated **ValidateScanTicket → CreateScanJob → RetrieveImage** chain live primarily in `app/ws_eventing_client.py`.
+The high-level pipeline in the design spec (discovery → HTTP SOAP → WS-Scan → storage) matches the implementation; shared SOAP 1.2 shell, WS-Addressing helpers, HTTP transport, and operation parsers live under **`app/soap/`**; orchestration and the device-initiated **ValidateScanTicket → CreateScanJob → RetrieveImage** chain remain in `app/ws_eventing_client.py`.
 
 ## Runtime model
 
@@ -68,10 +68,11 @@ flowchart TB
 | `main.py` | Orchestration: logging, three tasks, signal handling, WS-Eventing unsubscribe on exit. |
 | `app/config.py` | `Config` dataclass: env-driven settings, persistent UUID and WS-Discovery sequence id under `XDG_STATE_HOME`. |
 | `app/logging.py` | Root logger setup: JSON or human **AirscandConsoleFormatter** (DEBUG JSON, INFO+ human), optional wrap and inline context keys. |
-| `app/discovery.py` | WS-Discovery XML builders, regex-based extraction, multicast loop, active `discover_scanner_xaddr` client probe, self-probe filtering. |
+| `app/discovery.py` | WS-Discovery XML builders (using `app.soap.envelope` for Probe/Resolve), extraction via `app.soap.parsers.discovery`, multicast loop, active `discover_scanner_xaddr` client probe, self-probe filtering. |
 | `app/http_server.py` | Minimal aiohttp wiring: POST `endpoint_path` → `handle_wsd`, POST `scan_path` → `handle_scan`. |
-| `app/ws_scan.py` | Inbound SOAP dispatch by `wsa:Action`: WS-Eventing sink responses, **CreateScanJob** response, **ScanAvailableEvent** ack + schedules `run_scan_available_chain`, **ScannerStatusSummaryEvent** → coordination. |
-| `app/ws_eventing_client.py` | Outbound SOAP: **Subscribe**, **Unsubscribe**, **Get** (preflight), **GetScannerElements**, **ValidateScanTicket**, **CreateScanJob**, **GetJobStatus** polling, **RetrieveImage**; MTOM handling via `mtom`; scan ticket resolution; registration helpers. |
+| `app/ws_scan.py` | Inbound SOAP dispatch by `wsa:Action`: WS-Eventing sink responses, **CreateScanJob** response, **ScanAvailableEvent** ack + schedules `run_scan_available_chain`, **ScannerStatusSummaryEvent** → coordination; response envelopes via `app.soap.envelope`. |
+| `app/soap/` | Shared **namespaces**, **addressing** (regex + `MessageID`), **envelope** builders, **fault** parsing, **transport** (`SoapHttpClient`: text SOAP + retrieve-image / MTOM), **parsers** (`scan`, `discovery`, `eventing`, `transfer`), optional **xmlutil** for Phase-2 ElementTree hooks. |
+| `app/ws_eventing_client.py` | Orchestration: **Subscribe**, **Unsubscribe**, **Get** (preflight), **GetScannerElements**, **ValidateScanTicket** / **CreateScanJob** / **RetrieveImage** chains, **GetJobStatus** polling; MTOM via `mtom`; re-exports parsers/builders from `app.soap.parsers` for callers and tests. |
 | `app/scan_receiver.py` | Push path: read body, delegate to `scan_storage.save_scan_file`. |
 | `app/scan_storage.py` | Magic-byte and MIME-based extension selection, atomic write, shared by push and pull saves. |
 | `app/mtom.py` | Multipart/related parsing and **xop:Include** CID resolution for **RetrieveImage** responses. |

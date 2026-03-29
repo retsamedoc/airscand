@@ -2,13 +2,13 @@
 
 This report maps the [WIA client specification](protocol/wia_client_spec.md) to the current **airscand** codebase. It is a **client-behavior** audit: outbound discovery, SOAP, WS-Scan operations, robustness, and optional eventing.
 
-**Primary implementation:** [`app/ws_eventing_client.py`](../app/ws_eventing_client.py) (outbound SOAP), [`app/discovery.py`](../app/discovery.py) (WS-Discovery client), [`main.py`](../main.py) (registration loop), [`app/ws_scan.py`](../app/ws_scan.py) (inbound SOAP for event delivery and test harness responses). Related: [`app/config.py`](../app/config.py), [`docs/ws-scan_audit.md`](ws-scan_audit.md), [`docs/ws-eventing_audit.md`](ws-eventing_audit.md).
+**Primary implementation:** [`app/soap/`](../app/soap/) (shared SOAP shell, transport, parsers), [`app/ws_eventing_client.py`](../app/ws_eventing_client.py) (orchestration + re-exports), [`app/discovery.py`](../app/discovery.py) (WS-Discovery client), [`main.py`](../main.py) (registration loop), [`app/ws_scan.py`](../app/ws_scan.py) (inbound SOAP for event delivery and test harness responses). Related: [`app/config.py`](../app/config.py), [`docs/ws-scan_audit.md`](ws-scan_audit.md), [`docs/ws-eventing_audit.md`](ws-eventing_audit.md).
 
 ---
 
 ## Executive summary
 
-The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably the **§6.1 GetJobStatus polling loop**, **CancelJob**, **response RelatesTo validation**, **separate connect/read timeouts**, **multi-XAddr failover**, and **RetrieveImage document handling / integrity checks**. Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
+The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob**, **response RelatesTo validation**, **separate connect/read timeouts**, **multi-XAddr failover**, and **RetrieveImage document handling / integrity checks**. **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
 
 ---
 
@@ -21,7 +21,7 @@ The project implements a **device-initiated** path (WS-Eventing **ScanAvailableE
 | SOAP 1.2 | **Met** | `NS_SOAP` uses `http://www.w3.org/2003/05/soap-envelope` (SOAP 1.2) in outbound envelopes. |
 | WS-Addressing 2004/08 | **Met** | `Action`, `To`, `MessageID`, `ReplyTo` on outbound requests. |
 | WS-Discovery | **Met** | Multicast probe and `ProbeMatches` handling in [`discover_scanner_xaddr`](../app/discovery.py). |
-| WS-Scan | **Partial** | Core operations present; **GetJobStatus** absent (see §6–7). |
+| WS-Scan | **Partial** | Core operations present; **GetJobStatus** implemented when enabled (see §6–7). |
 | WS-Eventing | **Partial** | Outbound **Subscribe** and inbound notify handling; full subscription lifecycle gaps are documented in [ws-eventing_audit.md](ws-eventing_audit.md). |
 
 ---
@@ -31,7 +31,7 @@ The project implements a **device-initiated** path (WS-Eventing **ScanAvailableE
 | Requirement | Status | Notes |
 |-------------|--------|--------|
 | HTTP/1.1, POST for SOAP | **Met** | [`aiohttp`](https://docs.aiohttp.org/) client POSTs with `application/soap+xml`. |
-| Chunked responses, keep-alive, premature close | **Partial** | Libraries handle chunked bodies; **each** [`_post_soap`](../app/ws_eventing_client.py) call creates a **new** `ClientSession`, so **connection reuse across legs of a chain is not used** (contrast with §3.1 “connection reuse”). |
+| Chunked responses, keep-alive, premature close | **Partial** | Libraries handle chunked bodies; outbound SOAP uses a **process-wide shared** [`ClientSession`](../app/soap/transport.py) via [`SoapHttpClient`](../app/soap/transport.py) / [`default_soap_http_client`](../app/soap/transport.py) (connection reuse across legs is **used**; per-request sessions removed). |
 | Configurable timeouts | **Partial** | `timeout_sec` parameters exist; **no env-driven split** into connect vs read. |
 | Default connect ≤ 2s, read 2–10s | **Gap** | Defaults such as `timeout_sec=5.0` are a **single** deadline for the whole request, not connect/read split per §3.2. |
 | Retry idempotent operations | **Partial** | Discovery repeats probes; **GetScannerElements** may retry with a reduced element set; no general idempotent-SOAP retry policy. |
@@ -53,11 +53,11 @@ The project implements a **device-initiated** path (WS-Eventing **ScanAvailableE
 
 | Requirement | Status | Notes |
 |-------------|--------|--------|
-| Envelope with Header (Action, MessageID, To) + Body | **Met** | Outbound builders in [`ws_eventing_client.py`](../app/ws_eventing_client.py). |
-| Unique MessageID per request | **Met** | [`_new_message_id`](../app/ws_eventing_client.py) (`urn:uuid:…`). |
+| Envelope with Header (Action, MessageID, To) + Body | **Met** | Outbound builders use [`app/soap/envelope.py`](../app/soap/envelope.py) and [`app/soap/parsers/`](../app/soap/parsers/); orchestration in [`ws_eventing_client.py`](../app/ws_eventing_client.py). |
+| Unique MessageID per request | **Met** | [`new_message_id`](../app/soap/addressing.py) (`urn:uuid:…`). |
 | ReplyTo anonymous | **Met** | `WSA_ANONYMOUS` on outbound scan/eventing requests. |
 | Validate RelatesTo | **Gap** | Inbound discovery matches `relates_to == probe_mid`. Outbound **SOAP responses** from the scanner are **not** checked for `RelatesTo` equal to the outbound request `MessageID`; responses are parsed with regex for body/fault only. |
-| Validate Action | **Partial** | Response `Action` is logged via [`_extract_wsa_action`](../app/ws_eventing_client.py); not enforced against expected operation. |
+| Validate Action | **Partial** | Response `Action` is logged via [`extract_wsa_action`](../app/soap/addressing.py) in transport; not enforced against expected operation. |
 
 ---
 
@@ -71,8 +71,8 @@ The spec’s logical sequence is:
 |------|--------|--------|
 | GetScannerElements before job | **Met** | [`get_scanner_elements_metadata`](../app/ws_eventing_client.py) runs at start of [`run_scan_available_chain`](../app/ws_eventing_client.py); on failure the chain **continues** with a template ticket (tolerant, per §10). |
 | CreateScanJob | **Met** | With **ValidateScanTicket** first (extra vs §16 minimal list; appropriate for push/eventing flows). |
-| **GetJobStatus** loop until terminal | **Gap** | **Not implemented** anywhere. The chain calls **RetrieveImage** immediately after **CreateScanJob** when `JobToken` exists—no polling interval/backoff per §7.3. |
-| RetrieveImage when ready | **Partial** | Optimistic single **RetrieveImage**; no “ready” state from **GetJobStatus**. Some devices accept this; strict §6.1 sequencing is not satisfied. |
+| **GetJobStatus** loop until terminal | **Partial** | [`poll_get_job_status_until_ready`](../app/ws_eventing_client.py) (builders/parsers in [`app/soap/parsers/scan.py`](../app/soap/parsers/scan.py)) when enabled; **disabled** for some profiles (e.g. Epson WF-3640). |
+| RetrieveImage when ready | **Partial** | When polling is enabled, **RetrieveImage** follows **GetJobStatus** readiness; otherwise optimistic single call. Strict §6.1 sequencing may still differ on edge cases. |
 
 ---
 
@@ -84,9 +84,9 @@ The spec’s logical sequence is:
 | **GetScannerElements** — retry on failure | **Partial** | Reduced-QName retry on InvalidArgs-style faults. |
 | **CreateScanJob** — input source, resolution, format | **Met** | [`SCAN_TICKET_TEMPLATE_XML`](../app/ws_eventing_client.py) and [`_apply_scanner_configuration_to_scan_ticket_xml`](../app/ws_eventing_client.py) adjust **InputSource**; resolution/format present in template **DocumentParameters**. |
 | **CreateScanJob** — store JobId | **Met** | Parsed and returned in chain result. |
-| **GetJobStatus** — poll until terminal, 200–500ms initial, backoff ~2s | **Gap** | **Not implemented.** |
-| **RetrieveImage** — only when ready | **Partial** | Single immediate call; see §6. |
-| **RetrieveImage** — base64, large payloads, chunked | **Gap** | [`parse_retrieve_image_response`](../app/ws_eventing_client.py) extracts **Status** and faults only; **no** decoding of document bytes, size limits, or integrity validation per §7.4. |
+| **GetJobStatus** — poll until terminal, 200–500ms initial, backoff ~2s | **Partial** | Implemented in [`app/soap/parsers/scan.py`](../app/soap/parsers/scan.py) + [`poll_get_job_status_until_ready`](../app/ws_eventing_client.py); intervals align with intent; may be off by profile. |
+| **RetrieveImage** — only when ready | **Partial** | Gated when polling enabled; see §6. |
+| **RetrieveImage** — base64, large payloads, chunked | **Gap** | [`parse_retrieve_image_response`](../app/soap/parsers/scan.py) extracts **Status** and faults only; **no** decoding of document bytes, size limits, or integrity validation per §7.4. |
 | **RetrieveImage** — truncated retry | **Gap** | No retry path for truncated image payload. |
 | **CancelJob** | **Gap** | **Not implemented.** |
 
@@ -107,7 +107,7 @@ The spec’s logical sequence is:
 
 | Requirement | Status | Notes |
 |-------------|--------|--------|
-| SOAP faults — parse/classify/retry | **Partial** | [`parse_soap_fault`](../app/ws_eventing_client.py); targeted retry for **CreateScanJob** invalid destination token; **no** broad fault-driven retry matrix. |
+| SOAP faults — parse/classify/retry | **Partial** | [`parse_soap_fault`](../app/soap/fault.py); targeted retry for **CreateScanJob** invalid destination token; **no** broad fault-driven retry matrix. |
 | Network — retry transient, abort persistent | **Partial** | Registration loop backs off; per-request failures often surface once unless wrapped by caller. |
 | Tolerance for malformed/missing headers/namespaces | **Partial** | Regex-based parsing aligns with “loose” §9.3 / §10 but is fragile compared to namespace-aware parsing (see [ws-eventing_audit.md](ws-eventing_audit.md)). |
 
@@ -117,7 +117,7 @@ The spec’s logical sequence is:
 
 | Requirement | Status | Notes |
 |-------------|--------|--------|
-| Retry **GetJobStatus** | **Gap** | Operation absent. |
+| Retry **GetJobStatus** | **Partial** | Polling loop present when enabled; not a separate retry matrix for transient faults. |
 | Retry **RetrieveImage** | **Gap** | No bounded retry loop for transient image faults or truncation (§10.2). |
 | Limit retries | **Partial** | Some gates (e.g. create retry once); no unified limiter for image retrieval. |
 
@@ -127,7 +127,7 @@ The spec’s logical sequence is:
 
 | Requirement | Status | Notes |
 |-------------|--------|--------|
-| Avoid excessive polling (&lt; ~5 req/s), backoff | **N/A / weak** | No **GetJobStatus** polling. Eventing registration loop uses backoff; not the same as job polling. |
+| Avoid excessive polling (&lt; ~5 req/s), backoff | **Partial** | **GetJobStatus** uses initial interval + capped backoff when enabled. Eventing registration loop uses separate backoff. |
 | Cache capabilities | **Partial** | In-memory for one chain only. |
 
 ---
@@ -137,7 +137,7 @@ The spec’s logical sequence is:
 | Requirement | Status | Notes |
 |-------------|--------|--------|
 | Subscribe + handle Notify | **Met** | [`register_with_scanner`](../app/ws_eventing_client.py), inbound [`handle_wsd`](../app/ws_scan.py) for **ScanAvailableEvent**. |
-| Fall back to polling if eventing fails | **Gap** | [`_eventing_registration_loop`](../main.py) retries discovery/subscribe with backoff; it does **not** implement **GetJobStatus** (or other) polling as a scan-progress fallback per §12. |
+| Fall back to polling if eventing fails | **Gap** | [`_eventing_registration_loop`](../main.py) retries discovery/subscribe with backoff; it does **not** use **GetJobStatus** as a substitute when subscriptions fail (§12 scan-progress fallback). |
 
 ---
 
@@ -148,13 +148,13 @@ The spec’s logical sequence is:
 | Sends WS-Discovery Probe | **Yes** | [`build_probe`](../app/discovery.py) |
 | Parses ProbeMatch correctly | **Yes** | [`_recv_discovery_match`](../app/discovery.py), `ACTION_PROBE_MATCHES` + `relates_to` |
 | Extracts XAddrs | **Yes** | [`extract_xaddrs`](../app/discovery.py) |
-| Generates valid SOAP envelopes | **Yes** | [`ws_eventing_client.py`](../app/ws_eventing_client.py) |
-| Uses unique MessageIDs | **Yes** | [`_new_message_id`](../app/ws_eventing_client.py) |
+| Generates valid SOAP envelopes | **Yes** | [`app/soap/envelope.py`](../app/soap/envelope.py), parsers under [`app/soap/parsers/`](../app/soap/parsers/) |
+| Uses unique MessageIDs | **Yes** | [`new_message_id`](../app/soap/addressing.py) |
 | Validates RelatesTo | **No** | Outbound SOAP responses |
 | Calls GetScannerElements first | **Yes** | [`run_scan_available_chain`](../app/ws_eventing_client.py) |
 | Creates scan job correctly | **Yes** | With ValidateScanTicket + ticket resolution |
-| Polls status correctly | **No** | **GetJobStatus** missing |
-| Retrieves image only when ready | **Partial** | Immediate RetrieveImage; no status gate |
+| Polls status correctly | **Partial** | **GetJobStatus** when profile enables polling |
+| Retrieves image only when ready | **Partial** | Status gate when polling enabled; else optimistic |
 | Handles malformed responses | **Partial** | Regex + tolerant paths; not full XML |
 | Retries transient failures | **Partial** | Selective retries |
 | Handles timeouts | **Partial** | Single timeout value; not §3.2 defaults split |
@@ -172,8 +172,8 @@ Use this as a prioritized backlog against [wia_client_spec.md](protocol/wia_clie
 
 ### Critical (§6 / §7 sequencing)
 
-- [ ] **Implement `GetJobStatus`** (SOAP action + parser) and a **polling loop** after `CreateScanJob`: initial interval 200–500ms, backoff up to ~2s, until terminal job state or fault.
-- [ ] **Gate `RetrieveImage`** on job readiness from `GetJobStatus` (while retaining optional fast path or device-specific optimism if desired).
+- [x] **Implement `GetJobStatus`** (SOAP action + parser) and a **polling loop** after `CreateScanJob` (see [`app/soap/parsers/scan.py`](../app/soap/parsers/scan.py), [`poll_get_job_status_until_ready`](../app/ws_eventing_client.py)); vendor profiles may disable polling.
+- [x] **Gate `RetrieveImage`** on job readiness from `GetJobStatus` when polling is enabled (fast/optimistic path when disabled).
 - [ ] **Document or implement** the spec’s **ValidateScanTicket** position vs §16 minimal list (already required for eventing flows).
 
 ### High
@@ -186,7 +186,7 @@ Use this as a prioritized backlog against [wia_client_spec.md](protocol/wia_clie
 ### Medium
 
 - [ ] **CancelJob**: send on shutdown, user cancel, or timeout; tolerate devices that ignore it (§7.5).
-- [ ] **Connection reuse**: reuse a shared `ClientSession` (or connector) for related outbound SOAP calls to honor §3.1 keep-alive.
+- [x] **Connection reuse**: shared `ClientSession` via [`SoapHttpClient`](../app/soap/transport.py) (process-wide default client).
 - [ ] **Idempotent SOAP retries**: define which operations are idempotent and retry policy (GET-like / safe replays).
 - [ ] **Explicit client state machine** (§8): map `Idle` → `CapabilitiesLoaded` → `JobCreated` → `Polling` → `Retrieving` → terminal states; guard transitions.
 - [ ] **Eventing fallback**: if subscribe never succeeds, document behavior; optionally add **GetJobStatus**-based polling for long-running jobs if a pull-only mode is added.
