@@ -1,0 +1,76 @@
+site_name: airscand
+site_description: User manual for the airscand WSD / WS-Scan Linux daemon
+site_author: Zach Schimke
+
+theme:
+  name: material
+  palette:
+    primary: blue
+    accent: indigo
+  font: Roboto
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.instant
+    - navigation.expand
+    - content.code.copy
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Troubleshooting: troubleshooting.md
+  - Glossary: terms.md
+  - Development: development.md
+  - Architecture:
+    - Design Specification: design.md
+    - Architecture diagram: architecture.md
+    - Protocol Specifications:
+      - WS-Scan: protocol/ws-scan-tcp.md
+      - WIA over WSD: protocol/wia_client_spec.md
+      - eSCL: protocol/eSCL.md
+      - References: references.md
+    - Vendor quirks: protocol/vendor_quirks.md
+    - Protocol audits:
+      - WIA client audit: wia_client_audit.md
+      - WS-Eventing audit: ws-eventing_audit.md
+      - WS-Scan audit: ws-scan_audit.md
+  - About:
+    - Status: status.md
+    - Roadmap: ROADMAP.md
+    - License: license.md
+
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - typeset
+  - privacy
+  - open-in-new-tab
+
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/retsamedoc/airscand
+    - icon: fontawesome/brands/twitter
+      link: https://twitter.com/retsamedoc
+    - icon: fontawesome/brands/linkedin
+      link: https://www.linkedin.com/in/ZacharySchimke/
+  version: !ENV ${DOCS_VERSION}

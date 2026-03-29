@@ -107,14 +107,24 @@ def parse_retrieve_image_mtom(
         return soap_text, None, None
 
     soap_xml: str | None = None
+    soap_headers: dict[str, str] = {}
     for hdrs, payload in part_list:
         ctype = (hdrs.get("Content-Type") or hdrs.get("Content-type") or "").lower()
-        if "xml" in ctype or payload.lstrip().startswith(b"<?xml") or payload.lstrip().startswith(b"<soap:"):
-            soap_xml = payload.decode("utf-8", errors="replace")
+        if (
+            "xml" in ctype
+            or payload.lstrip().startswith(b"<?xml")
+            or payload.lstrip().startswith(b"<soap:")
+        ):
+            try:
+                soap_xml = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                soap_xml = payload.decode("utf-8", errors="replace")
+            soap_headers = hdrs
             break
 
     if soap_xml is None:
-        _, first_payload = part_list[0]
+        # Fallback: first part is usually SOAP in MTOM
+        soap_headers, first_payload = part_list[0]
         soap_xml = first_payload.decode("utf-8", errors="replace")
 
     cid_ref = extract_xop_include_cid(soap_xml)

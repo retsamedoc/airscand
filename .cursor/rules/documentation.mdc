@@ -1,0 +1,19 @@
+---
+Description: Documentation Conventions
+alwaysApply: true
+---
+
+## READMEs
+- Use sentence case for headings
+- Include a "Quick Start" section that gets someone running in 5 minutes
+- Code examples should be complete and runnable
+
+## Code comments
+- Document "why" not "what" in inline comments
+- Don't comment obvious code
+
+## HTTP / protocol documentation
+- Document scan-related HTTP behavior in **MkDocs** (see `docs/`, `mkdocs.yaml`): getting started, configuration, troubleshooting, and protocol notes.
+- Prefer **example requests/responses** in prose or fenced blocks where they help operators (SOAP/XML for `/wsd`, uploads for `/scan`).
+- Document **error and failure** paths (HTTP status, common faults), not only success cases.
+

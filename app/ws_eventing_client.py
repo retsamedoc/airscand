@@ -346,11 +346,7 @@ def build_unsubscribe_request(
         subscription_identifier,
         reference_parameters_xml,
     )
-    id_line = (
-        f"    <wse:Identifier>{eff_id}</wse:Identifier>\n"
-        if eff_id
-        else ""
-    )
+    id_line = f"    <wse:Identifier>{eff_id}</wse:Identifier>\n" if eff_id else ""
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="{NS_SOAP}" xmlns:wsa="{NS_WSA}" xmlns:wse="{NS_WSE}">
   <soap:Header>
@@ -1261,11 +1257,7 @@ async def _post_soap_retrieve_image(
     payload: str,
     timeout_sec: float,
 ) -> tuple[int, bytes, str | None]:
-    """POST SOAP payload and return status, raw response body, and response Content-Type.
-
-    RetrieveImage frequently returns MTOM `multipart/related` with binary parts; reading as text
-    corrupts transfer data. This helper always reads bytes.
-    """
+    """POST SOAP payload and return status, raw response body, and response Content-Type."""
     headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
     req_action = _extract_wsa_action(payload)
     req_action_short = _soap_action_short(req_action)
@@ -1292,18 +1284,33 @@ async def _post_soap_retrieve_image(
             ) as response:
                 body = await response.read()
                 resp_ct = response.headers.get("Content-Type")
+                is_mtom = bool(resp_ct and "multipart/related" in resp_ct.lower())
+                soap_text_probe = body[: min(4096, len(body))].decode("utf-8", errors="replace")
+                resp_action = _extract_wsa_action(soap_text_probe) if not is_mtom else None
+                resp_action_short = _soap_action_short(resp_action)
+                resp_mid_m = WSA_MESSAGE_ID_PATTERN.search(soap_text_probe) if not is_mtom else None
+                resp_message_id = resp_mid_m.group(1).strip() if resp_mid_m else None
+                fault = {} if is_mtom else parse_soap_fault(soap_text_probe)
                 resp_extra: dict[str, str | int | float | None] = {
                     "soap_leg": "client_response",
-                    "soap_action": "RetrieveImageResponse",
-                    "wsa_message_id": None,
+                    "soap_action": resp_action_short,
+                    "wsa_message_id": resp_message_id,
                     "url": url,
                     "http_status": response.status,
                     "bytes": len(body),
                     "response_content_type": resp_ct,
                 }
-                log.info("RetrieveImageResponse", extra=resp_extra)
-                if response.status < 200 or response.status >= 300:
-                    log.warning("RetrieveImageResponse indicates failure", extra=resp_extra)
+                if fault.get("fault_subcode"):
+                    resp_extra["fault_subcode"] = fault["fault_subcode"]
+                if fault.get("fault_reason"):
+                    resp_extra["fault_reason"] = fault["fault_reason"]
+                log.info(f"{resp_action_short or 'unknown'}", extra=resp_extra)
+                if response.status < 200 or response.status >= 300 or fault.get("fault_code"):
+                    warn_extra = {**resp_extra, "fault_code": fault.get("fault_code")}
+                    log.warning(
+                        f"{resp_action_short or 'unknown'} indicates failure",
+                        extra=warn_extra,
+                    )
                 return response.status, body, resp_ct
     except asyncio.TimeoutError:
         log.warning(
@@ -1704,7 +1711,7 @@ async def run_scan_available_chain(
     scanner_xaddr: str,
     scan_available_payload: str | None = None,
     timeout_sec: float = 5.0,
-    retrieve_timeout_sec: float | None = None,
+    retrieve_image_timeout_sec: float = 5.0,
     from_address: str | None = None,
     eventing_subscription_identifier: str | None = None,
     subscribe_destination_token: str | None = None,
@@ -1718,7 +1725,11 @@ async def run_scan_available_chain(
     scanner_profile: ScannerProfile | None = None,
     output_dir: str | Path | None = None,
 ) -> dict[str, str | None]:
-    """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage."""
+    """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage.
+
+    ``timeout_sec`` applies to control SOAP calls; ``retrieve_image_timeout_sec`` applies only to
+    RetrieveImage (chunked MTOM bodies often need far longer than fast request/response pairs).
+    """
     target_url = resolve_wdp_scan_url(scanner_xaddr)
     if scanner_profile is not None:
         log.info(
@@ -2033,14 +2044,16 @@ async def run_scan_available_chain(
     idle_wait_result: str | None = None
     saved_scan_path_str: str | None = None
     saved_scan_bytes_val: int | None = None
+    retrieve_details: dict[str, str | None] = {}
     try:
-        effective_retrieve_timeout = float(retrieve_timeout_sec or timeout_sec)
         retrieve_status, retrieve_body, retrieve_ct = await _post_soap_retrieve_image(
             url=target_url,
             payload=retrieve_payload,
-            timeout_sec=effective_retrieve_timeout,
+            timeout_sec=retrieve_image_timeout_sec,
         )
-        soap_text, image_bytes, image_part_ct = parse_retrieve_image_mtom(retrieve_body, retrieve_ct)
+        soap_text, image_bytes, image_part_ct = parse_retrieve_image_mtom(
+            retrieve_body, retrieve_ct
+        )
         retrieve_details = parse_retrieve_image_response(soap_text)
         fault = retrieve_details.get("fault_code")
         status_val = (retrieve_details.get("status") or "").strip().lower()
@@ -2062,6 +2075,11 @@ async def run_scan_available_chain(
                     "Failed to persist RetrieveImage payload",
                     extra={"target_url": target_url, "job_id": resolved_job_id},
                 )
+        elif retrieve_ok and image_bytes and output_dir is None:
+            log.info(
+                "RetrieveImage returned image bytes but output_dir omitted; skipping save",
+                extra={"bytes": len(image_bytes), "job_id": resolved_job_id},
+            )
         if retrieve_ok and wait_scanner_idle_after_retrieve and scanner_idle_wait_sec > 0:
             got_idle = await await_scanner_idle_after_retrieve(scanner_idle_wait_sec)
             idle_wait_result = "success" if got_idle else "timeout"

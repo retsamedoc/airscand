@@ -1,0 +1,79 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches: 
+      - main
+    paths:
+      - "docs/**"
+      - "main.py"
+      - "app/**"
+      - "mkdocs.yaml"
+      - ".github/workflows/docs.yaml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "main.py"
+      - "app/**"
+      - "mkdocs.yaml"
+      - ".github/workflows/docs.yaml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.x  
+      
+
+      - name: Install docs dependencies
+        run: pip install ".[docs]"
+
+      - name: Determine version
+        id: version
+        run: |
+          TAG=$(git describe --tags --abbrev=0 || echo "main")
+          echo "DOCS_VERSION=$TAG" >> $GITHUB_ENV
+          echo "Version set to $TAG"
+
+      - name: Build MkDocs site
+        run: mkdocs build --clean --site-dir ./_site
+
+      - name: Check build success
+        run: |
+          if [ ! -d "_site" ]; then
+            echo "MkDocs build failed, site directory missing!"
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

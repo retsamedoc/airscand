@@ -80,6 +80,7 @@ def _fake_retrieve_image_from_xml(
 
     return fake_post_soap_retrieve_image
 
+
 if TYPE_CHECKING:
     from _pytest.logging import LogCaptureFixture
     from _pytest.monkeypatch import MonkeyPatch
@@ -1134,10 +1135,17 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
         *, url: str, payload: str, timeout_sec: float
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        assert ACTION_RETRIEVE_IMAGE in payload
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
@@ -1182,7 +1190,6 @@ def test_parse_scanner_status_summary_event_extracts_scanner_state() -> None:
 async def test_run_scan_available_chain_idle_wait_success(monkeypatch: MonkeyPatch) -> None:
     """When enabled, Idle wait uses await_scanner_idle_after_retrieve result."""
     calls: list[str] = []
-    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1213,17 +1220,14 @@ async def test_run_scan_available_chain_idle_wait_success(monkeypatch: MonkeyPat
             )
         raise AssertionError("unexpected SOAP request")
 
-    async def fake_post_soap_retrieve_image(
-        *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
-        retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
-
     async def instant_idle(_timeout: float) -> bool:
         return True
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     monkeypatch.setattr(
         "app.ws_eventing_client.await_scanner_idle_after_retrieve",
         instant_idle,
@@ -1235,14 +1239,12 @@ async def test_run_scan_available_chain_idle_wait_success(monkeypatch: MonkeyPat
         scanner_idle_wait_sec=30.0,
     )
     assert result.get("scanner_idle_wait_result") == "success"
-    assert len(retrieve_payloads) == 1
 
 
 @pytest.mark.asyncio
 async def test_run_scan_available_chain_idle_wait_timeout(monkeypatch: MonkeyPatch) -> None:
     """Idle wait records timeout when scanner never reports Idle."""
     calls: list[str] = []
-    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1273,17 +1275,14 @@ async def test_run_scan_available_chain_idle_wait_timeout(monkeypatch: MonkeyPat
             )
         raise AssertionError("unexpected SOAP request")
 
-    async def fake_post_soap_retrieve_image(
-        *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
-        retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
-
     async def never_idle(_timeout: float) -> bool:
         return False
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     monkeypatch.setattr(
         "app.ws_eventing_client.await_scanner_idle_after_retrieve",
         never_idle,
@@ -1295,7 +1294,6 @@ async def test_run_scan_available_chain_idle_wait_timeout(monkeypatch: MonkeyPat
         scanner_idle_wait_sec=0.01,
     )
     assert result.get("scanner_idle_wait_result") == "timeout"
-    assert len(retrieve_payloads) == 1
 
 
 @pytest.mark.asyncio
@@ -1304,6 +1302,7 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
 ) -> None:
     """When polling is enabled, GetJobStatus runs after CreateScanJob and before RetrieveImage."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1341,11 +1340,20 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
     async def instant_sleep(_delay: float) -> None:
         return None
 
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
+
     monkeypatch.setattr("app.ws_eventing_client.asyncio.sleep", instant_sleep)
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
-        "app.ws_eventing_client._post_soap_retrieve_image",
-        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
     )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
@@ -1354,6 +1362,9 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
     )
     assert len(calls) == 4
     assert ACTION_GET_JOB_STATUS in calls[3]
+    assert len(retrieve_payloads) == 1
+    assert ACTION_RETRIEVE_IMAGE in retrieve_payloads[0]
+    assert "<sca:JobId>job-42</sca:JobId>" in retrieve_payloads[0]
     assert result["retrieve_http_status"] == "200"
 
 
@@ -1363,7 +1374,6 @@ async def test_run_scan_available_chain_prefers_subscribe_destination_token_over
 ) -> None:
     """SubscribeResponse DestinationToken (spec) wins over validate MessageID and body."""
     calls: list[str] = []
-    retrieve_payloads: list[str] = []
 
     validate_xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -1396,18 +1406,11 @@ async def test_run_scan_available_chain_prefers_subscribe_destination_token_over
             )
         raise AssertionError("unexpected SOAP request")
 
-    async def fake_post_soap_retrieve_image(
-        *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
-        retrieve_payloads.append(payload)
-        return (
-            200,
-            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
-            "application/soap+xml; charset=utf-8",
-        )
-
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         subscribe_destination_token="Client3478",
@@ -1418,7 +1421,6 @@ async def test_run_scan_available_chain_prefers_subscribe_destination_token_over
     assert "body-token-secondary" not in calls[2]
     assert result["destination_token"] == "Client3478"
     assert result["job_id"] == "job-sub"
-    assert len(retrieve_payloads) == 1
 
 
 @pytest.mark.asyncio
@@ -1427,7 +1429,6 @@ async def test_run_scan_available_chain_selects_token_by_event_client_context(
 ) -> None:
     """CreateScanJob uses DestinationToken for the ScanAvailableEvent ClientContext when map has multiple."""
     calls: list[str] = []
-    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -1473,7 +1474,6 @@ async def test_run_scan_available_chain_selects_token_by_event_client_context(
     assert "<sca:ScanIdentifier>sid-1</sca:ScanIdentifier>" in calls[2]
     assert result["destination_token"] == "tok-email"
     assert result["job_id"] == "job-cc"
-    assert len(retrieve_payloads) in (0, 1)
 
 
 @pytest.mark.asyncio
@@ -1482,6 +1482,7 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
 ) -> None:
     """Win10-style flow: when no subscribe token, DestinationToken follows validate wsa:MessageID."""
     calls: list[str] = []
+    retrieve_payloads: list[str] = []
 
     validate_xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -1514,10 +1515,19 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
             )
         raise AssertionError("unexpected SOAP request")
 
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None]:
+        retrieve_payloads.append(payload)
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
+
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
-        "app.ws_eventing_client._post_soap_retrieve_image",
-        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
     )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
@@ -1528,8 +1538,7 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
         in calls[2]
     )
     assert "body-token-secondary" not in calls[2]
-    # RetrieveImage now uses _post_soap_retrieve_image and should be mocked separately.
-    assert result["retrieve_http_status"] == "200"
+    assert "<sca:JobToken>jtok-msg</sca:JobToken>" in retrieve_payloads[0]
     assert result["job_id"] == "job-msg"
 
 
@@ -1667,7 +1676,9 @@ async def test_run_scan_available_chain_uses_event_destination_token(
         )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<sca:ScanAvailableEvent><sca:DestinationToken>event-token</sca:DestinationToken></sca:ScanAvailableEvent>",
@@ -1677,7 +1688,6 @@ async def test_run_scan_available_chain_uses_event_destination_token(
     assert "<sca:JobToken>jtok-77</sca:JobToken>" in retrieve_payloads[0]
     assert result["destination_token"] == "event-token"
     assert result["retrieve_http_status"] == "200"
-    assert len(retrieve_payloads) == 1
 
 
 @pytest.mark.asyncio
@@ -1766,7 +1776,6 @@ async def test_run_scan_available_chain_prefers_event_subscription_identifier_ov
 ) -> None:
     """wse:Identifier on ScanAvailableEvent ranks above persisted Subscribe id for DestinationToken."""
     calls: list[str] = []
-    retrieve_payloads: list[str] = []
 
     event_xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -1804,14 +1813,11 @@ async def test_run_scan_available_chain_prefers_event_subscription_identifier_ov
             )
         raise AssertionError("unexpected SOAP request")
 
-    async def fake_post_soap_retrieve_image(
-        *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
-        retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
-
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload=event_xml,
@@ -1822,7 +1828,6 @@ async def test_run_scan_available_chain_prefers_event_subscription_identifier_ov
     assert "from-config-only" not in calls[2]
     assert result["job_id"] == "job-ev"
     assert result["retrieve_http_status"] == "200"
-    assert len(retrieve_payloads) == 1
 
 
 @pytest.mark.asyncio
@@ -1859,10 +1864,16 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
         *, url: str, payload: str, timeout_sec: float
     ) -> tuple[int, bytes, str | None]:
         retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
+        return (
+            200,
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
+            "application/soap+xml; charset=utf-8",
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>9CAED324E3C0_417441412_5</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
@@ -1876,7 +1887,6 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
     )
     assert "<sca:JobToken>jtok-99</sca:JobToken>" in retrieve_payloads[0]
     assert result["scan_identifier"] == "9CAED324E3C0_417441412_5"
-    assert len(retrieve_payloads) == 1
 
 
 @pytest.mark.asyncio
@@ -1930,7 +1940,9 @@ async def test_run_scan_available_chain_retries_create_without_token_on_invalid_
         )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         scan_available_payload="<wscn:ScanAvailableEvent><wscn:ScanIdentifier>sid-retry-1</wscn:ScanIdentifier></wscn:ScanAvailableEvent>",
@@ -2043,7 +2055,6 @@ async def test_run_scan_available_chain_continues_when_metadata_probe_times_out(
 ) -> None:
     """Chain continues normally when metadata probe fails with timeout."""
     calls: list[str] = []
-    retrieve_payloads: list[str] = []
 
     async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
         calls.append(payload)
@@ -2067,14 +2078,11 @@ async def test_run_scan_available_chain_continues_when_metadata_probe_times_out(
             )
         raise AssertionError("unexpected SOAP request")
 
-    async def fake_post_soap_retrieve_image(
-        *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
-        retrieve_payloads.append(payload)
-        return (200, _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"), "application/soap+xml; charset=utf-8")
-
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
-    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image",
+        _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML),
+    )
     result = await run_scan_available_chain(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
@@ -2084,4 +2092,3 @@ async def test_run_scan_available_chain_continues_when_metadata_probe_times_out(
     assert result["probe_http_status"] is None
     assert result["create_http_status"] == "200"
     assert result["retrieve_http_status"] == "200"
-    assert len(retrieve_payloads) == 1

@@ -56,8 +56,8 @@ class Config:
     scanner_idle_wait_sec: float = 60.0
     # ``app.quirks.get_profile`` key (e.g. generic, epson_wf_3640); skeleton until post–Phase 5.
     scanner_profile: str = "epson_wf_3640"
-    # Large MTOM transfers from RetrieveImage can take significantly longer than SOAP control calls.
-    retrieve_image_timeout_sec: float = 120.0
+    # When set, overrides ``ScannerProfile.retrieve_image_timeout_sec`` (see ``WSD_RETRIEVE_IMAGE_TIMEOUT_SEC``).
+    retrieve_image_timeout_sec: float | None = None
 
     def __post_init__(self) -> None:
         """Resolve environment variables and derive runtime values."""

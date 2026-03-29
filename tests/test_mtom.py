@@ -1,4 +1,4 @@
-"""Tests for MTOM multipart RetrieveImage parsing and persistence."""
+"""Tests for MTOM multipart RetrieveImage parsing."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from app.mtom import extract_xop_include_cid, normalize_cid, parse_retrieve_image_mtom
+from app.mtom import (
+    extract_xop_include_cid,
+    normalize_cid,
+    parse_retrieve_image_mtom,
+)
 from app.ws_eventing_client import (
     ACTION_CREATE_SCAN_JOB,
     ACTION_GET_SCANNER_ELEMENTS,
@@ -85,7 +89,9 @@ def test_parse_retrieve_image_mtom_non_multipart_returns_soap_only() -> None:
         "<soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse>"
         "</soap:Body></soap:Envelope>"
     )
-    soap_text, image_bytes, image_ct = parse_retrieve_image_mtom(xml.encode("utf-8"), "application/soap+xml")
+    soap_text, image_bytes, image_ct = parse_retrieve_image_mtom(
+        xml.encode("utf-8"), "application/soap+xml"
+    )
     assert "Success" in soap_text
     assert image_bytes is None
     assert image_ct is None
@@ -149,4 +155,3 @@ async def test_run_scan_available_chain_saves_mtom_image(
     saved = tmp_path / "scan_mtom-test-id.jpg"
     assert saved.read_bytes() == _JPEG_PREFIX + b"x"
     assert len(calls) == 3
-

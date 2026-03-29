@@ -80,9 +80,9 @@ async def _eventing_registration_loop(config: Config) -> None:
                 if result.get("identifier") and (status == 0 or 200 <= status < 300):
                     sub_id = str(result.get("identifier") or "").strip()
                     mgr_url = (result.get("subscription_manager_url") or "").strip()
-                    mgr_ref = (
-                        str(result.get("subscription_manager_reference_parameters_xml") or "").strip()
-                    )
+                    mgr_ref = str(
+                        result.get("subscription_manager_reference_parameters_xml") or ""
+                    ).strip()
                     if not mgr_url:
                         log.warning(
                             "SubscribeResponse missing SubscriptionManager address; "
@@ -131,12 +131,10 @@ async def _eventing_registration_loop(config: Config) -> None:
                         st2 = int(status_result.get("status") or "0")
                         if status_result.get("identifier") and (st2 == 0 or 200 <= st2 < 300):
                             mgr_s = (status_result.get("subscription_manager_url") or "").strip()
-                            mgr_ref_s = (
-                                str(
-                                    status_result.get("subscription_manager_reference_parameters_xml")
-                                    or ""
-                                ).strip()
-                            )
+                            mgr_ref_s = str(
+                                status_result.get("subscription_manager_reference_parameters_xml")
+                                or ""
+                            ).strip()
                             if not mgr_s:
                                 log.warning(
                                     "ScannerStatusSummary SubscribeResponse missing "

@@ -1,7 +1,4 @@
-"""Shared scan file persistence and type detection.
-
-Used by both push uploads (`/scan`) and pull transfers (WS-Scan RetrieveImage MTOM).
-"""
+"""Shared scan file persistence and type detection for push `/scan` and pull RetrieveImage."""
 
 from __future__ import annotations
 
@@ -30,7 +27,7 @@ def detect_file_type(data: bytes) -> str:
 
 
 def extension_from_mime(content_type: str | None) -> str | None:
-    """Map MIME type (or full Content-Type value) to a file extension, if known."""
+    """Map a MIME type (or full Content-Type header value) to a file extension, if known."""
     if not content_type:
         return None
     main = content_type.split(";", 1)[0].strip().lower()
@@ -61,7 +58,12 @@ def write_scan_atomically(output_path: Path, data: bytes) -> None:
             tmp_path.unlink()
 
 
-def save_scan_file(output_dir: Path, data: bytes, *, content_type: str | None = None) -> Path:
+def save_scan_file(
+    output_dir: Path,
+    data: bytes,
+    *,
+    content_type: str | None = None,
+) -> Path:
     """Write scan bytes under ``output_dir`` with a unique name; prefer MIME for extension."""
     ext = extension_from_mime(content_type) or detect_file_type(data)
     filename = f"scan_{uuid.uuid4()}.{ext}"
@@ -78,4 +80,3 @@ def save_scan_file(output_dir: Path, data: bytes, *, content_type: str | None = 
         },
     )
     return path
-

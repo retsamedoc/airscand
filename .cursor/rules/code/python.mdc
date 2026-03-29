@@ -36,13 +36,17 @@ alwaysApply: true
 
 ## Documentation
 - Use **detailed documentation** with docstrings and README files.
+  - Document protocol expectations explicitly.
 - Follow **PEP 257** conventions for docstrings.
+- Use Google-style docstrings.
+- Ensure **docstring consistency** using **Ruff’s pydocstyle rules** (`D`); convention is **Google-style** (see `[tool.ruff.lint.pydocstyle]` in `pyproject.toml`). Missing public docstrings are not required project-wide yet; add `Args` / `Returns` / `Raises` for new or heavily edited public APIs.
 
 ## Dependency Management
 - Manage dependencies via **[uv](https://github.com/astral-sh/uv)** and **virtual environments**.
 
 ## Code Style
-- Ensure **code style consistency** using **Ruff**.
+- Use **Ruff** for formatting (`ruff format`) and lint (`ruff check`), per `pyproject.toml`.
+- Use type hints.
 
 ## AI-Friendly Coding Practices
 - Provide **code snippets** and **explanations** tailored to these principles, optimizing for clarity and AI-assisted development.
