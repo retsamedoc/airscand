@@ -72,6 +72,14 @@ If you immediately call `RetrieveImage`, you may get:
 * Increase polling patience
 * Avoid early timeout
 
+### **4. GetJobStatus not supported (WorkForce WF-3640)**
+
+* **Epson WorkForce WF-3640** does not expose a working `GetJobStatus` for the pull scan path (fault or unusable response).
+
+**Client Requirement**
+
+* Do not rely on `GetJobStatus` before `RetrieveImage`; proceed to image retrieval after `CreateScanJob` and use retry/backoff there if needed.
+
 ## Canon
 
 ### **1. Missing or Invalid Headers**

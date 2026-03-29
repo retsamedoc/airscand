@@ -48,6 +48,7 @@
 - `WSD_OUTPUT_DIR`: output directory for uploaded scan files.
 - `WSD_UUID`: optional explicit persistent identity UUID.
 - `WSD_ADVERTISE_ADDR`: LAN-reachable address/host to publish in `XAddrs`.
+- `WSD_SCANNER_PROFILE`: scanner quirks profile key for ``app/quirks`` (default `epson_wf_3640`; use `generic` for protocol-default behavior).
 
 #### Known limitations (Phase 2+)
 
@@ -63,6 +64,7 @@
   - HTTP server task (currently `aiohttp`)
 - Improve SOAP parsing robustness (namespace-aware parsing for additional actions and richer fault handling).
 - Investigate and potentially replace the current logging system with [structlog](https://www.structlog.org/en/stable/index.html) (structured context, flexible rendering, stdlib integration).
+- **Vendor quirks:** ``WSD_SCANNER_PROFILE`` selects a profile from ``app/quirks/`` (default ``epson_wf_3640`` for the tested WorkForce; that profile skips ``GetJobStatus`` polling before ``RetrieveImage``). **Post–Phase 5:** further ``docs/protocol/vendor_quirks.md`` behaviors (timeouts, SOAP minimalism, retries) per profile once additional hardware is available.
 
 ### Re-evaluate after Phase 1–2: FastAPI/uvicorn option
 

@@ -7,6 +7,7 @@ import uuid
 
 from aiohttp import web
 
+from app.quirks import get_profile
 from app.scanner_status_coordination import notify_scanner_state
 from app.ws_eventing_client import (
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
@@ -372,6 +373,9 @@ async def handle_wsd(request: web.Request) -> web.Response:
         )
         wait_idle = bool(getattr(config, "wait_scanner_idle_after_retrieve", True))
         idle_sec = float(getattr(config, "scanner_idle_wait_sec", 60.0))
+        scanner_profile = get_profile(
+            str(getattr(config, "scanner_profile", "") or "").strip() or "epson_wf_3640"
+        )
         task = asyncio.create_task(
             run_scan_available_chain(
                 scanner_xaddr=scanner_xaddr,
@@ -382,8 +386,12 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 subscribe_destination_tokens=dest_tokens_map or None,
                 use_env_subscribe_destination_token_only=use_env_dest_only,
                 retry_create_without_destination_token_on_invalid_token=retry_invalid_dest,
+                poll_get_job_status_before_retrieve=(
+                    scanner_profile.poll_get_job_status_before_retrieve
+                ),
                 wait_scanner_idle_after_retrieve=wait_idle,
                 scanner_idle_wait_sec=idle_sec,
+                scanner_profile=scanner_profile,
             )
         )
         task.add_done_callback(_log_chain_result)

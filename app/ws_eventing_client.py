@@ -9,6 +9,7 @@ from typing import Any
 
 from aiohttp import ClientError, ClientSession
 
+from app.quirks import ScannerProfile
 from app.scanner_status_coordination import (
     await_scanner_idle_after_retrieve,
     begin_retrieve_idle_wait,
@@ -1634,9 +1635,19 @@ async def run_scan_available_chain(
     get_job_status_max_wait_sec: float = GET_JOB_STATUS_MAX_WAIT_SEC,
     wait_scanner_idle_after_retrieve: bool = False,
     scanner_idle_wait_sec: float = 60.0,
+    scanner_profile: ScannerProfile | None = None,
 ) -> dict[str, str | None]:
-    """Execute ValidateScanTicket, CreateScanJob, GetJobStatus polling, then RetrieveImage."""
+    """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage."""
     target_url = resolve_wdp_scan_url(scanner_xaddr)
+    if scanner_profile is not None:
+        log.info(
+            "Scan chain starting",
+            extra={
+                "scanner_profile": scanner_profile.key,
+                "target_url": target_url,
+                "poll_get_job_status_before_retrieve": poll_get_job_status_before_retrieve,
+            },
+        )
     scanner_metadata: dict[str, str | None] = {
         "probe_http_status": None,
         "probe_message_id": None,
