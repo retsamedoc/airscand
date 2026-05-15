@@ -10,8 +10,8 @@
 
 - **Phase 2 (HTTP + WS-Eventing registration)** is complete:
   - Outbound WS-Transfer preflight + WS-Eventing **Subscribe** flow is implemented
-  - **Lease maintenance:** `SubscribeResponse` is parsed for **Subscription Manager** address, optional **ReferenceParameters** XML, **Identifier**, and **Expires**; values are held on config for **Renew** scheduling. `_eventing_maintenance_loop` in `main.py` wakes before lease expiry (fraction from `WSD_EVENTING_RENEW_AFTER_FRACTION`, with fallbacks for unparsable durations) and calls **`renew_subscription`**. Failed **Renew** or missing deadlines exits maintenance so the registration loop can resubscribe with backoff.
-  - **Teardown:** signal shutdown runs **`_unsubscribe_eventing_best_effort`** (ScannerStatusSummary subscription first when present, then the primary subscription), mapping stored reference parameters into **Unsubscribe** when devices put the subscription id there.
+  - **Lease maintenance:** `SubscribeResponse` is parsed for **Subscription Manager** address, optional **ReferenceParameters** XML, **Identifier**, and **Expires**; values are held on **`Config`** as `scanner_eventing_subscribe_manager_url`, `scanner_eventing_subscribe_manager_reference_parameters_xml`, `scanner_eventing_subscription_id`, and `scanner_eventing_subscribe_expires` (parallel `*_status` fields for the optional **ScannerStatusSummary** subscription). `_eventing_maintenance_loop` in `main.py` wakes before lease expiry (fraction from `WSD_EVENTING_RENEW_AFTER_FRACTION`, with fallbacks for unparsable durations) and calls **`renew_subscription`**. Failed **Renew** or missing deadlines exits maintenance so the registration loop can resubscribe with backoff.
+  - **Teardown:** **SIGINT** / **SIGTERM** run **`_unsubscribe_eventing_best_effort`** before task cancellation: **Unsubscribe** targets the stored manager URL and sends **ReferenceParameters** XML from **SubscribeResponse** when the scanner requires them (ScannerStatusSummary subscription first when an id is present, then the primary subscription). This is best-effort (logged failures do not block shutdown).
   - Optional second subscription for **ScannerStatusSummaryEvent** uses parallel `*_status` config fields and the same renew/unsubscribe pattern.
   - Win10-aligned WDP scan subscribe target (`/WDP/SCAN`) is supported by default
   - Daemon registration succeeds against target scanners and host is selectable as a scan destination
@@ -39,11 +39,13 @@
   - **Hardware validation:** **Epson WF-3640** — scan from the printer front panel to this host; image saved under `scans/` with no warnings or failures observed across modules (completion checkpoint: **2026-03-28**)
   - Earlier milestone completion date: **2026-03-26**
 
-- **Next focus (Phase 5 — compliance / interop hardening):**
-  - **SOAP mini-library** (`app/soap/`) is already in use for outbound eventing (builders + parsers); orchestration remains in `ws_eventing_client.py` with `main.py` owning registration and lease timing.
-  - **Inbound** WS-Eventing on the sink (`app/ws_scan.py`): real subscription state, identifier correlation, and SOAP faults instead of placeholder success bodies (`docs/ws-eventing_audit.md` §1, §4, §5, §12).
-  - **Parsing and tests:** namespace-aware XML on critical eventing paths; contract tests for fault mapping, renew edge cases, and subscription-end semantics (`docs/ROADMAP.md`, `docs/ws-eventing_audit.md` §11, §17).
-  - **Sink HTTP behavior:** unknown or missing **`wsa:Action`** on `/wsd` returns SOAP 1.2 faults (`wsa:ActionNotSupported` / `wse:InvalidMessage`); see `docs/ws-eventing_audit.md` §9.
+- **Phase 5 (compliance / interop hardening) — in progress:**
+  - **Why this phase:** strict peers need SOAP-shaped responses, predictable subscription semantics, and operable timeouts/diagnostics—not only “happy path” Epson validation.
+  - **Already shipped (inbound, `app/ws_scan.py`):** in-memory **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** with SOAP faults for validation and unknown/expired ids (**GetStatus** does not extend the lease); unknown or missing **`wsa:Action`** returns **`application/soap+xml`** faults (`wsa:ActionNotSupported` / `wse:InvalidMessage`) per `docs/ws-eventing_audit.md` §1, §4, §9.
+  - **Inbound residual (audits / `IMPLEMENTATION_PLAN.md`):** **SubscriptionEnd**; fuller **EndTo** / **NotifyTo** / **Expires** negotiation matrix vs WS-Eventing §5–§8; namespace-aware parsing where regex remains risky (`docs/ws-eventing_audit.md` §5, §11).
+  - **Outbound residual (same audits / plan):** optional outbound **GetStatus** client; connect vs read timeout split in **`SoapHttpClient`**; assert **RelatesTo** / response **Action** on critical outbound calls; regex-heavy manager/body parsing; **SubscriptionEnd** emission policy. Core path remains: persisted manager EPR + **Renew** + shutdown **Unsubscribe** (Phase 2 above).
+  - **SOAP mini-library** (`app/soap/`): shared builders/parsers/transport; orchestration stays in `ws_eventing_client.py` with `main.py` owning registration and lease timing.
+  - **Parsing and tests:** contract tests for fault mapping, renew edge cases, and subscription-end semantics (`docs/ROADMAP.md`, `docs/ws-eventing_audit.md` §17).
 
 ## Configuration (environment variables)
 

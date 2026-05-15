@@ -70,7 +70,7 @@ flowchart TB
 | `app/logging.py` | Root logger setup: JSON or human **AirscandConsoleFormatter** (DEBUG JSON, INFO+ human), optional wrap and inline context keys. |
 | `app/discovery.py` | WS-Discovery XML builders (using `app.soap.envelope` for Probe/Resolve), extraction via `app.soap.parsers.discovery`, multicast loop, active `discover_scanner_xaddr` client probe, self-probe filtering. |
 | `app/http_server.py` | Minimal aiohttp wiring: POST `endpoint_path` → `handle_wsd`, POST `scan_path` → `handle_scan`. |
-| `app/ws_scan.py` | Inbound SOAP dispatch by `wsa:Action`: WS-Eventing sink responses, **CreateScanJob** response, **ScanAvailableEvent** ack + schedules `run_scan_available_chain`, **ScannerStatusSummaryEvent** → coordination; response envelopes via `app.soap.envelope`. |
+| `app/ws_scan.py` | Inbound SOAP dispatch by `wsa:Action`: WS-Eventing **sink** and **subscription manager** (**Subscribe** / **Renew** / **GetStatus** / **Unsubscribe**), **CreateScanJob** response, **ScanAvailableEvent** ack + schedules `run_scan_available_chain`, **ScannerStatusSummaryEvent** → coordination; response envelopes and faults via `app.soap.envelope` / `app.soap.builders.faults`. |
 | `app/soap/` | Shared **namespaces**, **addressing** (regex + `MessageID`), **envelope** builders, **fault** parsing, **transport** (`SoapHttpClient`: text SOAP + retrieve-image / MTOM), **parsers** (`scan`, `discovery`, `eventing`, `transfer`), optional **xmlutil** for Phase-2 ElementTree hooks. |
 | `app/ws_eventing_client.py` | Orchestration: **Subscribe**, **Unsubscribe**, **Get** (preflight), **GetScannerElements**, **ValidateScanTicket** / **CreateScanJob** / **RetrieveImage** chains, **GetJobStatus** polling; MTOM via `mtom`; re-exports parsers/builders from `app.soap.parsers` for callers and tests. |
 | `app/scan_receiver.py` | Push path: read body, delegate to `scan_storage.save_scan_file`. |
@@ -79,7 +79,7 @@ flowchart TB
 | `app/scanner_status_coordination.py` | Single in-process `asyncio.Event` bridge: post-**RetrieveImage** wait for global **Idle** from **ScannerStatusSummaryEvent**. |
 | `app/quirks/` | `ScannerProfile` registry (`get_profile`): vendor defaults (e.g. Epson WF-3640 timeouts and **GetJobStatus** disable). |
 
-There is no separate `soap.py` module: SOAP is handled via string templates and regular expressions in `discovery.py`, `ws_scan.py`, and `ws_eventing_client.py`.
+Shared SOAP helpers live under **`app/soap/`**; `discovery.py` and `ws_eventing_client.py` call into them rather than duplicating envelope/header patterns.
 
 ## Component details
 
@@ -154,11 +154,11 @@ All settings are environment-driven; see `app/config.py` for the authoritative l
 - **Python** ≥ 3.11, **asyncio** concurrency.
 - **aiohttp** for HTTP server and client.
 - **coloredlogs** for optional ANSI human output.
-- No separate XML stack: SOAP and discovery use string composition and regex extraction (consistent with design “Phase 1” style, with incremental complexity in `ws_eventing_client`).
+- **SOAP XML:** primarily string composition and regex extraction via **`app/soap/`** (and call sites in `discovery`, `ws_scan`, `ws_eventing_client`); ElementTree hooks exist in `app/soap/xmlutil.py` for incremental hardening (`docs/design.md` §5.3).
 
 ## Deviations and notes relative to the design specification
 
-- **Module naming**: Functionality described under `soap.py` in the design is folded into `ws_scan.py` and `ws_eventing_client.py`.
+- **Module naming**: High-level design diagrams still say “WS-Scan Handler”; inbound SOAP is implemented in `ws_scan.py` with shared helpers under `app/soap/`.
 - **Dual WS-Eventing subscriptions**: The implementation registers a second subscription for **ScannerStatusSummaryEvent** to support idle coordination after **RetrieveImage**; the short design overview in §4 lists a single “WS-Scan Handler” box—operationally, inbound SOAP is still one HTTP handler (`handle_wsd`).
 - **Push vs pull**: Both are implemented: `/scan` for push; pull uses **RetrieveImage** and shared `scan_storage`.
 

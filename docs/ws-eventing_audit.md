@@ -4,13 +4,15 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Scope:** Outbound subscriber behavior in [`app/ws_eventing_client.py`](../app/ws_eventing_client.py) (orchestration), [`app/soap/builders/eventing.py`](../app/soap/builders/eventing.py) (Subscribe/Renew/Unsubscribe bodies), and [`app/soap/parsers/eventing.py`](../app/soap/parsers/eventing.py) (response parse helpers), [`app/soap/parsers/transfer.py`](../app/soap/parsers/transfer.py) (WS-Transfer **Get** preflight), plus [`main.py`](../main.py); inbound event-sink / minimal subscription-manager behavior in [`app/ws_scan.py`](../app/ws_scan.py); configuration in [`app/config.py`](../app/config.py). WS-Discovery and WS-Scan are out of scope except where they touch eventing.
 
+**Outbound vs inbound:** **Outbound** is this daemon as WS-Eventing **subscriber** to the scanner (registration, **Renew**, **Unsubscribe** to the device’s subscription manager EPR). **Inbound** is the printer (or other peers) calling **this** host’s `/wsd` SOAP endpoint: **sink** notifications (**ScanAvailableEvent**, …) and **subscription manager** operations (**Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** toward airscand). Residual gaps differ by side—see the summary table and [`docs/status.md`](status.md) Phase 5.
+
 **Roles in this codebase**
 
 | Role | Where implemented | Notes |
 |------|-------------------|--------|
 | Subscriber | `register_with_scanner`, `_eventing_registration_loop`, `_eventing_maintenance_loop`, `renew_subscription`, `unsubscribe_from_scanner` | Sends `Subscribe`; persists manager URL + reference parameters + `Expires` from `SubscribeResponse` / `RenewResponse`; `_eventing_maintenance_loop` schedules `Renew` before lease fraction; `_unsubscribe_eventing_best_effort` on shutdown / failed renew. No outbound `GetStatus` client. |
 | Event sink | `handle_wsd` (`ScanAvailableEvent`) | Receives notifications; for **ScanAvailableEvent** responds with SOAP 1.2 (`application/soap+xml`), `wsa:RelatesTo`, and [`build_scan_available_event_ack_response`](../app/ws_scan.py) (synthetic `ScanAvailableEventResponse` action). Other SOAP actions without a handler return SOAP faults (§9). |
-| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** in-memory registry ([`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py)), [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py) + SOAP faults ([`build_wse_fault_body`](../app/soap/builders/faults.py), [`build_inbound_fault_envelope`](../app/soap/envelope.py)) for unknown/expired ids, unsupported **Delivery/@Mode**, and **Filter**; **GetStatus** returns stored granted **Expires** without extending the lease. **Residual:** **SubscriptionEnd**; fuller **EndTo** / grant matrix vs §5–§8 ([`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) backlog item 5). |
+| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** in-memory registry ([`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py)), [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py) + SOAP faults ([`build_wse_fault_body`](../app/soap/builders/faults.py), [`build_inbound_fault_envelope`](../app/soap/envelope.py)) for unknown/expired ids, unsupported **Delivery/@Mode**, and **Filter**; **GetStatus** returns stored granted **Expires** without extending the lease. **Residual:** **SubscriptionEnd**; fuller **EndTo** / grant matrix vs §5–§8 ([`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) backlog item 4). |
 
 ---
 
@@ -85,7 +87,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Risk:** Peers that require strict **EndTo** handling or additional validation may still fault or behave unexpectedly.
 
-**Recommendation:** Extend validation per §5–§8 and backlog item 5 in `IMPLEMENTATION_PLAN.md`.
+**Recommendation:** Extend validation per §5–§8 and backlog item 4 in `IMPLEMENTATION_PLAN.md`.
 
 ---
 
