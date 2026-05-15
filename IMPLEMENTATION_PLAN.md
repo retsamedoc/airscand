@@ -31,6 +31,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **RetrieveImage payload integrity (pull / MTOM):** When HTTP provides ``Content-Length``, downloaded byte length must match. For ``multipart/related``, checks include closing boundary, optional per-part ``Content-Length``, **xop:Include** → binary part resolution, non-empty payload, and JPEG/PNG/TIFF/PDF magic vs declared MIME. Failures log structured ``integrity_reason_codes`` / lengths and return fault ``airscand:RetrieveImagePayloadIntegrity`` without persisting (`app/mtom.py`, `app/soap/transport.py`, `app/ws_eventing_client.py`, `tests/test_mtom.py`, `tests/test_soap_transport.py`). *Residual:* bounded automatic **RetrieveImage** retry after truncation is not implemented (operators see explicit failure).
 - **Namespace-aware SOAP on eventing / WS-A / fault hot paths:** ElementTree with explicit namespace URIs replaces regex for **SubscribeResponse** / **RenewResponse** parsing, subscription manager EPR, reference-parameter id resolution, WS-A **Action** / **MessageID** / **RelatesTo** / **To**, SOAP **Fault** code/subcode/reason, inbound management header id, outbound log correlation, and **ClientContext** / **DestinationToken** extraction (`app/soap/xmlutil.py`, `app/soap/parsers/eventing.py`, `app/soap/addressing.py`, `app/soap/fault.py`, `app/soap/parsers/discovery.py`, `app/soap/transport.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/parsers/scan.py`). *Why tests matter:* prefix permutations and nested duplicate **Identifier** elements otherwise yield wrong subscription correlation. Regression: `tests/test_eventing_namespace_xml.py`. *Residual:* some WS-Scan body parsers and WS-Discovery **XAddrs** extraction still use regex where audits did not require this increment.
 
+- **`handle_wsd` defensive config wiring (`docs/ws-scan_audit.md` Low §16):** Missing or non-`Config` `app["config"]` returns HTTP **500** with plain text (aligned with `handle_scan`), logs an error, and does not touch `config` fields (`app/ws_scan.py`, `tests/test_ws_scan.py`). *Why tests matter:* a mis-wired aiohttp app previously raised `AttributeError` on the first subscription-manager leg.
+
 ---
 
 ## Backlog (incomplete) — by priority
@@ -67,17 +69,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 7. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
-
-**Gap:** Assumes `app["config"]` present (`isinstance` guard unlike `handle_scan`).
-
-**Done when:** Missing/malformed config returns controlled error response without uncaught exception.
-
-**Verification:** aiohttp test client POST without config → 500 or fault with no stack trace leak in production mode (optional: assert log warning).
-
----
-
-### 8. Developer and security posture (`docs/ROADMAP.md` Future)
+### 7. Developer and security posture (`docs/ROADMAP.md` Future)
 
 **Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
 
@@ -87,7 +79,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 9. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
+### 8. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
 
 **Gap:** State spread across async tasks and flags.
 
@@ -97,7 +89,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 10. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
+### 9. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
 
 **Gap:** Not implemented per audits.
 
@@ -107,7 +99,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 11. Optional **`specs/`** entry point (documentation)
+### 10. Optional **`specs/`** entry point (documentation)
 
 **Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
 
@@ -123,4 +115,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: WS-Eventing §17 compliance tests (`tests/test_ws_eventing_audit_compliance.py`); Task 4 backlog narrowed; backlog renumbered 4–11.*
+*Last updated: `handle_wsd` validates `app["config"]` (`Config`); backlog renumbered after closing ws-scan audit §16 item.*

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from types import SimpleNamespace
+from dataclasses import dataclass, replace
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import pytest
 
+from app.config import Config
 from app.inbound_eventing_registry import reset_inbound_subscription_registry
 from app.soap.fault import parse_soap_fault
 from app.soap.namespaces import ACTION_SUBSCRIPTION_END, ACTION_SUBSCRIPTION_END_RESPONSE
@@ -37,6 +39,38 @@ from app.ws_scan import (
 if TYPE_CHECKING:
     from _pytest.logging import LogCaptureFixture
     from _pytest.monkeypatch import MonkeyPatch
+
+
+@dataclass
+class _WsdHandlerTestConfig(Config):
+    """``Config`` for unit tests without env/state side effects from ``__post_init__``."""
+
+    def __post_init__(self) -> None:
+        """Intentionally empty: field values come from defaults and ``replace`` below."""
+
+
+@lru_cache(maxsize=1)
+def _wsd_handler_test_config() -> Config:
+    """Return a stable ``Config`` instance for ``handle_wsd`` unit tests.
+
+    Subclass skips ``Config.__post_init__`` (env, UUID files). Values are then
+    fixed via ``replace`` so tests stay deterministic.
+    """
+    return replace(
+        _WsdHandlerTestConfig(),
+        advertise_addr="192.168.1.50",
+        port=5357,
+        endpoint_path="/wsd",
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        uuid="11111111-2222-3333-4444-555555555555",
+        scanner_eventing_subscription_id="urn:uuid:sub-from-register",
+        scanner_subscribe_destination_token="Client3478",
+        scanner_subscribe_destination_tokens={"Scan": "Client3478"},
+        use_env_subscribe_destination_token_only=False,
+        create_scan_job_retry_invalid_destination_token=True,
+        wait_scanner_idle_after_retrieve=True,
+        scanner_idle_wait_sec=60.0,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -180,27 +214,44 @@ def _request(payload: bytes) -> object:
 
         def __init__(self, body: bytes) -> None:
             self._body = body
-            self.app = {
-                "config": SimpleNamespace(
-                    advertise_addr="192.168.1.50",
-                    port=5357,
-                    endpoint_path="/wsd",
-                    scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
-                    uuid="11111111-2222-3333-4444-555555555555",
-                    scanner_eventing_subscription_id="urn:uuid:sub-from-register",
-                    scanner_subscribe_destination_token="Client3478",
-                    scanner_subscribe_destination_tokens={"Scan": "Client3478"},
-                    use_env_subscribe_destination_token_only=False,
-                    create_scan_job_retry_invalid_destination_token=True,
-                    wait_scanner_idle_after_retrieve=True,
-                    scanner_idle_wait_sec=60.0,
-                )
-            }
+            self.app = {"config": _wsd_handler_test_config()}
 
         async def read(self) -> bytes:
             return self._body
 
     return DummyRequest(payload)
+
+
+def _request_missing_config(payload: bytes) -> object:
+    """``handle_wsd`` request with no ``app['config']`` (mis-wired aiohttp app)."""
+
+    class DummyRequestMissingConfig:
+        content_type = "application/soap+xml"
+        app: dict[str, object] = {}
+
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        async def read(self) -> bytes:
+            return self._body
+
+    return DummyRequestMissingConfig(payload)
+
+
+def _request_wrong_config_type(payload: bytes) -> object:
+    """``handle_wsd`` request where ``config`` is not a :class:`Config` instance."""
+
+    class DummyRequestWrongConfig:
+        content_type = "application/soap+xml"
+
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+            self.app = {"config": object()}
+
+        async def read(self) -> bytes:
+            return self._body
+
+    return DummyRequestWrongConfig(payload)
 
 
 def test_extract_action_and_message_id() -> None:
@@ -265,6 +316,24 @@ def test_create_scan_job_response_generates_token_when_omitted() -> None:
     xml = build_create_scan_job_response("urn:uuid:req-3", job_id="job-789")
     assert "<sca:JobId>job-789</sca:JobId>" in xml
     assert "<sca:JobToken>" in xml
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_missing_config_returns_500(caplog: LogCaptureFixture) -> None:
+    """Mis-wired app must not raise; return plain 500 like ``handle_scan`` (audit §16)."""
+    caplog.set_level(logging.ERROR)
+    response = await handle_wsd(_request_missing_config(_subscribe_push_envelope()))
+    assert response.status == 500
+    assert response.text == "Server configuration unavailable"
+    assert any("missing valid config" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_non_config_object_returns_500() -> None:
+    """``app['config']`` must be a :class:`Config`, not an arbitrary object."""
+    response = await handle_wsd(_request_wrong_config_type(_subscribe_push_envelope()))
+    assert response.status == 500
+    assert response.text == "Server configuration unavailable"
 
 
 @pytest.mark.asyncio

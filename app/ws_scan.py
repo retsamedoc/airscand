@@ -7,6 +7,7 @@ from typing import cast
 
 from aiohttp import web
 
+from app.config import Config
 from app.inbound_eventing_registry import get_inbound_subscription_registry
 from app.inbound_subscription_end_delivery import dispatch_pending_inbound_subscription_ends
 from app.quirks import ImageDeliveryMode, get_profile
@@ -272,6 +273,15 @@ async def handle_wsd(request: web.Request) -> web.Response:
     action = extract_action(text)
     relates_to = extract_message_id(text)
     config = request.app.get("config")
+    if not isinstance(config, Config):
+        log.error(
+            "WSD request missing valid config object",
+            extra={
+                "content_type": request.content_type,
+                "bytes": len(body),
+            },
+        )
+        return web.Response(status=500, text="Server configuration unavailable")
     xaddr = f"http://{config.advertise_addr}:{config.port}{config.endpoint_path}"
 
     log.info(

@@ -17,7 +17,7 @@ This report compares the current `airscand` implementation (primarily [`app/soap
 | Critical | 0 | _(none — see [Critical (resolved)](#critical-resolved))_ |
 | High     | 0 | _(none — see [High (resolved)](#high-resolved))_ |
 | Medium   | 0 | _(#11 pull vs push: **addressed** — [Medium §11](#medium))_; historical: [Medium (resolved) §7/9/12](#medium-7-9-12-resolved), [§8/10](#medium-8-10-resolved). |
-| Low      | 5 | Parsing robustness, HTTP/SOAP headers, fault **Detail**, handler edge cases |
+| Low      | 4 | Parsing robustness, HTTP/SOAP headers, fault **Detail**, handler edge cases (§16 resolved) |
 
 ---
 
@@ -155,11 +155,13 @@ This report compares the current `airscand` implementation (primarily [`app/soap
 
 ---
 
-### 16. `handle_wsd` assumes `config` is present and valid
+### 16. `handle_wsd` assumes `config` is present and valid — **Resolved**
 
-**Code:** Uses `config.advertise_addr` without an `isinstance(config, Config)` guard (unlike `handle_scan`).
+**Reference:** Operational parity with [`handle_scan`](../app/scan_receiver.py) (guards before attribute access).
 
-**Risk:** Crashes if `app["config"]` is missing in tests or mis-wired.
+**Implementation:** [`handle_wsd`](../app/ws_scan.py) checks `isinstance(request.app.get("config"), Config)` before building the subscription manager URL or dispatching SOAP legs; missing or wrong-type config returns HTTP **500** with plain text and logs an error—no `AttributeError` from a mis-wired aiohttp app. *Why:* misconfiguration should fail loudly at the edge without leaking stack traces in production.
+
+**Verification:** `tests/test_ws_scan.py` (`test_handle_wsd_missing_config_returns_500`, `test_handle_wsd_non_config_object_returns_500`).
 
 ---
 
