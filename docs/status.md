@@ -43,7 +43,7 @@
   - **SOAP mini-library** (`app/soap/`) is already in use for outbound eventing (builders + parsers); orchestration remains in `ws_eventing_client.py` with `main.py` owning registration and lease timing.
   - **Inbound** WS-Eventing on the sink (`app/ws_scan.py`): real subscription state, identifier correlation, and SOAP faults instead of placeholder success bodies (`docs/ws-eventing_audit.md` §1, §4, §5, §12).
   - **Parsing and tests:** namespace-aware XML on critical eventing paths; contract tests for fault mapping, renew edge cases, and subscription-end semantics (`docs/ROADMAP.md`, `docs/ws-eventing_audit.md` §11, §17).
-  - **Sink HTTP behavior:** replace `text/plain` “OK” fallbacks for unknown SOAP actions with SOAP faults where appropriate (`docs/ws-eventing_audit.md` §9).
+  - **Sink HTTP behavior:** unknown or missing **`wsa:Action`** on `/wsd` returns SOAP 1.2 faults (`wsa:ActionNotSupported` / `wse:InvalidMessage`); see `docs/ws-eventing_audit.md` §9.
 
 ## Configuration (environment variables)
 
