@@ -70,12 +70,17 @@ def _subscribe_push_envelope(
     manager_to: str = "http://192.168.1.50:5357/wsd",
     delivery_mode: str | None = PUSH_DELIVERY_MODE_URI,
     include_filter: bool = False,
+    expires_inner: str | None = "PT1H",
+    end_to_lines: str = "",
 ) -> bytes:
     """Valid inbound ``Subscribe`` (Push + ``NotifyTo``) for subscription manager tests."""
-    filter_xml = (
-        '<wse:Filter Dialect="http://schemas.xmlsoap.org/ws/2006/02/devprof/Action">x</wse:Filter>'
+    filter_line = (
+        '      <wse:Filter Dialect="http://schemas.xmlsoap.org/ws/2006/02/devprof/Action">x</wse:Filter>\n'
         if include_filter
         else ""
+    )
+    expires_lines = (
+        f"      <wse:Expires>{expires_inner}</wse:Expires>\n" if expires_inner is not None else ""
     )
     mode_attr = f' Mode="{delivery_mode}"' if delivery_mode else ""
     return f"""<?xml version="1.0"?>
@@ -92,9 +97,7 @@ def _subscribe_push_envelope(
       <wse:Delivery{mode_attr}>
         <wse:NotifyTo><wsa:Address>{notify_to}</wsa:Address></wse:NotifyTo>
       </wse:Delivery>
-      {filter_xml}
-      <wse:Expires>PT1H</wse:Expires>
-    </wse:Subscribe>
+{end_to_lines}{filter_line}{expires_lines}    </wse:Subscribe>
   </soap:Body>
 </soap:Envelope>""".encode()
 
@@ -299,6 +302,59 @@ async def test_handle_wsd_subscribe_filter_faults() -> None:
     assert "soap:Fault" in response.text
     fault = parse_soap_fault(response.text)
     assert fault.get("fault_subcode") == "wse:FilteringNotSupported"
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_subscribe_endto_empty_address_faults() -> None:
+    """``wse:EndTo`` without ``wsa:Address`` yields ``InvalidMessage`` fault."""
+    payload = _subscribe_push_envelope(
+        end_to_lines="      <wse:EndTo></wse:EndTo>\n",
+    )
+    response = await handle_wsd(_request(payload))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidMessage"
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_subscribe_endto_mismatch_faults() -> None:
+    """``EndTo`` address that differs from ``NotifyTo`` is rejected for this manager."""
+    payload = _subscribe_push_envelope(
+        end_to_lines=("      <wse:EndTo><wsa:Address>http://other/end</wsa:Address></wse:EndTo>\n"),
+    )
+    response = await handle_wsd(_request(payload))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidMessage"
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_subscribe_matching_endto_succeeds() -> None:
+    """``EndTo`` matching ``NotifyTo`` (Win10-style) still returns ``SubscribeResponse``."""
+    notify = "http://192.168.1.99:5358/client"
+    payload = _subscribe_push_envelope(
+        notify_to=notify,
+        end_to_lines=(f"      <wse:EndTo><wsa:Address>{notify}</wsa:Address></wse:EndTo>\n"),
+    )
+    response = await handle_wsd(_request(payload))
+    assert response.content_type == "application/soap+xml"
+    assert "SubscribeResponse" in response.text
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_subscribe_invalid_expires_faults() -> None:
+    """Unparseable ``Expires`` text yields ``InvalidExpirationTime``."""
+    payload = _subscribe_push_envelope(expires_inner="not-a-duration")
+    response = await handle_wsd(_request(payload))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidExpirationTime"
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_subscribe_non_positive_expires_faults() -> None:
+    """Zero-duration ``Expires`` yields ``InvalidExpirationTime``."""
+    payload = _subscribe_push_envelope(expires_inner="PT0S")
+    response = await handle_wsd(_request(payload))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidExpirationTime"
 
 
 @pytest.mark.asyncio

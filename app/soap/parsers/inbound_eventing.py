@@ -12,6 +12,7 @@ __all__ = [
     "PUSH_DELIVERY_MODE_URI",
     "extract_management_subscription_identifier",
     "extract_wsa_to_optional",
+    "inbound_subscribe_expires_fault_reason",
     "parse_inbound_renew_expires_optional",
     "parse_inbound_subscribe_body",
     "seconds_to_xs_duration",
@@ -72,8 +73,40 @@ class ParsedInboundSubscribe:
 
     delivery_mode: str | None
     notify_to_address: str
+    has_end_to: bool
+    end_to_address: str
     requested_expires: str | None
     has_filter: bool
+
+
+def normalize_eventing_epr_address(addr: str) -> str:
+    """Normalize sink/manager addresses for equality checks (trim, strip trailing slash)."""
+    return (addr or "").strip().rstrip("/")
+
+
+def inbound_subscribe_expires_fault_reason(requested_expires: str | None) -> str | None:
+    """Return a human-readable fault reason if ``Expires`` is present but invalid.
+
+    Missing or empty ``Expires`` is valid (server chooses a grant). Non-empty values
+    must parse as a positive ISO-8601 duration.
+
+    Args:
+        requested_expires: Raw ``wse:Expires`` text from the subscribe body, if any.
+
+    Returns:
+        ``None`` when the value is absent/empty or usable; otherwise a short reason
+        string for ``InvalidExpirationTime`` SOAP faults.
+    """
+    raw = (requested_expires or "").strip()
+    if not raw:
+        return None
+    try:
+        sec = parse_iso8601_duration_to_seconds(raw)
+    except ValueError:
+        return "wse:Expires is not a valid xs:duration"
+    if sec <= 0:
+        return "wse:Expires must be a positive duration"
+    return None
 
 
 def parse_inbound_subscribe_body(soap_text: str) -> ParsedInboundSubscribe | None:
@@ -106,6 +139,11 @@ def parse_inbound_subscribe_body(soap_text: str) -> ParsedInboundSubscribe | Non
     addr_el = _child_by_local(notify_el, "Address") if notify_el is not None else None
     notify_addr = _text_direct(addr_el)
 
+    end_el = _child_by_local(subscribe_el, "EndTo")
+    end_addr_el = _child_by_local(end_el, "Address") if end_el is not None else None
+    end_addr = _text_direct(end_addr_el)
+    has_end_to = end_el is not None
+
     expires_el = _child_by_local(subscribe_el, "Expires")
     requested_expires = _text_direct(expires_el) or None
 
@@ -114,6 +152,8 @@ def parse_inbound_subscribe_body(soap_text: str) -> ParsedInboundSubscribe | Non
     return ParsedInboundSubscribe(
         delivery_mode=mode,
         notify_to_address=notify_addr,
+        has_end_to=has_end_to,
+        end_to_address=end_addr,
         requested_expires=requested_expires,
         has_filter=has_filter,
     )

@@ -24,6 +24,8 @@ from app.soap.parsers.inbound_eventing import (
     extract_management_subscription_identifier,
     extract_wsa_to_optional,
     grant_expires_from_request,
+    inbound_subscribe_expires_fault_reason,
+    normalize_eventing_epr_address,
     parse_inbound_renew_expires_optional,
     parse_inbound_subscribe_body,
 )
@@ -299,6 +301,34 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 relates_to,
                 subcode_local="InvalidMessage",
                 reason="wse:NotifyTo/wsa:Address is required for Push delivery",
+                log_action=ACTION_WSA_FAULT,
+            )
+        if parsed.has_end_to and not parsed.end_to_address.strip():
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="InvalidMessage",
+                reason="wse:EndTo/wsa:Address is required when wse:EndTo is present",
+                log_action=ACTION_WSA_FAULT,
+            )
+        notify_norm = normalize_eventing_epr_address(parsed.notify_to_address)
+        end_norm = normalize_eventing_epr_address(parsed.end_to_address)
+        if end_norm and end_norm != notify_norm:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="InvalidMessage",
+                reason=(
+                    "wse:EndTo/wsa:Address must match wse:NotifyTo/wsa:Address for this "
+                    "subscription manager (SubscriptionEnd is delivered to EndTo only)"
+                ),
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"notify_to": parsed.notify_to_address, "end_to": parsed.end_to_address},
+            )
+        expires_fault = inbound_subscribe_expires_fault_reason(parsed.requested_expires)
+        if expires_fault:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="InvalidExpirationTime",
+                reason=expires_fault,
                 log_action=ACTION_WSA_FAULT,
             )
         granted_str, grant_sec = grant_expires_from_request(

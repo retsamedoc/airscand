@@ -12,7 +12,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 |------|-------------------|--------|
 | Subscriber | `register_with_scanner`, `_eventing_registration_loop`, `_eventing_maintenance_loop`, `renew_subscription`, `unsubscribe_from_scanner` | Sends `Subscribe`; persists manager URL + reference parameters + `Expires` from `SubscribeResponse` / `RenewResponse`; `_eventing_maintenance_loop` schedules `Renew` before lease fraction; `_unsubscribe_eventing_best_effort` on shutdown / failed renew. No outbound `GetStatus` client. |
 | Event sink | `handle_wsd` (`ScanAvailableEvent`) | Receives notifications; for **ScanAvailableEvent** responds with SOAP 1.2 (`application/soap+xml`), `wsa:RelatesTo`, and [`build_scan_available_event_ack_response`](../app/ws_scan.py) (synthetic `ScanAvailableEventResponse` action). Other SOAP actions without a handler return SOAP faults (§9). |
-| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** in-memory registry ([`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py)), [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py) + SOAP faults ([`build_wse_fault_body`](../app/soap/builders/faults.py), [`build_inbound_fault_envelope`](../app/soap/envelope.py)) for unknown/expired ids, unsupported **Delivery/@Mode**, and **Filter**; **GetStatus** returns stored granted **Expires** without extending the lease. **Residual:** **SubscriptionEnd**; fuller **EndTo** / grant matrix vs §5–§8 ([`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) backlog item 3). |
+| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** in-memory registry ([`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py)), [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py) + SOAP faults ([`build_wse_fault_body`](../app/soap/builders/faults.py), [`build_inbound_fault_envelope`](../app/soap/envelope.py)) for unknown/expired ids, unsupported **Delivery/@Mode**, and **Filter**; **GetStatus** returns stored granted **Expires** without extending the lease. **Subscribe:** Push **NotifyTo** required; optional **EndTo** must match **NotifyTo** (no separate **SubscriptionEnd** EPR yet); invalid **Expires** → `InvalidExpirationTime`. **Residual:** **SubscriptionEnd** emission/acceptance ([`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) backlog item 2). |
 
 ---
 
@@ -79,15 +79,15 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ---
 
-### 5. Inbound `Subscribe` — **partial** (Push/NotifyTo/Filter/Expires grant; not full §5–§8)
+### 5. Inbound `Subscribe` — **partial** (Push/NotifyTo/EndTo match/Expires faults; not full §5–§8)
 
 **Spec:** Event Source MUST validate **delivery mode**; unsupported mode MUST fault (optionally advertising supported modes). If filtering is requested but unsupported, MUST fault. `Subscribe` MUST include **Delivery** and **sink** EPR (NotifyTo); response MUST include **SubscriptionManager** EPR and **granted Expires**.
 
-**Code:** [`handle_wsd`](../app/ws_scan.py) parses [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py), enforces Push, faults unsupported **Filter**, requires **NotifyTo** address, and grants **Expires** via [`grant_expires_from_request`](../app/soap/parsers/inbound_eventing.py). **EndTo** and richer expiration negotiation are not yet modeled.
+**Code:** [`handle_wsd`](../app/ws_scan.py) parses [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py), enforces Push, faults unsupported **Filter**, requires **NotifyTo** address, validates optional **EndTo** (must repeat **NotifyTo** for this MVP—no alternate **SubscriptionEnd** EPR yet), faults unusable **Expires** via [`inbound_subscribe_expires_fault_reason`](../app/soap/parsers/inbound_eventing.py), and grants **Expires** via [`grant_expires_from_request`](../app/soap/parsers/inbound_eventing.py).
 
-**Risk:** Peers that require strict **EndTo** handling or additional validation may still fault or behave unexpectedly.
+**Risk:** Peers that require **EndTo** distinct from **NotifyTo** with working **SubscriptionEnd** to that EPR still need backlog item 2.
 
-**Recommendation:** Extend validation per §5–§8 and backlog item 3 in `IMPLEMENTATION_PLAN.md`.
+**Recommendation:** Implement **SubscriptionEnd** delivery and relax or specialize **EndTo** policy per deployment once that path exists.
 
 ---
 
@@ -175,7 +175,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Risk:** Generally works for Win10-shaped traces (see [`docs/protocol/ws-scan-tcp.md`](../docs/protocol/ws-scan-tcp.md)) but is not the minimal normative shape; some devices may treat `EndTo` strictly.
 
-**Recommendation:** Validate against target devices; optionally omit or specialize `EndTo` per profile.
+**Recommendation:** Validate against target devices; optionally omit or specialize `EndTo` per profile. Inbound manager currently **requires** matching **EndTo**/**NotifyTo** until **SubscriptionEnd** is implemented (see §5).
 
 ---
 
