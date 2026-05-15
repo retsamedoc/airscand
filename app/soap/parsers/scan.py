@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
+import xml.etree.ElementTree as ET
 
 from app.destinations import ScanDestinationConfig
-from app.soap.addressing import WSA_MESSAGE_ID_PATTERN
 from app.soap.envelope import build_outbound_client_envelope
 from app.soap.fault import parse_soap_fault
 from app.soap.namespaces import (
@@ -24,14 +24,48 @@ from app.soap.parsers.capabilities import (
     input_source_capabilities_for_name,
     pick_color_entry,
 )
-from app.soap.parsers.eventing import (
-    CLIENT_CONTEXT_PATTERN,
-    DESTINATION_TOKEN_PATTERN,
-    IDENTIFIER_PATTERN,
-)
 from app.soap.parsers.transfer import URI_TEXT_PATTERN
+from app.soap.xmlutil import (
+    extract_wse_identifier_from_soap_header,
+    local_name,
+    parse_soap_envelope,
+    parse_xml_fragment,
+    soap_body,
+    wsa_header_first_string,
+)
 
 INVALID_DESTINATION_TOKEN_FAULT = "ClientErrorInvalidDestinationToken"
+
+
+def _first_direct_text_by_local(root: ET.Element, name: str) -> str | None:
+    """First element in document order whose local name matches, with non-empty trimmed text."""
+    for el in root.iter():
+        if local_name(el.tag) == name:
+            t = (el.text or "").strip()
+            if t:
+                return t
+    return None
+
+
+def _parse_sc_prefixed_fragment(text: str) -> ET.Element | None:
+    """Parse body snippets that use ``sca:`` without an in-scope ``xmlns:sca`` declaration."""
+    root = parse_xml_fragment(text)
+    if root is not None:
+        return root
+    raw = text.strip()
+    if not raw:
+        return None
+    wrapped = (
+        f'<airscand:wrap xmlns:airscand="urn:airscand:xml-wrap" xmlns:sca="{NS_SCA}">'
+        f"{raw}</airscand:wrap>"
+    )
+    try:
+        w = ET.fromstring(wrapped)
+    except ET.ParseError:
+        return None
+    return w[0] if len(w) else None
+
+
 DEFAULT_DOCUMENT_NUMBER = "1"
 GET_JOB_STATUS_INITIAL_INTERVAL_SEC = 0.25
 GET_JOB_STATUS_MAX_INTERVAL_SEC = 2.0
@@ -343,13 +377,15 @@ def _valid_ticket_from_validate_response(text: str) -> str | None:
 def parse_validate_scan_ticket_response(text: str) -> dict[str, str | None]:
     """Extract status and SOAP fault details from ValidateScanTicketResponse."""
     status_match = VALIDATE_STATUS_PATTERN.search(text)
-    destination_token_match = DESTINATION_TOKEN_PATTERN.search(text)
     details = parse_soap_fault(text)
     details["status"] = status_match.group(1).strip() if status_match else None
     details["valid_ticket"] = _valid_ticket_from_validate_response(text)
-    details["destination_token"] = (
-        destination_token_match.group(1).strip() if destination_token_match else None
-    )
+    dest_tok: str | None = None
+    env = parse_soap_envelope(text)
+    body = soap_body(env) if env is not None else None
+    if body is not None:
+        dest_tok = _first_direct_text_by_local(body, "DestinationToken")
+    details["destination_token"] = dest_tok
     return details
 
 
@@ -675,17 +711,18 @@ def resolve_wdp_scan_url(scanner_xaddr: str) -> str:
 
 def extract_destination_token(text: str) -> str | None:
     """Extract destination token from SOAP payload if present."""
-    match = DESTINATION_TOKEN_PATTERN.search(text)
-    return match.group(1).strip() if match else None
+    root = _parse_sc_prefixed_fragment(text)
+    if root is None:
+        return None
+    return _first_direct_text_by_local(root, "DestinationToken")
 
 
 def extract_client_context(text: str) -> str | None:
     """Extract ``ClientContext`` from ``ScanAvailableEvent`` or ``DestinationResponse`` payload."""
-    match = CLIENT_CONTEXT_PATTERN.search(text)
-    if not match:
+    root = _parse_sc_prefixed_fragment(text)
+    if root is None:
         return None
-    value = match.group(1).strip()
-    return value or None
+    return _first_direct_text_by_local(root, "ClientContext")
 
 
 def resolve_subscribe_destination_token_for_chain(
@@ -714,8 +751,7 @@ def resolve_subscribe_destination_token_for_chain(
 
 def extract_soap_envelope_message_id(text: str) -> str | None:
     """Extract outbound ``wsa:MessageID`` from a full SOAP envelope."""
-    match = WSA_MESSAGE_ID_PATTERN.search(text)
-    return match.group(1).strip() if match else None
+    return wsa_header_first_string(text, "MessageID")
 
 
 def extract_scan_identifier(text: str) -> str | None:
@@ -726,5 +762,4 @@ def extract_scan_identifier(text: str) -> str | None:
 
 def extract_event_subscription_identifier(text: str) -> str | None:
     """Extract WS-Eventing subscription ``Identifier`` from a notify envelope."""
-    match = IDENTIFIER_PATTERN.search(text)
-    return match.group(1).strip() if match else None
+    return extract_wse_identifier_from_soap_header(text)

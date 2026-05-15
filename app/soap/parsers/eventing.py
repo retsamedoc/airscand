@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from typing import Any
+
+from app.soap.namespaces import NS_WSE
+from app.soap.xmlutil import (
+    first_child_by_local,
+    local_name,
+    parse_soap_envelope,
+    parse_xml_fragment_with_default_ns,
+    serialize_element_pretty_ns,
+    soap_body,
+)
 
 _SECONDS_PER_DAY = 86400.0
 _SECONDS_PER_WEEK = 7 * _SECONDS_PER_DAY
@@ -11,31 +22,124 @@ _SECONDS_PER_WEEK = 7 * _SECONDS_PER_DAY
 _SECONDS_PER_MONTH = 30 * _SECONDS_PER_DAY
 _SECONDS_PER_YEAR = 365.25 * _SECONDS_PER_DAY
 
-IDENTIFIER_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?Identifier>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?Identifier>"
-)
-EXPIRES_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?Expires>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?Expires>"
-)
-DESTINATION_TOKEN_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?DestinationToken>\s*([^<\s]+)\s*</(?:[A-Za-z0-9_]+:)?DestinationToken>"
-)
-DESTINATION_RESPONSES_BLOCK_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?DestinationResponses\b[^>]*>.*?</(?:[A-Za-z0-9_]+:)?DestinationResponses>",
-    re.DOTALL | re.IGNORECASE,
-)
-DESTINATION_RESPONSE_BLOCK_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?DestinationResponse\b[^>]*>.*?</(?:[A-Za-z0-9_]+:)?DestinationResponse>",
-    re.DOTALL | re.IGNORECASE,
-)
-CLIENT_CONTEXT_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?ClientContext>\s*([^<]*?)\s*</(?:[A-Za-z0-9_]+:)?ClientContext>",
-    re.DOTALL,
-)
-SUBSCRIPTION_MANAGER_INNER_PATTERN = re.compile(
-    r"<(?:[A-Za-z0-9_]+:)?SubscriptionManager\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?SubscriptionManager>",
-    re.DOTALL | re.IGNORECASE,
-)
+
+def _element_text_shallow(el: ET.Element | None) -> str | None:
+    if el is None:
+        return None
+    t = (el.text or "").strip()
+    if t:
+        return t
+    joined = "".join(el.itertext()).strip()
+    return joined if joined else None
+
+
+def _find_body_child(body: ET.Element, response_local: str) -> ET.Element | None:
+    for ch in body:
+        if local_name(ch.tag) == response_local:
+            return ch
+    return None
+
+
+def _subscribe_response_from_document(text: str) -> ET.Element | None:
+    env = parse_soap_envelope(text)
+    if env is None:
+        return None
+    body = soap_body(env)
+    if body is None:
+        return None
+    return _find_body_child(body, "SubscribeResponse")
+
+
+def _renew_response_from_document(text: str) -> ET.Element | None:
+    env = parse_soap_envelope(text)
+    if env is None:
+        return None
+    body = soap_body(env)
+    if body is None:
+        return None
+    return _find_body_child(body, "RenewResponse")
+
+
+def _subscribe_response_direct_identifier(sub_resp: ET.Element) -> str | None:
+    """First ``Identifier`` that is a direct child of ``SubscribeResponse`` only."""
+    for ch in sub_resp:
+        if local_name(ch.tag) == "Identifier":
+            got = _element_text_shallow(ch)
+            if got:
+                return got
+    return None
+
+
+def _subscribe_response_direct_expires(sub_resp: ET.Element) -> str | None:
+    for ch in sub_resp:
+        if local_name(ch.tag) == "Expires":
+            got = _element_text_shallow(ch)
+            if got:
+                return got
+    return None
+
+
+def _first_subscription_manager(sub_resp: ET.Element) -> ET.Element | None:
+    return first_child_by_local(sub_resp, "SubscriptionManager")
+
+
+def _subscription_manager_epr_parts(
+    mgr: ET.Element,
+) -> tuple[str | None, str | None]:
+    addr_el = first_child_by_local(mgr, "Address")
+    addr = _element_text_shallow(addr_el) if addr_el is not None else None
+    ref_el = first_child_by_local(mgr, "ReferenceParameters")
+    ref_xml = serialize_element_pretty_ns(ref_el).strip() if ref_el is not None else None
+    return addr, ref_xml
+
+
+def _destination_tokens_map(sub_resp: ET.Element) -> dict[str, str]:
+    block = first_child_by_local(sub_resp, "DestinationResponses")
+    if block is None:
+        return {}
+    out: dict[str, str] = {}
+    for dr in block:
+        if local_name(dr.tag) != "DestinationResponse":
+            continue
+        cc_el = first_child_by_local(dr, "ClientContext")
+        tok_el = first_child_by_local(dr, "DestinationToken")
+        key = _element_text_shallow(cc_el) or ""
+        val = _element_text_shallow(tok_el) or ""
+        if key and val and key not in out:
+            out[key] = val
+    return out
+
+
+def subscription_identifier_from_reference_parameters_xml(ref_xml: str) -> str | None:
+    """Resolve ``wse:Identifier`` (or first ``Identifier``) inside reference parameters."""
+    root = parse_xml_fragment_with_default_ns(ref_xml)
+    if root is None:
+        return None
+    if local_name(root.tag) == "Identifier":
+        return _element_text_shallow(root)
+    rp = (
+        root
+        if local_name(root.tag) == "ReferenceParameters"
+        else first_child_by_local(root, "ReferenceParameters")
+    )
+    if rp is not None:
+        for ch in rp:
+            if ch.tag == f"{{{NS_WSE}}}Identifier":
+                got = _element_text_shallow(ch)
+                if got:
+                    return got
+        for ch in rp:
+            if local_name(ch.tag) == "Identifier":
+                got = _element_text_shallow(ch)
+                if got:
+                    return got
+        return None
+    for el in root.iter():
+        if el.tag == f"{{{NS_WSE}}}Identifier":
+            got = _element_text_shallow(el)
+            if got:
+                return got
+    return None
 
 
 def effective_subscription_identifier_for_unsubscribe(
@@ -45,37 +149,19 @@ def effective_subscription_identifier_for_unsubscribe(
     """Resolve subscription id for Unsubscribe ``wse:Identifier`` header."""
     ref = (reference_parameters_xml or "").strip()
     if ref:
-        m = IDENTIFIER_PATTERN.search(ref)
-        if m:
-            return m.group(1).strip()
-        loose = re.search(
-            r"<(?:[A-Za-z0-9_]+:)?Identifier>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?Identifier>",
-            ref,
-            re.DOTALL | re.IGNORECASE,
-        )
-        if loose:
-            return loose.group(1).strip()
+        parsed = subscription_identifier_from_reference_parameters_xml(ref)
+        if parsed:
+            return parsed
     sub = (subscription_identifier or "").strip()
     return sub if sub else None
 
 
 def extract_subscribe_destination_tokens_by_client_context(text: str) -> dict[str, str]:
     """Parse all ``DestinationResponse`` entries: ``ClientContext`` -> ``DestinationToken``."""
-    block = DESTINATION_RESPONSES_BLOCK_PATTERN.search(text)
-    if not block:
+    sub_resp = _subscribe_response_from_document(text)
+    if sub_resp is None:
         return {}
-    out: dict[str, str] = {}
-    for dr in DESTINATION_RESPONSE_BLOCK_PATTERN.finditer(block.group(0)):
-        segment = dr.group(0)
-        cc_match = CLIENT_CONTEXT_PATTERN.search(segment)
-        tok_match = DESTINATION_TOKEN_PATTERN.search(segment)
-        if not cc_match or not tok_match:
-            continue
-        key = cc_match.group(1).strip()
-        val = tok_match.group(1).strip()
-        if key and val and key not in out:
-            out[key] = val
-    return out
+    return _destination_tokens_map(sub_resp)
 
 
 def extract_subscribe_destination_token(text: str) -> str | None:
@@ -83,32 +169,31 @@ def extract_subscribe_destination_token(text: str) -> str | None:
     mapping = extract_subscribe_destination_tokens_by_client_context(text)
     if mapping:
         return next(iter(mapping.values()))
-    block = DESTINATION_RESPONSES_BLOCK_PATTERN.search(text)
-    if not block:
+    sub_resp = _subscribe_response_from_document(text)
+    if sub_resp is None:
         return None
-    match = DESTINATION_TOKEN_PATTERN.search(block.group(0))
-    return match.group(1).strip() if match else None
+    block = first_child_by_local(sub_resp, "DestinationResponses")
+    if block is None:
+        return None
+    for dr in block:
+        if local_name(dr.tag) != "DestinationResponse":
+            continue
+        tok_el = first_child_by_local(dr, "DestinationToken")
+        tok = _element_text_shallow(tok_el)
+        if tok:
+            return tok
+    return None
 
 
 def extract_subscription_manager_epr(text: str) -> tuple[str | None, str | None]:
     """Extract Subscription Manager EPR ``Address`` and optional ``ReferenceParameters`` XML."""
-    m = SUBSCRIPTION_MANAGER_INNER_PATTERN.search(text)
-    if not m:
+    sub_resp = _subscribe_response_from_document(text)
+    if sub_resp is None:
         return None, None
-    inner = m.group(1)
-    addr_m = re.search(
-        r"<(?:[A-Za-z0-9_]+:)?Address>\s*([^<]+?)\s*</(?:[A-Za-z0-9_]+:)?Address>",
-        inner,
-        re.DOTALL | re.IGNORECASE,
-    )
-    addr = addr_m.group(1).strip() if addr_m else None
-    ref_m = re.search(
-        r"<(?:[A-Za-z0-9_]+:)?ReferenceParameters\b[^>]*>.*?</(?:[A-Za-z0-9_]+:)?ReferenceParameters>",
-        inner,
-        re.DOTALL | re.IGNORECASE,
-    )
-    ref_xml = ref_m.group(0).strip() if ref_m else None
-    return addr, ref_xml
+    mgr = _first_subscription_manager(sub_resp)
+    if mgr is None:
+        return None, None
+    return _subscription_manager_epr_parts(mgr)
 
 
 def extract_subscription_manager_url(text: str) -> str | None:
@@ -119,14 +204,29 @@ def extract_subscription_manager_url(text: str) -> str | None:
 
 def parse_subscribe_response(text: str) -> dict[str, Any]:
     """Extract subscription details from SOAP response body."""
-    identifier_match = IDENTIFIER_PATTERN.search(text)
-    expires_match = EXPIRES_PATTERN.search(text)
-    tokens_map = extract_subscribe_destination_tokens_by_client_context(text)
+    sub_resp = _subscribe_response_from_document(text)
+    if sub_resp is None:
+        return {
+            "identifier": None,
+            "expires": None,
+            "subscribe_destination_token": None,
+            "subscribe_destination_tokens": None,
+            "subscription_manager_url": None,
+            "subscription_manager_address": None,
+            "subscription_manager_reference_parameters_xml": None,
+        }
+    identifier = _subscribe_response_direct_identifier(sub_resp)
+    expires = _subscribe_response_direct_expires(sub_resp)
+    tokens_map = _destination_tokens_map(sub_resp)
     subscribe_destination_token = extract_subscribe_destination_token(text)
-    mgr_addr, mgr_ref = extract_subscription_manager_epr(text)
+    mgr = _first_subscription_manager(sub_resp)
+    mgr_addr: str | None = None
+    mgr_ref: str | None = None
+    if mgr is not None:
+        mgr_addr, mgr_ref = _subscription_manager_epr_parts(mgr)
     return {
-        "identifier": identifier_match.group(1).strip() if identifier_match else None,
-        "expires": expires_match.group(1).strip() if expires_match else None,
+        "identifier": identifier,
+        "expires": expires,
         "subscribe_destination_token": subscribe_destination_token,
         "subscribe_destination_tokens": tokens_map if tokens_map else None,
         "subscription_manager_url": mgr_addr,
@@ -197,7 +297,14 @@ def parse_iso8601_duration_to_seconds(expires: str) -> float:
 
 def parse_renew_response(text: str) -> dict[str, Any]:
     """Extract granted expiration from a WS-Eventing RenewResponse body."""
-    expires_match = EXPIRES_PATTERN.search(text)
+    renew = _renew_response_from_document(text)
+    expires: str | None = None
+    if renew is not None:
+        for ch in renew:
+            if local_name(ch.tag) == "Expires":
+                expires = _element_text_shallow(ch)
+                if expires:
+                    break
     return {
-        "expires": expires_match.group(1).strip() if expires_match else None,
+        "expires": expires,
     }

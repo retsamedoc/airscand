@@ -14,7 +14,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 - **WS-Discovery** server + client probe; **Hello** / **Bye**; correlation patterns (see `docs/architecture.md`, `tests/test_discovery.py`).
 - **Outbound WS-Eventing**: **Subscribe**, **Unsubscribe** to stored manager EPR; **Renew** on a lease fraction timer; dual subscriptions (ScanAvailable + ScannerStatusSummary) with separate manager fields (`main.py`, `app/ws_eventing_client.py`, `tests/test_ws_eventing_client.py`, `tests/test_main_registration.py`).
-- **SubscribeResponse** parsing: identifier, expires, subscription manager address + reference parameters XML, destination token map (`app/soap/parsers/eventing.py`).
+- **SubscribeResponse** parsing: identifier, expires, subscription manager address + reference parameters XML, destination token map (`app/soap/parsers/eventing.py`, ElementTree).
 - **Device-initiated scan chain**: **ScanAvailableEvent** SOAP ack, **ValidateScanTicket** → **CreateScanJob** → optional **GetJobStatus** → **RetrieveImage** / MTOM, coordination with **ScannerStatusSummaryEvent** (`app/ws_scan.py`, `app/ws_eventing_client.py`, audits).
 - **Push path** `/scan`: atomic save, empty body rejection (`app/scan_receiver.py`, `app/scan_storage.py`, tests).
 - **Inbound WS-Eventing subscription manager** (`app/ws_scan.py`, `app/inbound_eventing_registry.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/builders/faults.py`, `app/soap/envelope.py`): **Subscribe** allocates stable **Identifier** + granted **Expires**; **Renew** extends lease; **GetStatus** returns stored expiration without mutating lease; **Unsubscribe** removes state; unknown/expired ids and validation failures return **SOAP 1.2 faults** (`tests/test_ws_scan.py`).
@@ -28,22 +28,13 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 - **Outbound SOAP response validation (RelatesTo / Action):** Optional strict checks for **Subscribe**, **ValidateScanTicket**, **CreateScanJob**, **GetJobStatus** (when polling), and **RetrieveImage** (SOAP envelope from MTOM) via ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` / ``Config.validate_outbound_soap_response`` (`app/soap/outbound_response_validation.py`, `app/ws_eventing_client.py`, `main.py`, `app/ws_scan.py`). Default **off** for interop with devices that omit headers (`docs/protocol/vendor_quirks.md`). *Why tests matter:* wrong correlation otherwise accepts mis-attributed HTTP replies as if they matched the in-flight SOAP leg.
 - **RetrieveImage payload integrity (pull / MTOM):** When HTTP provides ``Content-Length``, downloaded byte length must match. For ``multipart/related``, checks include closing boundary, optional per-part ``Content-Length``, **xop:Include** → binary part resolution, non-empty payload, and JPEG/PNG/TIFF/PDF magic vs declared MIME. Failures log structured ``integrity_reason_codes`` / lengths and return fault ``airscand:RetrieveImagePayloadIntegrity`` without persisting (`app/mtom.py`, `app/soap/transport.py`, `app/ws_eventing_client.py`, `tests/test_mtom.py`, `tests/test_soap_transport.py`). *Residual:* bounded automatic **RetrieveImage** retry after truncation is not implemented (operators see explicit failure).
+- **Namespace-aware SOAP on eventing / WS-A / fault hot paths:** ElementTree with explicit namespace URIs replaces regex for **SubscribeResponse** / **RenewResponse** parsing, subscription manager EPR, reference-parameter id resolution, WS-A **Action** / **MessageID** / **RelatesTo** / **To**, SOAP **Fault** code/subcode/reason, inbound management header id, outbound log correlation, and **ClientContext** / **DestinationToken** extraction (`app/soap/xmlutil.py`, `app/soap/parsers/eventing.py`, `app/soap/addressing.py`, `app/soap/fault.py`, `app/soap/parsers/discovery.py`, `app/soap/transport.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/parsers/scan.py`). *Why tests matter:* prefix permutations and nested duplicate **Identifier** elements otherwise yield wrong subscription correlation. Regression: `tests/test_eventing_namespace_xml.py`. *Residual:* some WS-Scan body parsers and WS-Discovery **XAddrs** extraction still use regex where audits did not require this increment.
 
 ---
 
 ## Backlog (incomplete) — by priority
 
-### 4. Namespace-aware XML on critical eventing and fault paths (`docs/ws-eventing_audit.md` §11)
-
-**Gap:** Regex-based extraction for identifiers, manager EPR, etc.
-
-**Done when:** Identified hot paths use **ElementTree** (or agreed library) with explicit namespace URIs; regression tests include prefix permutations for the same logical document.
-
-**Verification:** Same semantic XML with different prefixes yields identical parsed fields; maliciously nested duplicate tags do not pick wrong inner match.
-
----
-
-### 5. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
+### 4. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
 
 **Gap:** **RetrieveImage** path always attempted for device-initiated flow; push-only devices may need different handling.
 
@@ -53,7 +44,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 6. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
+### 5. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
 **Gap:** Limited tests for **fault mapping**, **subscription lifecycle** edge cases, **Renew** failure leading to resubscribe, **inbound** manager behavior.
 
@@ -63,7 +54,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 7. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
+### 6. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
 
 **Gap:** Only `Content-Type: application/soap+xml; charset=utf-8` on some legs.
 
@@ -73,7 +64,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 8. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
+### 7. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
 
 **Gap:** `parse_soap_fault` does not surface **Detail** for diagnostics.
 
@@ -83,7 +74,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 9. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
+### 8. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
 
 **Gap:** Assumes `app["config"]` present (`isinstance` guard unlike `handle_scan`).
 
@@ -93,7 +84,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 10. Developer and security posture (`docs/ROADMAP.md` Future)
+### 9. Developer and security posture (`docs/ROADMAP.md` Future)
 
 **Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
 
@@ -103,7 +94,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 11. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
+### 10. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
 
 **Gap:** State spread across async tasks and flags.
 
@@ -113,7 +104,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 12. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
+### 11. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
 
 **Gap:** Not implemented per audits.
 
@@ -123,7 +114,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 13. Optional **`specs/`** entry point (documentation)
+### 12. Optional **`specs/`** entry point (documentation)
 
 **Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
 
@@ -135,9 +126,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Tasks 6 + 4** (tests + parsing robustness) in parallel after behavior stabilizes.  
-2. Remaining items per product need (bounded **RetrieveImage** retry, pull/push, far-term items).
+1. **Task 5** (compliance tests) after behavior stabilizes; remaining items per product need (bounded **RetrieveImage** retry, pull/push, far-term items).
 
 ---
 
-*Last updated: **RetrieveImage** integrity (HTTP length + MTOM structure/magic); backlog renumbered 4–13.*
+*Last updated: namespace-aware ElementTree parsing for eventing / WS-A / faults (`tests/test_eventing_namespace_xml.py`); backlog renumbered 4–12.*

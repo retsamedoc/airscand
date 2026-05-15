@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
-from app.soap.parsers.eventing import IDENTIFIER_PATTERN, parse_iso8601_duration_to_seconds
+from app.soap.parsers.eventing import parse_iso8601_duration_to_seconds
+from app.soap.xmlutil import extract_wsa_to_optional, extract_wse_identifier_from_soap_header
 
 __all__ = [
     "PUSH_DELIVERY_MODE_URI",
@@ -21,15 +21,6 @@ __all__ = [
 
 # Canonical Push mode URI (case-insensitive compare).
 PUSH_DELIVERY_MODE_URI = "http://schemas.xmlsoap.org/ws/2004/08/eventing/DeliveryModes/Push"
-
-_HEADER_INNER_PATTERN = re.compile(
-    r"<(?:[^:>\s]+:)?Header\b[^>]*>(.*)</(?:[^:>\s]+:)?Header>",
-    re.DOTALL | re.IGNORECASE,
-)
-_WSA_TO_PATTERN = re.compile(
-    r"<(?:[^:>\s]+:)?To\b[^>]*>\s*([^<]+?)\s*</(?:[^:>\s]+:)?To>",
-    re.DOTALL | re.IGNORECASE,
-)
 
 
 def _local_name(tag: str) -> str:
@@ -51,20 +42,9 @@ def _text_direct(el: ET.Element | None) -> str:
     return (el.text or "").strip()
 
 
-def extract_wsa_to_optional(soap_text: str) -> str | None:
-    """Return first ``wsa:To`` in the SOAP header, if any."""
-    m = _HEADER_INNER_PATTERN.search(soap_text)
-    segment = m.group(1) if m else soap_text
-    to_m = _WSA_TO_PATTERN.search(segment)
-    return to_m.group(1).strip() if to_m else None
-
-
 def extract_management_subscription_identifier(soap_text: str) -> str | None:
     """Extract subscription id from the SOAP header (Renew/Unsubscribe/GetStatus pattern)."""
-    m = _HEADER_INNER_PATTERN.search(soap_text)
-    segment = m.group(1) if m else soap_text
-    id_m = IDENTIFIER_PATTERN.search(segment)
-    return id_m.group(1).strip() if id_m else None
+    return extract_wse_identifier_from_soap_header(soap_text)
 
 
 @dataclass(frozen=True)

@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
 
-from app.soap.addressing import WSA_MESSAGE_ID_PATTERN, extract_wsa_action, soap_action_short
+from app.soap.addressing import extract_wsa_action, soap_action_short
 from app.soap.fault import parse_soap_fault
+from app.soap.xmlutil import wsa_header_first_string
 
 if TYPE_CHECKING:
     from app.config import Config
@@ -164,8 +165,7 @@ class SoapHttpClient:
         headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
         req_action = extract_wsa_action(payload)
         req_action_short = soap_action_short(req_action)
-        req_mid_m = WSA_MESSAGE_ID_PATTERN.search(payload)
-        req_message_id = req_mid_m.group(1).strip() if req_mid_m else None
+        req_message_id = wsa_header_first_string(payload, "MessageID")
         read_effective = (
             self._read_timeout_override_sec
             if self._read_timeout_override_sec is not None
@@ -196,8 +196,7 @@ class SoapHttpClient:
                 text = await response.text()
                 resp_action = extract_wsa_action(text)
                 resp_action_short = soap_action_short(resp_action)
-                resp_mid_m = WSA_MESSAGE_ID_PATTERN.search(text)
-                resp_message_id = resp_mid_m.group(1).strip() if resp_mid_m else None
+                resp_message_id = wsa_header_first_string(text, "MessageID")
                 fault = parse_soap_fault(text)
                 resp_extra: dict[str, str | int | float | None] = {
                     "soap_leg": "client_response",
@@ -257,8 +256,7 @@ class SoapHttpClient:
         headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
         req_action = extract_wsa_action(payload)
         req_action_short = soap_action_short(req_action)
-        req_mid_m = WSA_MESSAGE_ID_PATTERN.search(payload)
-        req_message_id = req_mid_m.group(1).strip() if req_mid_m else None
+        req_message_id = wsa_header_first_string(payload, "MessageID")
         read_effective = (
             self._read_timeout_override_sec
             if self._read_timeout_override_sec is not None
@@ -293,8 +291,9 @@ class SoapHttpClient:
                 soap_text_probe = body[: min(4096, len(body))].decode("utf-8", errors="replace")
                 resp_action = extract_wsa_action(soap_text_probe) if not is_mtom else None
                 resp_action_short = soap_action_short(resp_action)
-                resp_mid_m = WSA_MESSAGE_ID_PATTERN.search(soap_text_probe) if not is_mtom else None
-                resp_message_id = resp_mid_m.group(1).strip() if resp_mid_m else None
+                resp_message_id = (
+                    wsa_header_first_string(soap_text_probe, "MessageID") if not is_mtom else None
+                )
                 fault = {} if is_mtom else parse_soap_fault(soap_text_probe)
                 resp_extra: dict[str, str | int | float | bool | None] = {
                     "soap_leg": "client_response",
