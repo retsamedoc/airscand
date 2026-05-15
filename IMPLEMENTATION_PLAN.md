@@ -50,9 +50,9 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **§2 outbound:** primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary; registration loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (patched `main.asyncio.sleep` in one test; real maintenance + real 2s backoff in `test_audit_ws_eventing_17_registration_real_maintenance_resubscribe_no_sleep_patch`); outbound **GetStatus** client (`get_subscription_status`, `build_get_status_request`, `parse_get_status_response`).
 - **§12 inbound:** expired lease on **GetStatus** → **UnableToRenew**; **GetStatus** does not extend lease (monotonic clock, no asyncio maintenance mocks).
 
-**Residual gap:** Optional WS-Scan audit §11-style compliance module (separate from eventing); inbound **Subscribe** full §5–§8 negotiation matrix (product-driven).
+**Residual gap:** Inbound **Subscribe** full §5–§8 negotiation matrix (product-driven). WS-Scan audit compliance module added (`tests/test_ws_scan_audit_compliance.py` — §6 retrieve timing/fault logs, §7 ack, §11 push_only, §13–§14 parsers/headers, §16 config guard, §17 Get URL).
 
-**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix covered for MVP hardening; outbound **GetStatus** implemented for diagnostics).
+**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix covered for MVP hardening; WS-Scan audit-named module covers resolved audit themes; outbound **GetStatus** implemented for diagnostics).
 
 **Verification:** CI runs compliance module; each `test_audit_ws_eventing_17_*` name maps to an audit § or fault bullet.
 
@@ -88,13 +88,9 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 10. Optional **`specs/`** entry point (documentation)
+### 10. Optional **`specs/`** entry point (documentation) — **done**
 
-**Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
-
-**Done when:** `specs/README.md` (or index) lists canonical doc paths and audit files for AI/human navigation.
-
-**Verification:** Link check in CI or manual; `IMPLEMENTATION_PLAN.md` references it.
+**Done:** [`specs/README.md`](specs/README.md) indexes `docs/protocol/`, audits, backlog, and audit-aligned pytest modules.
 
 ---
 
@@ -104,4 +100,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: Audit §17 registration loop test with real maintenance + real post-maintenance backoff (no ``asyncio.sleep`` patch).*
+*Last updated: WS-Scan audit compliance module (`tests/test_ws_scan_audit_compliance.py`) + `specs/README.md` index.*

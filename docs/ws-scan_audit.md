@@ -165,7 +165,15 @@ This report compares the current `airscand` implementation (primarily [`app/soap
 
 ---
 
-### 17. **WS-Transfer Get** URL selection
+### 17. Tests — audit-aligned compliance module
+
+**Code:** [`tests/test_ws_scan_audit_compliance.py`](../tests/test_ws_scan_audit_compliance.py) maps resolved audit themes by name (§6 retrieve timing/fault warnings, §7 ScanAvailableEvent ack, §11 push_only, §13 parser prefix behavior, §14 SOAP `Content-Type` baseline, §16 config guard, §17 Get URL preference). Broader coverage remains in [`tests/test_ws_eventing_client.py`](../tests/test_ws_eventing_client.py) and [`tests/test_ws_scan.py`](../tests/test_ws_scan.py).
+
+**Residual:** §11 **ImageTransfer** auto-detection; full §13 migration to namespace-aware parsers on all WS-Scan bodies.
+
+---
+
+### 18. **WS-Transfer Get** URL selection
 
 **Code:** Preflight **Get** targets `/WDP/SCAN` when derived from discovery—reasonable for bring-up docs, not a WS-Scan operation per se.
 
