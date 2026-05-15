@@ -9,8 +9,8 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 | Role | Where implemented | Notes |
 |------|-------------------|--------|
 | Subscriber | `register_with_scanner`, `_eventing_registration_loop`, `_eventing_maintenance_loop`, `renew_subscription`, `unsubscribe_from_scanner` | Sends `Subscribe`; persists manager URL + reference parameters + `Expires` from `SubscribeResponse` / `RenewResponse`; `_eventing_maintenance_loop` schedules `Renew` before lease fraction; `_unsubscribe_eventing_best_effort` on shutdown / failed renew. No outbound `GetStatus` client. |
-| Event sink | `handle_wsd` (`ScanAvailableEvent`) | Receives notifications; for **ScanAvailableEvent** responds with SOAP 1.2 (`application/soap+xml`), `wsa:RelatesTo`, and [`build_scan_available_event_ack_response`](../app/ws_scan.py) (synthetic `ScanAvailableEventResponse` action). Unsupported actions still use plain `text/plain` “OK” in the default branch (§9). |
-| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** in-memory registry ([`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py)), [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py) + SOAP faults ([`build_wse_fault_body`](../app/soap/builders/faults.py), [`build_inbound_fault_envelope`](../app/soap/envelope.py)) for unknown/expired ids, unsupported **Delivery/@Mode**, and **Filter**; **GetStatus** returns stored granted **Expires** without extending the lease. **Residual:** **SubscriptionEnd**; fuller **EndTo** / grant matrix vs §5–§8 ([`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) backlog item 5); unknown SOAP actions still `text/plain` “OK” (§9). |
+| Event sink | `handle_wsd` (`ScanAvailableEvent`) | Receives notifications; for **ScanAvailableEvent** responds with SOAP 1.2 (`application/soap+xml`), `wsa:RelatesTo`, and [`build_scan_available_event_ack_response`](../app/ws_scan.py) (synthetic `ScanAvailableEventResponse` action). Other SOAP actions without a handler return SOAP faults (§9). |
+| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** in-memory registry ([`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py)), [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py) + SOAP faults ([`build_wse_fault_body`](../app/soap/builders/faults.py), [`build_inbound_fault_envelope`](../app/soap/envelope.py)) for unknown/expired ids, unsupported **Delivery/@Mode**, and **Filter**; **GetStatus** returns stored granted **Expires** without extending the lease. **Residual:** **SubscriptionEnd**; fuller **EndTo** / grant matrix vs §5–§8 ([`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) backlog item 5). |
 
 ---
 
@@ -19,8 +19,8 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 | Severity | Count | Themes |
 |----------|------:|--------|
 | Critical | 1 | **`SubscriptionEnd`** missing |
-| High | 3 | Inbound **Subscribe** contract **residual** (EndTo, fuller §5–§8 matrix); **SOAP faults** still missing for unknown `/wsd` actions (§9); **regex**-heavy parsing on some legs (§11) |
-| Medium | 4 | **Non-SOAP fallbacks** (#9); **regex** parsing (#11); **`GetStatus`** semantics (#12); **EndTo** / **Filter** (#13) _(notification ack for `ScanAvailableEvent`: [resolved §10](#10-scanavailableevent-notification-ack--resolved))_ |
+| High | 2 | Inbound **Subscribe** contract **residual** (EndTo, fuller §5–§8 matrix); **regex**-heavy parsing on some legs (§11) |
+| Medium | 3 | **regex** parsing (#11); **`GetStatus`** semantics (#12); **EndTo** / **Filter** (#13) _(notification ack for `ScanAvailableEvent`: [resolved §10](#10-scanavailableevent-notification-ack--resolved); unsupported `/wsd` SOAP actions: [resolved §9](#9-unsupported-soap-actions-resolved))_ |
 | Low | 4 | Security SHOULDs; **WSDL/metadata**; test coverage gaps; **SOAP 1.1** vs **1.2** only |
 
 ---
@@ -65,15 +65,15 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ## High
 
-### 4. WS-Eventing SOAP faults — **partial** (inbound manager yes; unknown `/wsd` actions no)
+### 4. WS-Eventing SOAP faults — **resolved** (inbound manager + unknown `/wsd` actions)
 
 **Spec:** Faults such as `DeliveryModeRequestedUnavailable`, `InvalidExpirationTime`, `UnsupportedExpirationType`, `FilteringNotSupported` / `FilteringRequestedUnavailable`, `UnableToRenew`, `InvalidMessage`, etc., MUST be represented as SOAP faults with appropriate codes/reasons.
 
-**Code:** [`handle_wsd`](../app/ws_scan.py) builds SOAP faults for inbound **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** validation and lifecycle errors via [`build_wse_fault_body`](../app/soap/builders/faults.py). Unsupported **SOAP actions** still fall through to `text/plain` “OK” (see §9 below).
+**Code:** [`handle_wsd`](../app/ws_scan.py) builds SOAP faults for inbound **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** validation and lifecycle errors via [`build_wse_fault_body`](../app/soap/builders/faults.py). Unknown **`wsa:Action`** returns [`build_action_not_supported_fault_body`](../app/soap/builders/faults.py) (`wsa:ActionNotSupported`); missing/invalid **Action** returns `wse:InvalidMessage` (see §9).
 
-**Risk:** Strict clients still receive non-SOAP bodies for unknown actions on the WSD endpoint.
+**Risk:** _(Closed for unknown-action plain-text responses.)_
 
-**Recommendation:** Return a SOAP fault for the default branch; keep centralized fault builders.
+**Recommendation:** Keep centralized fault builders; extend **Detail** / diagnostics if peers require richer `ProblemAction` payloads.
 
 ---
 
@@ -125,13 +125,13 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ## Medium
 
-### 9. Unsupported SOAP actions use `text/plain` “OK” (violates §2–3 SOAP expectations, §11.1)
+### 9. Unsupported SOAP actions — **Resolved** {#9-unsupported-soap-actions-resolved}
 
-**Code:** [`handle_wsd`](../app/ws_scan.py) default branch and comments describe a “plain OK fallback”.
+**Spec:** SOAP endpoints SHOULD respond with SOAP faults for unrecognized operations rather than non-SOAP success bodies.
 
-**Risk:** Violates “SOAP structure valid” for unknown operations on the same endpoint; partners may not parse responses.
+**Implementation:** [`handle_wsd`](../app/ws_scan.py) returns SOAP 1.2 (`application/soap+xml`) with [`build_inbound_fault_envelope`](../app/soap/envelope.py): missing **`wsa:Action`** → `wse:InvalidMessage`; unknown action → [`build_action_not_supported_fault_body`](../app/soap/builders/faults.py) (`wsa:ActionNotSupported`). HTTP **200** matches other inbound SOAP fault responses in this handler. Logs include `soap_action` / `wsa_message_id` for correlation.
 
-**Recommendation:** Return SOAP fault (`InvalidMessage` / `ActionNotSupported` pattern consistent with your stack) instead of plain text for SOAP endpoints.
+**Residual:** None for plain-text “OK” on this path; optional future work is richer **`wsa:ProblemAction`** **Detail** (see `IMPLEMENTATION_PLAN.md` backlog on fault **Detail** extraction).
 
 ---
 
@@ -141,7 +141,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Implementation:** [`handle_wsd`](../app/ws_scan.py) returns [`build_scan_available_event_ack_response`](../app/ws_scan.py): SOAP 1.2, `Content-Type: application/soap+xml`, `wsa:RelatesTo` matching the notification `wsa:MessageID`, synthetic `ScanAvailableEventResponse` action, empty `soap:Body`. Matches [ws-scan_audit.md](ws-scan_audit.md) Medium #7. Device-driven coverage: Epson WF-3640 on the ScanAvailable → CreateScanJob chain.
 
-**Residual:** Other inbound SOAP actions without a dedicated branch still use `text/plain` “OK” (§9).
+**Residual:** None for generic SOAP dispatch on `/wsd` (see [§9](#9-unsupported-soap-actions-resolved)).
 
 ---
 

@@ -18,23 +18,11 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Device-initiated scan chain**: **ScanAvailableEvent** SOAP ack, **ValidateScanTicket** → **CreateScanJob** → optional **GetJobStatus** → **RetrieveImage** / MTOM, coordination with **ScannerStatusSummaryEvent** (`app/ws_scan.py`, `app/ws_eventing_client.py`, audits).
 - **Push path** `/scan`: atomic save, empty body rejection (`app/scan_receiver.py`, `app/scan_storage.py`, tests).
 - **Inbound WS-Eventing subscription manager** (`app/ws_scan.py`, `app/inbound_eventing_registry.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/builders/faults.py`, `app/soap/envelope.py`): **Subscribe** allocates stable **Identifier** + granted **Expires**; **Renew** extends lease; **GetStatus** returns stored expiration without mutating lease; **Unsubscribe** removes state; unknown/expired ids and validation failures return **SOAP 1.2 faults** (`tests/test_ws_scan.py`).
+- **Unknown or missing `wsa:Action` on `/wsd`:** SOAP 1.2 fault responses (`wsa:ActionNotSupported` / `wse:InvalidMessage`) with `application/soap+xml`, structured logs (`soap_action`, `wsa_message_id`); no `text/plain` success for those POSTs (`tests/test_ws_scan.py`).
 
 ---
 
 ## Backlog (incomplete) — by priority
-
-### 1. SOAP fault instead of plain text for unknown `/wsd` actions (`app/ws_scan.py`)
-
-**Gap:** Unsupported actions fall through to **`text/plain` “OK”** (`docs/ws-eventing_audit.md` §9; see `handle_wsd` default branch).
-
-**Done when:** Unknown **SOAP actions** on the WSD endpoint return **`application/soap+xml`** with a **SOAP Fault** (and useful **Reason** / subcode where applicable), HTTP 4xx/5xx per chosen policy, and **no** `text/plain` success for SOAP POSTs.
-
-**Verification:**
-
-- POST with valid envelope but **unknown `wsa:Action`** → SOAP fault body, content-type `application/soap+xml`; logs still include action + correlation id.
-- Known actions unchanged (golden snapshots or string asserts as today).
-
----
 
 ### 2. Documentation reconciliation (audits, ROADMAP, status)
 
@@ -218,11 +206,11 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 ## Suggested execution order for MVP “hardening”
 
 1. **Task 2** (doc truth) so all contributors align on what already ships.  
-2. **Tasks 1 + 5** (SOAP fault for unknown `/wsd` actions + deeper inbound **Subscribe** contract) — highest interoperability risk for non-Epson peers.  
+2. **Task 5** (deeper inbound **Subscribe** contract) — highest interoperability risk for non-Epson peers alongside remaining audit gaps.  
 3. **Task 3** (timeouts) — low risk, high operability.  
 4. **Tasks 11 + 9** (tests + parsing robustness) in parallel after behavior stabilizes.  
 5. Remaining items per product need (failover, SubscriptionEnd, pull/push, far-term items).
 
 ---
 
-*Last updated: inbound subscription manager state + SOAP faults shipped; backlog renumbered.*
+*Last updated: `/wsd` unknown or missing `wsa:Action` returns SOAP faults; audit §4/§9 aligned.*

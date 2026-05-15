@@ -10,7 +10,7 @@ from app.inbound_eventing_registry import get_inbound_subscription_registry
 from app.quirks import get_profile
 from app.scanner_status_coordination import notify_scanner_state
 from app.soap.addressing import extract_action, extract_message_id_optional, soap_action_short
-from app.soap.builders.faults import build_wse_fault_body
+from app.soap.builders.faults import build_action_not_supported_fault_body, build_wse_fault_body
 from app.soap.envelope import build_inbound_fault_envelope, build_inbound_response_envelope
 from app.soap.namespaces import (
     ACTION_WSA_FAULT,
@@ -599,19 +599,52 @@ async def handle_wsd(request: web.Request) -> web.Response:
             charset="utf-8",
         )
 
-    # Keep phase-2 bringup behavior for non-eventing actions while we
-    # continue implementing broader WS-Scan SOAP surface.
+    if not action:
+        fault_body = build_wse_fault_body(
+            subcode_local="InvalidMessage",
+            reason="Missing or invalid wsa:Action",
+        )
+        xml = build_inbound_fault_envelope(relates_to=relates_to, fault_body_xml=fault_body)
+        log.info(
+            f"{soap_action_short(ACTION_WSA_FAULT) or ACTION_WSA_FAULT}",
+            extra={
+                "soap_leg": "server_response",
+                "soap_action": soap_action_short(ACTION_WSA_FAULT),
+                "http_status": 200,
+                "bytes": len(xml.encode("utf-8")),
+                "fault_subcode": "wse:InvalidMessage",
+            },
+        )
+        return web.Response(
+            text=xml,
+            content_type="application/soap+xml",
+            charset="utf-8",
+        )
+
     log.warning(
-        "Unsupported WSD SOAP action; using plain OK fallback",
-        extra={"action": action, "message_id": relates_to},
-    )
-    log.info(
-        "OK",
+        "Unsupported WSD SOAP action; returning SOAP fault",
         extra={
-            "soap_leg": "server_response",
-            "soap_action": "OK",
-            "http_status": 200,
-            "bytes": len("OK"),
+            "soap_action": soap_action_short(action),
+            "wsa_message_id": relates_to,
         },
     )
-    return web.Response(text="OK", content_type="text/plain")
+    fault_body = build_action_not_supported_fault_body(
+        reason=f"The requested WS-Addressing action is not supported: {action}",
+    )
+    xml = build_inbound_fault_envelope(relates_to=relates_to, fault_body_xml=fault_body)
+    log.info(
+        f"{soap_action_short(ACTION_WSA_FAULT) or ACTION_WSA_FAULT}",
+        extra={
+            "soap_leg": "server_response",
+            "soap_action": soap_action_short(ACTION_WSA_FAULT),
+            "http_status": 200,
+            "bytes": len(xml.encode("utf-8")),
+            "fault_subcode": "wsa:ActionNotSupported",
+            "unsupported_inbound_action": soap_action_short(action),
+        },
+    )
+    return web.Response(
+        text=xml,
+        content_type="application/soap+xml",
+        charset="utf-8",
+    )

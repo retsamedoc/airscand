@@ -325,11 +325,16 @@ async def test_handle_wsd_scanner_status_summary_event_returns_soap_ack() -> Non
 
 
 @pytest.mark.asyncio
-async def test_handle_wsd_non_eventing_action_falls_back_to_plain_ok() -> None:
-    """Unknown SOAP actions use plain-text fallback response."""
+async def test_handle_wsd_unknown_soap_action_returns_action_not_supported_fault() -> None:
+    """Unknown SOAP actions return SOAP 1.2 fault with wsa:ActionNotSupported."""
     response = await handle_wsd(_request(_minimal_action_envelope("urn:example:UnknownAction")))
-    assert response.content_type == "text/plain"
-    assert response.text == "OK"
+    assert response.status == 200
+    assert response.content_type == "application/soap+xml"
+    assert "<soap:Fault>" in response.text
+    assert "<wsa:RelatesTo>urn:uuid:req-1</wsa:RelatesTo>" in response.text
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wsa:ActionNotSupported"
+    assert fault.get("fault_reason", "").startswith("The requested WS-Addressing action")
 
 
 @pytest.mark.asyncio
@@ -342,16 +347,18 @@ async def test_handle_wsd_logs_missing_action_warning(caplog: LogCaptureFixture)
   <soap:Body/>
 </soap:Envelope>"""
     response = await handle_wsd(_request(payload))
-    assert response.content_type == "text/plain"
+    assert response.content_type == "application/soap+xml"
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidMessage"
     assert "Invalid WSD SOAP request (missing Action)" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_handle_wsd_logs_unsupported_action_warning(caplog: LogCaptureFixture) -> None:
-    """Unsupported action fallback logs warning message."""
+    """Unsupported SOAP action logs a warning before returning a fault."""
     caplog.set_level(logging.INFO)
     await handle_wsd(_request(_minimal_action_envelope("urn:example:UnknownAction")))
-    assert "Unsupported WSD SOAP action; using plain OK fallback" in caplog.text
+    assert "Unsupported WSD SOAP action; returning SOAP fault" in caplog.text
 
 
 @pytest.mark.asyncio
