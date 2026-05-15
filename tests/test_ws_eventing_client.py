@@ -1382,6 +1382,8 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
     assert result["retrieve_status"] == "Success"
     assert result["job_id"] == "job-42"
     assert result["retrieve_elapsed_sec"] is not None
+    assert result["lifecycle_state"] == "Completed"
+    assert result["lifecycle_job_id"] == "job-42"
     assert float(result["retrieve_elapsed_sec"] or "0") >= 0.0
     assert result.get("scanner_idle_wait_result") == "skipped"
 

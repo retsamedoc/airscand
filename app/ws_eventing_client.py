@@ -13,6 +13,7 @@ from aiohttp import ClientError
 from app.destinations import DEFAULT_DESTINATIONS, ScanDestination, lookup_destination
 from app.mtom import parse_retrieve_image_mtom
 from app.quirks import ImageDeliveryMode, ScannerProfile
+from app.scan_lifecycle import ScanLifecycle
 from app.scan_storage import save_scan_file
 from app.scanner_status_coordination import (
     await_scanner_idle_after_retrieve,
@@ -1098,6 +1099,12 @@ async def run_scan_available_chain(
     the scanner on **RetrieveImage** timeout or transport error per WIA §7.5. Devices may silently
     ignore CancelJob; the failure is logged and does not raise.
     """
+    lifecycle = ScanLifecycle()
+    lifecycle.mark_discovered()
+
+    def _out(**fields: str | None) -> dict[str, str | None]:
+        return lifecycle.enrich_result(fields)
+
     target_url = resolve_wdp_scan_url(scanner_xaddr)
     if scanner_profile is not None:
         log.info(
@@ -1147,6 +1154,8 @@ async def run_scan_available_chain(
             "Scanner metadata probe failed; continuing scan chain",
             extra={"target_url": target_url, "error": str(exc)},
         )
+
+    lifecycle.mark_capabilities_loaded()
 
     event_payload = scan_available_payload or ""
     event_client_context = scan_parsers.extract_client_context(event_payload)
@@ -1209,31 +1218,32 @@ async def run_scan_available_chain(
                 "request_message_id": exc.request_message_id,
             },
         )
-        return {
-            "target_url": target_url,
+        lifecycle.mark_error()
+        return _out(
+            target_url=target_url,
             **scanner_metadata,
-            "validate_http_status": str(validate_status) if validate_status is not None else None,
-            "validate_message_id": validate_message_id,
-            "validate_status": None,
-            "valid_ticket": None,
-            "destination_token": None,
-            "scan_identifier": scan_parsers.extract_scan_identifier(event_payload),
-            "fault_code": "soap:Client",
-            "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
-            "fault_reason": str(exc),
-            "create_http_status": None,
-            "create_message_id": None,
-            "job_id": None,
-            "retrieve_http_status": None,
-            "retrieve_message_id": None,
-            "retrieve_status": None,
-            "retrieve_fault_code": None,
-            "retrieve_fault_subcode": None,
-            "retrieve_fault_reason": None,
-            "retrieve_elapsed_sec": None,
-            "saved_scan_path": None,
-            "saved_scan_bytes": None,
-        }
+            validate_http_status=str(validate_status) if validate_status is not None else None,
+            validate_message_id=validate_message_id,
+            validate_status=None,
+            valid_ticket=None,
+            destination_token=None,
+            scan_identifier=scan_parsers.extract_scan_identifier(event_payload),
+            fault_code="soap:Client",
+            fault_subcode="airscand:SoapResponseCorrelationMismatch",
+            fault_reason=str(exc),
+            create_http_status=None,
+            create_message_id=None,
+            job_id=None,
+            retrieve_http_status=None,
+            retrieve_message_id=None,
+            retrieve_status=None,
+            retrieve_fault_code=None,
+            retrieve_fault_subcode=None,
+            retrieve_fault_reason=None,
+            retrieve_elapsed_sec=None,
+            saved_scan_path=None,
+            saved_scan_bytes=None,
+        )
     validate_details = scan_parsers.parse_validate_scan_ticket_response(validate_response_text)
     validate_response_message_id = scan_parsers.extract_soap_envelope_message_id(
         validate_response_text
@@ -1286,31 +1296,32 @@ async def run_scan_available_chain(
         or validate_details.get("fault_code")
         or (valid_ticket is not None and valid_ticket != "true")
     ):
-        return {
-            "target_url": target_url,
+        lifecycle.mark_error()
+        return _out(
+            target_url=target_url,
             **scanner_metadata,
-            "validate_http_status": str(validate_status),
-            "validate_message_id": validate_message_id,
-            "validate_status": validate_details.get("status"),
-            "valid_ticket": validate_details.get("valid_ticket"),
-            "destination_token": destination_token,
-            "scan_identifier": scan_identifier,
-            "fault_code": validate_details.get("fault_code"),
-            "fault_subcode": validate_details.get("fault_subcode"),
-            "fault_reason": validate_details.get("fault_reason"),
-            "create_http_status": None,
-            "create_message_id": None,
-            "job_id": None,
-            "retrieve_http_status": None,
-            "retrieve_message_id": None,
-            "retrieve_status": None,
-            "retrieve_fault_code": None,
-            "retrieve_fault_subcode": None,
-            "retrieve_fault_reason": None,
-            "retrieve_elapsed_sec": None,
-            "saved_scan_path": None,
-            "saved_scan_bytes": None,
-        }
+            validate_http_status=str(validate_status),
+            validate_message_id=validate_message_id,
+            validate_status=validate_details.get("status"),
+            valid_ticket=validate_details.get("valid_ticket"),
+            destination_token=destination_token,
+            scan_identifier=scan_identifier,
+            fault_code=validate_details.get("fault_code"),
+            fault_subcode=validate_details.get("fault_subcode"),
+            fault_reason=validate_details.get("fault_reason"),
+            create_http_status=None,
+            create_message_id=None,
+            job_id=None,
+            retrieve_http_status=None,
+            retrieve_message_id=None,
+            retrieve_status=None,
+            retrieve_fault_code=None,
+            retrieve_fault_subcode=None,
+            retrieve_fault_reason=None,
+            retrieve_elapsed_sec=None,
+            saved_scan_path=None,
+            saved_scan_bytes=None,
+        )
 
     create_message_id, create_payload = scan_parsers.build_create_scan_job_request(
         to_url=target_url,
@@ -1342,31 +1353,32 @@ async def run_scan_available_chain(
                 "request_message_id": exc.request_message_id,
             },
         )
-        return {
-            "target_url": target_url,
+        lifecycle.mark_error()
+        return _out(
+            target_url=target_url,
             **scanner_metadata,
-            "validate_http_status": str(validate_status),
-            "validate_message_id": validate_message_id,
-            "validate_status": validate_details.get("status"),
-            "valid_ticket": validate_details.get("valid_ticket"),
-            "destination_token": destination_token,
-            "scan_identifier": scan_identifier,
-            "fault_code": "soap:Client",
-            "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
-            "fault_reason": str(exc),
-            "create_http_status": str(create_status),
-            "create_message_id": create_message_id,
-            "job_id": None,
-            "retrieve_http_status": None,
-            "retrieve_message_id": None,
-            "retrieve_status": None,
-            "retrieve_fault_code": None,
-            "retrieve_fault_subcode": None,
-            "retrieve_fault_reason": None,
-            "retrieve_elapsed_sec": None,
-            "saved_scan_path": None,
-            "saved_scan_bytes": None,
-        }
+            validate_http_status=str(validate_status),
+            validate_message_id=validate_message_id,
+            validate_status=validate_details.get("status"),
+            valid_ticket=validate_details.get("valid_ticket"),
+            destination_token=destination_token,
+            scan_identifier=scan_identifier,
+            fault_code="soap:Client",
+            fault_subcode="airscand:SoapResponseCorrelationMismatch",
+            fault_reason=str(exc),
+            create_http_status=str(create_status),
+            create_message_id=create_message_id,
+            job_id=None,
+            retrieve_http_status=None,
+            retrieve_message_id=None,
+            retrieve_status=None,
+            retrieve_fault_code=None,
+            retrieve_fault_subcode=None,
+            retrieve_fault_reason=None,
+            retrieve_elapsed_sec=None,
+            saved_scan_path=None,
+            saved_scan_bytes=None,
+        )
     create_details = scan_parsers.parse_create_scan_job_response(create_response_text)
     create_used_token = destination_token
     create_used_scan_identifier = scan_identifier
@@ -1421,31 +1433,32 @@ async def run_scan_available_chain(
                     "request_message_id": exc.request_message_id,
                 },
             )
-            return {
-                "target_url": target_url,
+            lifecycle.mark_error()
+            return _out(
+                target_url=target_url,
                 **scanner_metadata,
-                "validate_http_status": str(validate_status),
-                "validate_message_id": validate_message_id,
-                "validate_status": validate_details.get("status"),
-                "valid_ticket": validate_details.get("valid_ticket"),
-                "destination_token": destination_token,
-                "scan_identifier": scan_identifier,
-                "fault_code": "soap:Client",
-                "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
-                "fault_reason": str(exc),
-                "create_http_status": str(create_status),
-                "create_message_id": create_message_id,
-                "job_id": None,
-                "retrieve_http_status": None,
-                "retrieve_message_id": None,
-                "retrieve_status": None,
-                "retrieve_fault_code": None,
-                "retrieve_fault_subcode": None,
-                "retrieve_fault_reason": None,
-                "retrieve_elapsed_sec": None,
-                "saved_scan_path": None,
-                "saved_scan_bytes": None,
-            }
+                validate_http_status=str(validate_status),
+                validate_message_id=validate_message_id,
+                validate_status=validate_details.get("status"),
+                valid_ticket=validate_details.get("valid_ticket"),
+                destination_token=destination_token,
+                scan_identifier=scan_identifier,
+                fault_code="soap:Client",
+                fault_subcode="airscand:SoapResponseCorrelationMismatch",
+                fault_reason=str(exc),
+                create_http_status=str(create_status),
+                create_message_id=create_message_id,
+                job_id=None,
+                retrieve_http_status=None,
+                retrieve_message_id=None,
+                retrieve_status=None,
+                retrieve_fault_code=None,
+                retrieve_fault_subcode=None,
+                retrieve_fault_reason=None,
+                retrieve_elapsed_sec=None,
+                saved_scan_path=None,
+                saved_scan_bytes=None,
+            )
         create_details = scan_parsers.parse_create_scan_job_response(create_response_text)
         create_used_token = None
         create_used_scan_identifier = scan_identifier
@@ -1467,31 +1480,34 @@ async def run_scan_available_chain(
     )
     resolved_job_id = create_details.get("job_id")
     if create_failed or not resolved_job_id:
-        return {
-            "target_url": target_url,
+        lifecycle.mark_error()
+        return _out(
+            target_url=target_url,
             **scanner_metadata,
-            "validate_http_status": str(validate_status),
-            "validate_message_id": validate_message_id,
-            "validate_status": validate_details.get("status"),
-            "valid_ticket": validate_details.get("valid_ticket"),
-            "destination_token": destination_token,
-            "scan_identifier": scan_identifier,
-            "fault_code": create_details.get("fault_code"),
-            "fault_subcode": create_details.get("fault_subcode"),
-            "fault_reason": create_details.get("fault_reason"),
-            "create_http_status": str(create_status),
-            "create_message_id": create_message_id,
-            "job_id": resolved_job_id,
-            "retrieve_http_status": None,
-            "retrieve_message_id": None,
-            "retrieve_status": None,
-            "retrieve_fault_code": None,
-            "retrieve_fault_subcode": None,
-            "retrieve_fault_reason": None,
-            "retrieve_elapsed_sec": None,
-            "saved_scan_path": None,
-            "saved_scan_bytes": None,
-        }
+            validate_http_status=str(validate_status),
+            validate_message_id=validate_message_id,
+            validate_status=validate_details.get("status"),
+            valid_ticket=validate_details.get("valid_ticket"),
+            destination_token=destination_token,
+            scan_identifier=scan_identifier,
+            fault_code=create_details.get("fault_code"),
+            fault_subcode=create_details.get("fault_subcode"),
+            fault_reason=create_details.get("fault_reason"),
+            create_http_status=str(create_status),
+            create_message_id=create_message_id,
+            job_id=resolved_job_id,
+            retrieve_http_status=None,
+            retrieve_message_id=None,
+            retrieve_status=None,
+            retrieve_fault_code=None,
+            retrieve_fault_subcode=None,
+            retrieve_fault_reason=None,
+            retrieve_elapsed_sec=None,
+            saved_scan_path=None,
+            saved_scan_bytes=None,
+        )
+
+    lifecycle.mark_job_created(resolved_job_id)
 
     create_job_token = create_details.get("job_token")
     if image_delivery_mode != "push_only":
@@ -1504,31 +1520,32 @@ async def run_scan_available_chain(
                     "create_message_id": create_message_id,
                 },
             )
-            return {
-                "target_url": target_url,
+            lifecycle.mark_error()
+            return _out(
+                target_url=target_url,
                 **scanner_metadata,
-                "validate_http_status": str(validate_status),
-                "validate_message_id": validate_message_id,
-                "validate_status": validate_details.get("status"),
-                "valid_ticket": validate_details.get("valid_ticket"),
-                "destination_token": destination_token,
-                "scan_identifier": scan_identifier,
-                "fault_code": create_details.get("fault_code"),
-                "fault_subcode": create_details.get("fault_subcode"),
-                "fault_reason": create_details.get("fault_reason"),
-                "create_http_status": str(create_status),
-                "create_message_id": create_message_id,
-                "job_id": resolved_job_id,
-                "retrieve_http_status": None,
-                "retrieve_message_id": None,
-                "retrieve_status": None,
-                "retrieve_fault_code": None,
-                "retrieve_fault_subcode": None,
-                "retrieve_fault_reason": None,
-                "retrieve_elapsed_sec": None,
-                "saved_scan_path": None,
-                "saved_scan_bytes": None,
-            }
+                validate_http_status=str(validate_status),
+                validate_message_id=validate_message_id,
+                validate_status=validate_details.get("status"),
+                valid_ticket=validate_details.get("valid_ticket"),
+                destination_token=destination_token,
+                scan_identifier=scan_identifier,
+                fault_code=create_details.get("fault_code"),
+                fault_subcode=create_details.get("fault_subcode"),
+                fault_reason=create_details.get("fault_reason"),
+                create_http_status=str(create_status),
+                create_message_id=create_message_id,
+                job_id=resolved_job_id,
+                retrieve_http_status=None,
+                retrieve_message_id=None,
+                retrieve_status=None,
+                retrieve_fault_code=None,
+                retrieve_fault_subcode=None,
+                retrieve_fault_reason=None,
+                retrieve_elapsed_sec=None,
+                saved_scan_path=None,
+                saved_scan_bytes=None,
+            )
     elif not create_job_token:
         log.info(
             "Push-only image delivery: CreateScanJob omitted JobToken; skipping pull RetrieveImage",
@@ -1573,35 +1590,38 @@ async def run_scan_available_chain(
                 "scanner_idle_wait_result": idle_wait_result_push,
             },
         )
-        return {
-            "target_url": target_url,
+        lifecycle.mark_completed()
+        return _out(
+            target_url=target_url,
             **scanner_metadata,
-            "validate_http_status": str(validate_status),
-            "validate_message_id": validate_message_id,
-            "validate_status": validate_details.get("status"),
-            "valid_ticket": validate_details.get("valid_ticket"),
-            "destination_token": destination_token,
-            "scan_identifier": scan_identifier,
-            "fault_code": create_details.get("fault_code"),
-            "fault_subcode": create_details.get("fault_subcode"),
-            "fault_reason": create_details.get("fault_reason"),
-            "create_http_status": str(create_status),
-            "create_message_id": create_message_id,
-            "job_id": resolved_job_id,
-            "retrieve_http_status": None,
-            "retrieve_message_id": None,
-            "retrieve_status": "SkippedPushOnly",
-            "retrieve_fault_code": None,
-            "retrieve_fault_subcode": None,
-            "retrieve_fault_reason": None,
-            "retrieve_elapsed_sec": f"{retrieve_elapsed_push:.6f}",
-            "scanner_idle_wait_result": idle_wait_result_push,
-            "saved_scan_path": None,
-            "saved_scan_bytes": None,
-            "pull_retrieve_skipped": "push_only",
-            "image_delivery_mode": image_delivery_mode,
-        }
+            validate_http_status=str(validate_status),
+            validate_message_id=validate_message_id,
+            validate_status=validate_details.get("status"),
+            valid_ticket=validate_details.get("valid_ticket"),
+            destination_token=destination_token,
+            scan_identifier=scan_identifier,
+            fault_code=create_details.get("fault_code"),
+            fault_subcode=create_details.get("fault_subcode"),
+            fault_reason=create_details.get("fault_reason"),
+            create_http_status=str(create_status),
+            create_message_id=create_message_id,
+            job_id=resolved_job_id,
+            retrieve_http_status=None,
+            retrieve_message_id=None,
+            retrieve_status="SkippedPushOnly",
+            retrieve_fault_code=None,
+            retrieve_fault_subcode=None,
+            retrieve_fault_reason=None,
+            retrieve_elapsed_sec=f"{retrieve_elapsed_push:.6f}",
+            scanner_idle_wait_result=idle_wait_result_push,
+            saved_scan_path=None,
+            saved_scan_bytes=None,
+            pull_retrieve_skipped="push_only",
+            image_delivery_mode=image_delivery_mode,
+        )
 
+    if poll_get_job_status_before_retrieve:
+        lifecycle.mark_polling()
     poll_result = await poll_get_job_status_until_ready(
         target_url=target_url,
         job_id=resolved_job_id,
@@ -1621,32 +1641,34 @@ async def run_scan_available_chain(
                 poll_result.get("correlation_fault_reason")
                 or "SOAP response correlation mismatch on GetJobStatus"
             )
-        return {
-            "target_url": target_url,
+        lifecycle.mark_error()
+        return _out(
+            target_url=target_url,
             **scanner_metadata,
-            "validate_http_status": str(validate_status),
-            "validate_message_id": validate_message_id,
-            "validate_status": validate_details.get("status"),
-            "valid_ticket": validate_details.get("valid_ticket"),
-            "destination_token": destination_token,
-            "scan_identifier": scan_identifier,
-            "fault_code": create_details.get("fault_code"),
-            "fault_subcode": create_details.get("fault_subcode"),
-            "fault_reason": create_details.get("fault_reason"),
-            "create_http_status": str(create_status),
-            "create_message_id": create_message_id,
-            "job_id": resolved_job_id,
-            "retrieve_http_status": None,
-            "retrieve_message_id": None,
-            "retrieve_status": None,
-            "retrieve_fault_code": None,
-            "retrieve_fault_subcode": retrieve_sub,
-            "retrieve_fault_reason": retrieve_reason,
-            "retrieve_elapsed_sec": None,
-            "saved_scan_path": None,
-            "saved_scan_bytes": None,
-        }
+            validate_http_status=str(validate_status),
+            validate_message_id=validate_message_id,
+            validate_status=validate_details.get("status"),
+            valid_ticket=validate_details.get("valid_ticket"),
+            destination_token=destination_token,
+            scan_identifier=scan_identifier,
+            fault_code=create_details.get("fault_code"),
+            fault_subcode=create_details.get("fault_subcode"),
+            fault_reason=create_details.get("fault_reason"),
+            create_http_status=str(create_status),
+            create_message_id=create_message_id,
+            job_id=resolved_job_id,
+            retrieve_http_status=None,
+            retrieve_message_id=None,
+            retrieve_status=None,
+            retrieve_fault_code=None,
+            retrieve_fault_subcode=retrieve_sub,
+            retrieve_fault_reason=retrieve_reason,
+            retrieve_elapsed_sec=None,
+            saved_scan_path=None,
+            saved_scan_bytes=None,
+        )
 
+    lifecycle.mark_retrieving()
     retrieve_message_id, retrieve_payload = scan_parsers.build_retrieve_image_request(
         to_url=target_url,
         job_id=resolved_job_id,
@@ -1660,6 +1682,7 @@ async def run_scan_available_chain(
     retrieve_details: dict[str, str | None] = {}
     retrieve_status: int = 0
     retrieve_ct: str | None = None
+    retrieve_ok = False
     try:
         (
             retrieve_status,
@@ -1801,6 +1824,7 @@ async def run_scan_available_chain(
             },
         )
         if cancel_job_on_retrieve_error and resolved_job_id and create_job_token:
+            lifecycle.mark_cancelled()
             await cancel_scan_job(
                 target_url=target_url,
                 job_id=resolved_job_id,
@@ -1861,30 +1885,35 @@ async def run_scan_available_chain(
                 "fault_subcode": retrieve_fault_subcode,
             },
         )
-    return {
-        "target_url": target_url,
+    if not lifecycle.is_terminal():
+        if retrieve_ok:
+            lifecycle.mark_completed()
+        else:
+            lifecycle.mark_error()
+    return _out(
+        target_url=target_url,
         **scanner_metadata,
-        "validate_http_status": str(validate_status),
-        "validate_message_id": validate_message_id,
-        "validate_status": validate_details.get("status"),
-        "valid_ticket": validate_details.get("valid_ticket"),
-        "destination_token": destination_token,
-        "scan_identifier": scan_identifier,
-        "fault_code": create_details.get("fault_code"),
-        "fault_subcode": create_details.get("fault_subcode"),
-        "fault_reason": create_details.get("fault_reason"),
-        "create_http_status": str(create_status),
-        "create_message_id": create_message_id,
-        "job_id": resolved_job_id,
-        "retrieve_http_status": str(retrieve_status),
-        "retrieve_message_id": retrieve_message_id,
-        "retrieve_status": retrieve_details.get("status"),
-        "retrieve_fault_code": retrieve_details.get("fault_code"),
-        "retrieve_fault_subcode": retrieve_details.get("fault_subcode"),
-        "retrieve_fault_reason": retrieve_details.get("fault_reason"),
-        "retrieve_elapsed_sec": f"{retrieve_elapsed_sec:.6f}",
-        "scanner_idle_wait_result": idle_wait_result,
-        "saved_scan_path": saved_scan_path_str,
-        "saved_scan_bytes": str(saved_scan_bytes_val) if saved_scan_bytes_val is not None else None,
-        "image_delivery_mode": image_delivery_mode,
-    }
+        validate_http_status=str(validate_status),
+        validate_message_id=validate_message_id,
+        validate_status=validate_details.get("status"),
+        valid_ticket=validate_details.get("valid_ticket"),
+        destination_token=destination_token,
+        scan_identifier=scan_identifier,
+        fault_code=create_details.get("fault_code"),
+        fault_subcode=create_details.get("fault_subcode"),
+        fault_reason=create_details.get("fault_reason"),
+        create_http_status=str(create_status),
+        create_message_id=create_message_id,
+        job_id=resolved_job_id,
+        retrieve_http_status=str(retrieve_status),
+        retrieve_message_id=retrieve_message_id,
+        retrieve_status=retrieve_details.get("status"),
+        retrieve_fault_code=retrieve_details.get("fault_code"),
+        retrieve_fault_subcode=retrieve_details.get("fault_subcode"),
+        retrieve_fault_reason=retrieve_details.get("fault_reason"),
+        retrieve_elapsed_sec=f"{retrieve_elapsed_sec:.6f}",
+        scanner_idle_wait_result=idle_wait_result,
+        saved_scan_path=saved_scan_path_str,
+        saved_scan_bytes=str(saved_scan_bytes_val) if saved_scan_bytes_val is not None else None,
+        image_delivery_mode=image_delivery_mode,
+    )

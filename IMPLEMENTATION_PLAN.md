@@ -38,6 +38,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Contract / compliance test suite (WS-Eventing §17 + WS-Scan audit):** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 themes for inbound manager and outbound subscriber (lifecycle, faults, Subscribe §5–§8 including `wsa:To` mismatch, omitted/missing `Delivery/@Mode`, default/capped **Expires**, invalid body, registration resubscribe); `tests/test_ws_scan_audit_compliance.py` for WS-Scan audit themes; `tests/test_inbound_eventing.py` covers `grant_expires_from_request` and parser edge cases. *Residual (product-driven only):* richer expiration types, filter dialect negotiation, supported-modes **Detail** on delivery faults.
 - **WS-Scan audit compliance module:** `tests/test_ws_scan_audit_compliance.py` — §6 retrieve timing/fault logs, §7 ack, §11 push_only, §13–§14 parsers/headers, §16 config guard, §17 Get URL.
 - **Developer and security posture (Task 6):** [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md) at repo root (trusted-LAN threat model, private vulnerability reporting, build/test commands); [`README.md`](README.md) links both; `tests/test_repo_policy.py` guards file presence and README linkage. *Why:* operators and contributors need one place for scope and reporting without duplicating `docs/development.md`.
+- **Explicit scan lifecycle state machine (WIA §8 / Task 8):** [`app/scan_lifecycle.py`](app/scan_lifecycle.py) defines guarded states (`Idle` → `Discovered` → `CapabilitiesLoaded` → `JobCreated` → `Polling` | `Retrieving` → `Completed` | `Error` | `Cancelled`); [`run_scan_available_chain`](app/ws_eventing_client.py) records `lifecycle_state`, `lifecycle_path`, `lifecycle_job_id`, and optional `lifecycle_state_violations` on every chain result. Invalid transitions log warnings (strict mode raises for tests). *Why tests matter:* without them, refactors to orchestration can reorder SOAP legs silently; lifecycle fields make phase regressions visible in chain logs and pytest.
 
 ---
 
@@ -55,16 +56,6 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 8. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
-
-**Gap:** State spread across async tasks and flags.
-
-**Done when:** Documented state diagram and enforced transitions (even if internal module only).
-
-**Verification:** Invalid transition attempts raise or log **state violation**; happy path unchanged under tests.
-
----
-
 ### 10. Optional **`specs/`** entry point (documentation) — **done**
 
 **Done:** [`specs/README.md`](specs/README.md) indexes `docs/protocol/`, audits, backlog, and audit-aligned pytest modules.
@@ -74,8 +65,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 ## Suggested execution order for MVP “hardening”
 
 1. **Task 5** (HTTP/SOAP header parity) when a golden Win10 trace is available.
-2. **Task 8** (scan lifecycle state machine) when refactoring orchestration for clearer failure handling.
 
 ---
 
-*Last updated: Task 6 — CONTRIBUTING.md, SECURITY.md, README links, `tests/test_repo_policy.py`.*
+*Last updated: Task 8 — `app/scan_lifecycle.py`, chain lifecycle fields, `tests/test_scan_lifecycle.py`.*
