@@ -574,3 +574,133 @@ async def test_audit_ws_eventing_17_registration_resubscribes_after_maintenance_
     assert sleep_durations[:2] == [2.0, 2.0]
     assert cfg.scanner_eventing_subscription_id == "sub-primary-2"
     assert cfg.scanner_eventing_subscription_id_status == "sub-status-2"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_registration_real_maintenance_resubscribe_no_sleep_patch(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``docs/ws-eventing_audit.md`` §17 — real maintenance + registration backoff without ``asyncio.sleep`` patch.
+
+    Uses ``_renew_delay_seconds`` → 0 so the maintenance loop wakes immediately; failed ``Renew``
+    exits real ``_eventing_maintenance_loop``; the outer loop performs the real 2s backoff once.
+    *Why:* patching ``asyncio.sleep`` hid timing bugs between maintenance exit and resubscribe.
+    """
+    cfg = SimpleNamespace(
+        advertise_addr="192.168.1.50",
+        port=5357,
+        endpoint_path="/wsd",
+        uuid="11111111-2222-3333-4444-555555555555",
+        eventing_notify_to_url="",
+        eventing_preflight_get=True,
+        scanner_subscribe_to_url="",
+        scanner_eventing_subscribe_manager_url="",
+        scanner_eventing_subscribe_manager_reference_parameters_xml="",
+        scanner_eventing_subscription_id="",
+        scanner_eventing_subscription_id_status="",
+        scanner_eventing_subscribe_manager_url_status="",
+        scanner_eventing_subscribe_manager_reference_parameters_xml_status="",
+        scanner_eventing_subscribe_expires="",
+        scanner_eventing_subscribe_expires_status="",
+        scanner_subscribe_destination_tokens={},
+        use_env_subscribe_destination_token_only=False,
+        eventing_renew_after_fraction=0.5,
+        eventing_renew_fallback_duration_sec=3600.0,
+        validate_outbound_soap_response=False,
+    )
+    register_phases: list[str] = []
+    renew_calls = 0
+    resubscribe_complete = asyncio.Event()
+
+    async def fake_discover(_config: object) -> list[str]:
+        return ["http://192.168.1.60:80/WSD/DEVICE"]
+
+    async def fake_preflight(
+        *,
+        scanner_xaddr: str,
+        timeout_sec: float = 5.0,
+        get_to_url: str | None = None,
+        from_address: str | None = None,
+    ) -> dict[str, str | None]:
+        return {"suggested_subscribe_to_url": None, "message_id": "urn:uuid:get-1"}
+
+    async def fake_register(
+        *,
+        scanner_xaddr: str,
+        notify_to: str,
+        timeout_sec: float = 5.0,
+        subscribe_to_url: str | None = None,
+        from_address: str | None = None,
+        subscription_identifier: str | None = None,
+        filter_action: str | None = None,
+        scan_destinations: tuple[tuple[str, str], ...] | None = None,
+        **_kwargs: object,
+    ) -> dict[str, str]:
+        if filter_action == SCANNER_STATUS_SUMMARY_EVENT_ACTION:
+            register_phases.append("status")
+            phase_n = register_phases.count("status")
+        else:
+            register_phases.append("primary")
+            phase_n = register_phases.count("primary")
+        if len(register_phases) >= 4:
+            resubscribe_complete.set()
+        return {
+            "status": "200",
+            "identifier": f"sub-{'status' if filter_action else 'primary'}-{phase_n}",
+            "expires": "PT1H",
+            "subscribe_destination_token": "dest",
+            "subscribe_destination_tokens": {"Scan": "dest"},
+            "subscription_manager_url": (
+                f"http://192.168.1.60:80/WDP/SCAN/mgr-{'status' if filter_action else 'primary'}-{phase_n}"
+            ),
+        }
+
+    async def fake_renew(
+        *,
+        manager_url: str,
+        subscription_id: str = "",
+        reference_parameters_xml: str | None = None,
+        from_address: str | None = None,
+        requested_expires: str = "PT1H",
+        timeout_sec: float = 5.0,
+    ) -> dict[str, str | None]:
+        nonlocal renew_calls
+        renew_calls += 1
+        return {
+            "status": "200",
+            "message_id": "urn:uuid:renew-fail-real-maint",
+            "expires": None,
+            "fault_code": "soap:Sender",
+            "fault_subcode": "wse:UnableToRenew",
+            "fault_reason": "Device rejected renew",
+        }
+
+    async def fake_unsub(
+        *,
+        manager_url: str,
+        subscription_id: str,
+        reference_parameters_xml: str | None = None,
+        from_address: str | None = None,
+        timeout_sec: float = 5.0,
+    ) -> dict[str, str | None]:
+        return {"status": "200"}
+
+    monkeypatch.setattr(main, "_renew_delay_seconds", lambda _expires, _config: 0.0)
+    monkeypatch.setattr(main, "discover_scanner_xaddrs", fake_discover)
+    monkeypatch.setattr(main, "preflight_get_scanner_capabilities", fake_preflight)
+    monkeypatch.setattr(main, "register_with_scanner", fake_register)
+    monkeypatch.setattr(main, "renew_subscription", fake_renew)
+    monkeypatch.setattr(main, "unsubscribe_from_scanner", fake_unsub)
+
+    task = asyncio.create_task(_eventing_registration_loop(cfg))
+    try:
+        await asyncio.wait_for(resubscribe_complete.wait(), timeout=8.0)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert renew_calls >= 1
+    assert register_phases == ["primary", "status", "primary", "status"]
+    assert cfg.scanner_eventing_subscription_id == "sub-primary-2"
+    assert cfg.scanner_eventing_subscription_id_status == "sub-status-2"

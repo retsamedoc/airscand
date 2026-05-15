@@ -47,12 +47,12 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **§1 lifecycle:** happy path Subscribe → Renew → GetStatus → Unsubscribe; **Renew** after monotonic lease expiry → **UnableToRenew** (registry clock only, no asyncio maintenance mocks).
 - **§4 / §11 faults:** parametrized **parse_soap_fault** peer subcode matrix; inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id, **Renew** `wsa:To` mismatch, unknown **Action** → **ActionNotSupported**.
 - **§5–§8 Subscribe validation:** **InvalidExpirationTime**, **DeliveryModeRequestedUnavailable** (non-Push), **FilteringNotSupported** (filter present).
-- **§2 outbound:** primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary; registration loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (patched `main.asyncio.sleep`, no wall-clock waits); outbound **GetStatus** client (`get_subscription_status`, `build_get_status_request`, `parse_get_status_response`).
+- **§2 outbound:** primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary; registration loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (patched `main.asyncio.sleep` in one test; real maintenance + real 2s backoff in `test_audit_ws_eventing_17_registration_real_maintenance_resubscribe_no_sleep_patch`); outbound **GetStatus** client (`get_subscription_status`, `build_get_status_request`, `parse_get_status_response`).
 - **§12 inbound:** expired lease on **GetStatus** → **UnableToRenew**; **GetStatus** does not extend lease (monotonic clock, no asyncio maintenance mocks).
 
-**Residual gap:** Full registration/maintenance loop without patching `asyncio.sleep`; optional WS-Scan audit §11-style module (separate from eventing).
+**Residual gap:** Optional WS-Scan audit §11-style compliance module (separate from eventing); inbound **Subscribe** full §5–§8 negotiation matrix (product-driven).
 
-**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix largely covered; outbound **GetStatus** implemented for diagnostics).
+**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix covered for MVP hardening; outbound **GetStatus** implemented for diagnostics).
 
 **Verification:** CI runs compliance module; each `test_audit_ws_eventing_17_*` name maps to an audit § or fault bullet.
 
@@ -104,4 +104,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: Outbound WS-Eventing **GetStatus** client + audit §12/§17 compliance tests (expired lease, non-mutating inbound GetStatus, outbound parse).*
+*Last updated: Audit §17 registration loop test with real maintenance + real post-maintenance backoff (no ``asyncio.sleep`` patch).*
