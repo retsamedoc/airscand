@@ -22,7 +22,7 @@ The high-level pipeline in the design spec (discovery → HTTP SOAP → WS-Scan 
 |------|--------|------|
 | Discovery | `app.discovery.start_discovery` | UDP **239.255.255.250:3702** listener; answers **Probe**/**Resolve**; sends periodic **Hello** and **Bye** on shutdown. |
 | HTTP server | `app.http_server.start_http_server` | **aiohttp** `Application` bound to `WSD_HOST`/`WSD_PORT`; registers POST routes for SOAP and scan upload. |
-| Eventing registration | `main._eventing_registration_loop` | Discovers scanner **XAddr**, optional preflight **Get**, **Subscribe** (and a second subscription for **ScannerStatusSummaryEvent**), retries with backoff until success. |
+| Eventing registration | `main._eventing_registration_loop`, `main._eventing_maintenance_loop` | Discovers scanner **XAddr**, optional preflight **Get**, **Subscribe** (and a second subscription for **ScannerStatusSummaryEvent**), persists manager URL + **Expires**, runs **Renew** before lease expiry, retries with backoff after failed renew or resubscribe; shutdown **Unsubscribe** is best-effort. |
 
 Signal **SIGINT** / **SIGTERM** trigger `_shutdown_services`: **Unsubscribe** for both subscriptions when IDs are known, then cancel the long-lived tasks. Discovery’s `finally` sends **Bye** before closing the socket.
 
@@ -115,9 +115,9 @@ Implements the flow described in [design.md §6.2](design.md) (metadata probe, v
 
 ### WS-Eventing registration (`main.py` + `app/ws_eventing_client.py`)
 
-- `_eventing_registration_loop` calls `discover_scanner_xaddr`, then optional `preflight_get_scanner_capabilities` (WS-Transfer **Get**) to refine **Subscribe** URL, then `register_with_scanner` for **ScanAvailableEvent** and again with `filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION`.
+- `_eventing_registration_loop` calls `discover_scanner_xaddr`, then optional `preflight_get_scanner_capabilities` (WS-Transfer **Get**) to refine **Subscribe** URL, then `register_with_scanner` for **ScanAvailableEvent** and again with `filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION`. On success it enters **`_eventing_maintenance_loop`**, which schedules **`renew_subscription`** against the stored subscription manager URL (and parallel **`*_status`** fields when both subscriptions exist) until renew fails or the loop exits, prompting resubscribe.
 - **NotifyTo** defaults to `http://{advertise_addr}:{port}{endpoint_path}` unless `WSD_EVENTING_NOTIFY_TO_URL` is set.
-- **Unsubscribe** on shutdown uses subscription manager URLs and reference parameters from **SubscribeResponse** when present.
+- **Unsubscribe** on shutdown (and after failed **Renew** before resubscribe) uses **`_unsubscribe_eventing_best_effort`**, posting to the stored subscription manager **Address** with **ReferenceParameters** XML from **SubscribeResponse** when the device supplies them.
 
 ### Scan storage (`app/scan_storage.py`, `app/scan_receiver.py`)
 
@@ -136,7 +136,7 @@ All settings are environment-driven; see `app/config.py` for the authoritative l
 - **HTTP bind**: `WSD_HOST`, `WSD_PORT`, `WSD_ENDPOINT`, `WSD_SCAN_PATH`, `WSD_OUTPUT_DIR`, `WSD_ADVERTISE_ADDR`.
 - **Identity**: `WSD_UUID` (or state file), `WSD_APP_SEQUENCE_*`, `WSD_METADATA_VERSION`.
 - **Discovery**: `WSD_HELLO_INTERVAL_SEC`, optional `WSD_SCANNER_XADDR` to skip discovery for registration.
-- **Eventing / chain**: `WSD_SCANNER_SUBSCRIBE_TO_URL`, `WSD_EVENTING_NOTIFY_TO_URL`, `WSD_EVENTING_PREFLIGHT_GET`, destination token overrides, idle wait toggles, `WSD_SCANNER_PROFILE`, `WSD_RETRIEVE_IMAGE_TIMEOUT_SEC`.
+- **Eventing / chain**: `WSD_SCANNER_SUBSCRIBE_TO_URL`, `WSD_EVENTING_NOTIFY_TO_URL`, `WSD_EVENTING_PREFLIGHT_GET`, `WSD_EVENTING_RENEW_AFTER_FRACTION`, `WSD_EVENTING_RENEW_MIN_SLEEP_SEC`, `WSD_EVENTING_RENEW_FALLBACK_DURATION_SEC`, destination token overrides, idle wait toggles, `WSD_SCANNER_PROFILE`, `WSD_RETRIEVE_IMAGE_TIMEOUT_SEC`.
 - **Logging**: `WSD_LOG_LEVEL`, `WSD_LOG_JSON`, `WSD_LOG_WRAP`, `WSD_LOG_WRAP_WIDTH`.
 
 ## Observability

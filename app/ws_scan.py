@@ -6,14 +6,25 @@ import uuid
 
 from aiohttp import web
 
+from app.inbound_eventing_registry import inbound_eventing_registry
 from app.quirks import get_profile
 from app.scanner_status_coordination import notify_scanner_state
 from app.soap.addressing import extract_action, extract_message_id_optional, soap_action_short
+from app.soap.builders.faults import (
+    build_addressing_fault_envelope,
+    build_ws_eventing_fault_body,
+)
 from app.soap.envelope import build_inbound_response_envelope
 from app.soap.namespaces import (
     NS_SCA,
     NS_WSE,
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+)
+from app.soap.parsers.eventing import parse_iso8601_duration_to_seconds
+from app.soap.parsers.inbound_eventing import (
+    analyze_inbound_subscribe_envelope,
+    extract_renew_or_getstatus_expires_request,
+    extract_subscription_identifier_from_soap_headers,
 )
 from app.ws_eventing_client import (
     parse_scanner_status_summary_event,
@@ -21,6 +32,9 @@ from app.ws_eventing_client import (
 )
 
 log = logging.getLogger(__name__)
+
+# Upper bound for inbound granted lease (wall-clock); keeps memory leases bounded.
+_DEFAULT_INBOUND_EVENTING_MAX_GRANT_SEC = 86400.0
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
 ACTION_RENEW = f"{NS_WSE}/Renew"
@@ -76,31 +90,82 @@ def extract_message_id(text: str) -> str | None:
     return extract_message_id_optional(text)
 
 
-def build_eventing_subscribe_response(relates_to: str | None, xaddr: str) -> str:
+def _inbound_eventing_max_grant_seconds(config: object | None) -> float:
+    """Return maximum granted lease duration for inbound WS-Eventing (seconds)."""
+    raw = getattr(config, "inbound_eventing_max_grant_sec", None)
+    if raw is not None:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_INBOUND_EVENTING_MAX_GRANT_SEC
+
+
+def _eventing_fault_http_response(
+    *,
+    relates_to: str | None,
+    subcode_local: str,
+    reason: str,
+    response_action_log: str,
+) -> web.Response:
+    """Build HTTP 500 with SOAP 1.2 fault envelope (WS-Addressing fault Action)."""
+    fault_inner = build_ws_eventing_fault_body(subcode_local=subcode_local, reason=reason)
+    xml = build_addressing_fault_envelope(relates_to=relates_to, fault_body_inner_xml=fault_inner)
+    log.info(
+        response_action_log,
+        extra={
+            "soap_leg": "server_response",
+            "soap_action": "SOAPFault",
+            "http_status": 500,
+            "fault_subcode": subcode_local,
+            "bytes": len(xml.encode("utf-8")),
+        },
+    )
+    return web.Response(
+        text=xml,
+        content_type="application/soap+xml",
+        charset="utf-8",
+        status=500,
+    )
+
+
+def build_eventing_subscribe_response(
+    relates_to: str | None,
+    xaddr: str,
+    *,
+    identifier: str | None = None,
+    expires: str | None = None,
+) -> str:
     """Build SOAP SubscribeResponse payload for WS-Eventing."""
+    sub_id = identifier or str(uuid.uuid4())
+    exp = expires or "PT1H"
     body = f"""    <wse:SubscribeResponse>
       <wse:SubscriptionManager>
         <wsa:Address>{xaddr}</wsa:Address>
-        <wsman:Identifier>{uuid.uuid4()}</wsman:Identifier>
+        <wsman:Identifier>{sub_id}</wsman:Identifier>
       </wse:SubscriptionManager>
-      <wse:Expires>PT1H</wse:Expires>
+      <wse:Expires>{exp}</wse:Expires>
     </wse:SubscribeResponse>"""
     return build_inbound_response_envelope(
         action=ACTION_SUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body
     )
 
 
-def build_eventing_renew_response(relates_to: str | None) -> str:
+def build_eventing_renew_response(relates_to: str | None, expires: str) -> str:
     """Build SOAP RenewResponse payload."""
-    body = "    <wse:RenewResponse><wse:Expires>PT1H</wse:Expires></wse:RenewResponse>"
+    body = f"    <wse:RenewResponse><wse:Expires>{expires}</wse:Expires></wse:RenewResponse>"
     return build_inbound_response_envelope(
         action=ACTION_RENEW_RESPONSE, relates_to=relates_to, body_xml=body
     )
 
 
-def build_eventing_get_status_response(relates_to: str | None) -> str:
+def build_eventing_get_status_response(relates_to: str | None, expires: str) -> str:
     """Build SOAP GetStatusResponse payload."""
-    body = "    <wse:GetStatusResponse><wse:Expires>PT1H</wse:Expires></wse:GetStatusResponse>"
+    body = (
+        f"    <wse:GetStatusResponse><wse:Expires>{expires}</wse:Expires></wse:GetStatusResponse>"
+    )
     return build_inbound_response_envelope(
         action=ACTION_GET_STATUS_RESPONSE, relates_to=relates_to, body_xml=body
     )
@@ -169,7 +234,12 @@ async def handle_wsd(request: web.Request) -> web.Response:
     action = extract_action(text)
     relates_to = extract_message_id(text)
     config = request.app.get("config")
+    if config is None:
+        log.error("handle_wsd missing app config")
+        return web.Response(status=500, text="Internal Server Error")
     xaddr = f"http://{config.advertise_addr}:{config.port}{config.endpoint_path}"
+    max_grant = _inbound_eventing_max_grant_seconds(config)
+    reg = inbound_eventing_registry()
 
     log.info(
         f"{soap_action_short(action) or 'unknown'}",
@@ -190,7 +260,24 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_SUBSCRIBE:
         if not relates_to:
             log.warning("Subscribe request missing MessageID")
-        response_xml = build_eventing_subscribe_response(relates_to, xaddr)
+        analysis = analyze_inbound_subscribe_envelope(text, max_grant_seconds=max_grant)
+        if not analysis.ok:
+            assert analysis.fault_subcode is not None
+            assert analysis.fault_reason is not None
+            return _eventing_fault_http_response(
+                relates_to=relates_to,
+                subcode_local=analysis.fault_subcode,
+                reason=analysis.fault_reason,
+                response_action_log=f"SubscribeFault:{analysis.fault_subcode}",
+            )
+        sub_identifier = str(uuid.uuid4())
+        reg.create(sub_identifier, analysis.granted_seconds, analysis.granted_expires_str)
+        response_xml = build_eventing_subscribe_response(
+            relates_to,
+            xaddr,
+            identifier=sub_identifier,
+            expires=analysis.granted_expires_str,
+        )
         log.info(
             f"{soap_action_short(ACTION_SUBSCRIBE_RESPONSE) or 'SubscribeResponse'}",
             extra={
@@ -198,6 +285,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 "soap_action": soap_action_short(ACTION_SUBSCRIBE_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
+                "subscription_id": sub_identifier,
             },
         )
         return web.Response(
@@ -208,7 +296,36 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_RENEW:
         if not relates_to:
             log.warning("Renew request missing MessageID")
-        response_xml = build_eventing_renew_response(relates_to)
+        sub_id = extract_subscription_identifier_from_soap_headers(text)
+        if not sub_id:
+            return _eventing_fault_http_response(
+                relates_to=relates_to,
+                subcode_local="InvalidMessage",
+                reason="Missing wse:Identifier for Renew",
+                response_action_log="RenewFault:InvalidMessage",
+            )
+        raw_expires = extract_renew_or_getstatus_expires_request(text)
+        if raw_expires and raw_expires.strip():
+            try:
+                parse_iso8601_duration_to_seconds(raw_expires.strip())
+            except ValueError:
+                return _eventing_fault_http_response(
+                    relates_to=relates_to,
+                    subcode_local="UnacceptableInitialTerminationTime",
+                    reason=f"Invalid wse:Expires on Renew: {raw_expires!r}",
+                    response_action_log="RenewFault:UnacceptableInitialTerminationTime",
+                )
+        new_expires = reg.renew(
+            sub_id, requested_expires_raw=raw_expires, max_grant_seconds=max_grant
+        )
+        if new_expires is None:
+            return _eventing_fault_http_response(
+                relates_to=relates_to,
+                subcode_local="UnableToRenew",
+                reason="Unknown or expired subscription identifier",
+                response_action_log="RenewFault:UnableToRenew",
+            )
+        response_xml = build_eventing_renew_response(relates_to, new_expires)
         log.info(
             f"{soap_action_short(ACTION_RENEW_RESPONSE) or 'RenewResponse'}",
             extra={
@@ -216,6 +333,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 "soap_action": soap_action_short(ACTION_RENEW_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
+                "subscription_id": sub_id,
             },
         )
         return web.Response(
@@ -226,7 +344,23 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_GET_STATUS:
         if not relates_to:
             log.warning("GetStatus request missing MessageID")
-        response_xml = build_eventing_get_status_response(relates_to)
+        sub_id = extract_subscription_identifier_from_soap_headers(text)
+        if not sub_id:
+            return _eventing_fault_http_response(
+                relates_to=relates_to,
+                subcode_local="InvalidMessage",
+                reason="Missing wse:Identifier for GetStatus",
+                response_action_log="GetStatusFault:InvalidMessage",
+            )
+        expires_live = reg.get_status_expires(sub_id)
+        if expires_live is None:
+            return _eventing_fault_http_response(
+                relates_to=relates_to,
+                subcode_local="UnableToRenew",
+                reason="Unknown or expired subscription identifier",
+                response_action_log="GetStatusFault:UnableToRenew",
+            )
+        response_xml = build_eventing_get_status_response(relates_to, expires_live)
         log.info(
             f"{soap_action_short(ACTION_GET_STATUS_RESPONSE) or 'GetStatusResponse'}",
             extra={
@@ -234,6 +368,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 "soap_action": soap_action_short(ACTION_GET_STATUS_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
+                "subscription_id": sub_id,
             },
         )
         return web.Response(
@@ -244,6 +379,21 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_UNSUBSCRIBE:
         if not relates_to:
             log.warning("Unsubscribe request missing MessageID")
+        sub_id = extract_subscription_identifier_from_soap_headers(text)
+        if not sub_id:
+            return _eventing_fault_http_response(
+                relates_to=relates_to,
+                subcode_local="InvalidMessage",
+                reason="Missing wse:Identifier for Unsubscribe",
+                response_action_log="UnsubscribeFault:InvalidMessage",
+            )
+        if not reg.unsubscribe(sub_id):
+            return _eventing_fault_http_response(
+                relates_to=relates_to,
+                subcode_local="UnableToRenew",
+                reason="Unknown or expired subscription identifier",
+                response_action_log="UnsubscribeFault:UnableToRenew",
+            )
         response_xml = build_eventing_unsubscribe_response(relates_to)
         log.info(
             f"{soap_action_short(ACTION_UNSUBSCRIBE_RESPONSE) or 'UnsubscribeResponse'}",
@@ -252,6 +402,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 "soap_action": soap_action_short(ACTION_UNSUBSCRIBE_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
+                "subscription_id": sub_id,
             },
         )
         return web.Response(

@@ -9,8 +9,7 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 
 - **WS-Eventing lifecycle correctness (critical)**: implement real subscription state for inbound `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` and return proper SOAP faults instead of placeholder success paths.  
   See `ws-eventing_audit` critical/high items (§1, §4, §5, §12).
-- **Outbound eventing lease management (critical)**: persist manager EPR + expiry from `SubscribeResponse`; schedule `Renew`; implement clean subscription teardown behavior.  
-  See `ws-eventing_audit` critical items (§2, §3, §7).
+- **Outbound eventing hardening**: optional outbound `GetStatus`; namespace-aware parsing for manager EPR / bodies (see `ws-eventing_audit` §11, §7 residual); deeper tests for renew timing and fault paths (§17). Core lease path is implemented (`SubscribeResponse` → persisted manager URL + reference parameters + `Expires`, `_eventing_maintenance_loop` → `renew_subscription`, shutdown `_unsubscribe_eventing_best_effort`).
 - **SOAP response correctness on sink endpoint**: replace plain-text fallback responses for unsupported SOAP actions with SOAP fault responses.  
   See `ws-eventing_audit` medium item (§9).
 - **Subscribe contract enforcement**: validate delivery mode/filter/expiration and align `NotifyTo`/`EndTo` handling with profile expectations.  
@@ -67,11 +66,12 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 - `app/soap/xmlutil.py` starter hooks and tests are in place for phase-2 XML work.
 - Documentation refresh completed for architecture/design/status/README and audit path references.
 - Phase 1-4 implementation milestones and Epson WF-3640 validation completed.
+- Outbound WS-Eventing lease management: persisted subscription manager URL and reference parameters, parsed `Expires`, `_eventing_maintenance_loop` with `renew_subscription`, and best-effort `unsubscribe_from_scanner` on shutdown / failed renew (`main.py`, `app/ws_eventing_client.py`, `app/config.py`, `app/soap/parsers/eventing.py`).
 
 ### Historical completion details
 
 - WS-Discovery Probe/Resolve response correctness and correlation.
-- WS-Eventing registration loop with preflight `Get` and subscribe retries.
+- WS-Eventing: discovery-driven registration with preflight `Get`, `Subscribe` retries, outbound `Renew` scheduling (`_eventing_maintenance_loop`), and best-effort `Unsubscribe` on shutdown / failed renew.
 - WS-Scan device-initiated chain (`ValidateScanTicket -> CreateScanJob -> RetrieveImage`) and metadata probe flow.
 - `/scan` persistence hardening (atomic writes, empty payload rejection, improved logging, tests).
 

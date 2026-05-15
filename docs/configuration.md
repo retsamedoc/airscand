@@ -31,6 +31,9 @@ If `WSD_ADVERTISE_ADDR` is unset or empty, the daemon uses `WSD_HOST` when it is
 | `WSD_EVENTING_NOTIFY_TO_URL` | *(empty)* | Optional callback URL for `NotifyTo` / `EndTo` in outbound **Subscribe**. If empty, the daemon builds a URL from `WSD_ADVERTISE_ADDR`, `WSD_PORT`, and `WSD_ENDPOINT`. |
 | `WSD_EVENTING_SUBSCRIPTION_ID` | *(empty)* | Rarely needed; optional subscription identifier override. |
 | `WSD_EVENTING_SUBSCRIPTION_ID_STATUS` | *(empty)* | Optional identifier for the secondary **ScannerStatusSummary** subscription. |
+| `WSD_EVENTING_RENEW_AFTER_FRACTION` | `0.9` | Fraction of the parsed **Expires** duration to wait before sending **Renew**. |
+| `WSD_EVENTING_RENEW_MIN_SLEEP_SEC` | `5` | Minimum sleep when a computed renew delay would otherwise be zero. |
+| `WSD_EVENTING_RENEW_FALLBACK_DURATION_SEC` | `3600` | Seconds used for renew scheduling when **Expires** is missing or unparsable. |
 | `WSD_SUBSCRIBE_DESTINATION_TOKEN` | *(empty)* | If set, forces use of this destination token until registration clears it. |
 
 ## Discovery announcements (Hello)

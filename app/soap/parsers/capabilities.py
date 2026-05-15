@@ -97,11 +97,7 @@ def _parse_specs_block(inner: str) -> InputSourceCapabilities:
     opt_inner = opt_m.group("inner") if opt_m else inner
     resolutions = _parse_width_height_pairs(opt_inner)
 
-    colors = tuple(
-        c.strip()
-        for c in _COLOR_ENTRY_PATTERN.findall(inner)
-        if c.strip()
-    )
+    colors = tuple(c.strip() for c in _COLOR_ENTRY_PATTERN.findall(inner) if c.strip())
 
     min_w = min_h = max_w = max_h = None
     for sm in _SIZE_BLOCK_PATTERN.finditer(inner):

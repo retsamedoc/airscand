@@ -69,6 +69,8 @@ class Config:
     retrieve_image_timeout_sec: float | None = None
     # ``app.quirks.get_profile`` key (e.g. generic, epson_wf_3640); skeleton until post–Phase 5.
     scanner_profile: str = "epson_wf_3640"
+    # Cap inbound WS-Eventing Subscribe/Renew granted lease (seconds); unset uses ``86400``.
+    inbound_eventing_max_grant_sec: float | None = None
     # Per-destination scan settings and output routing (see ``app.destinations``).
     scan_destinations: tuple[ScanDestination, ...] = field(
         default_factory=lambda: DEFAULT_DESTINATIONS,
@@ -164,6 +166,9 @@ class Config:
         raw_fb = os.getenv("WSD_EVENTING_RENEW_FALLBACK_DURATION_SEC")
         if raw_fb is not None and raw_fb.strip() != "":
             self.eventing_renew_fallback_duration_sec = float(raw_fb.strip())
+        raw_inbound = os.getenv("WSD_INBOUND_EVENTING_MAX_GRANT_SEC")
+        if raw_inbound is not None and raw_inbound.strip() != "":
+            self.inbound_eventing_max_grant_sec = float(raw_inbound.strip())
 
 
 def _get_or_create_persistent_uuid() -> str:

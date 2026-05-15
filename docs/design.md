@@ -227,12 +227,12 @@ Two possible modes:
 #### Phase 2 — HTTP + WS-Eventing Registration
 - Start HTTP server
 - Log SOAP requests
-- Implement WS-Eventing registration/subscription handshake required by scanner
+- Implement WS-Eventing **Subscribe** toward the scanner, persist subscription manager EPR fields and **Expires**, run **Renew** on a lease timer, and **Unsubscribe** on shutdown (best-effort)
 - Verify daemon is registered as a scan destination on the device
 
 ##### Success Criteria
 - SOAP requests are observed on HTTP endpoint(s)
-- WS-Eventing registration succeeds and scanner can target daemon as destination
+- WS-Eventing registration succeeds and scanner can target daemon as destination; leases are extended with **Renew** for long-running deployments
 - Status: complete (validated on target Epson workflow)
 - Completion date: 2026-03-26
 - Tested models: Epson WF-3640

@@ -18,6 +18,12 @@ NS_WSA_ROLE_ANONYMOUS = "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/a
 
 WSA_ANONYMOUS = f"{NS_WSA}/role/anonymous"
 
+# SOAP 1.2 fault responses use this WS-Addressing 2004/08 Action on the reply message.
+ACTION_WSA_FAULT = f"{NS_WSA}/fault"
+
+# WS-Eventing push delivery mode URI (must match inbound Subscribe validation).
+WSE_DELIVERY_MODE_PUSH = f"{NS_WSE}/DeliveryModes/Push"
+
 FILTER_DIALECT_DEVPROF_ACTION = "http://schemas.xmlsoap.org/ws/2006/02/devprof/Action"
 SCAN_AVAILABLE_EVENT_ACTION = f"{NS_SCA}/ScanAvailableEvent"
 SCANNER_STATUS_SUMMARY_EVENT_ACTION = f"{NS_SCA}/ScannerStatusSummaryEvent"

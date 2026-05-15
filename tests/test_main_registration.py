@@ -110,7 +110,9 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         assert attempts["register"] == 2
         assert cfg.scanner_eventing_subscription_id == "sub-1"
         assert cfg.scanner_eventing_subscription_id_status == "sub-status-1"
-        assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/submgr"
+        assert (
+            cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/submgr"
+        )
         assert cfg.scanner_eventing_subscribe_manager_url_status == (
             "http://192.168.1.60:80/WDP/SCAN/submgr-status"
         )
@@ -235,7 +237,8 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         assert cfg.scanner_eventing_subscription_id_status == "sub-2"
         assert cfg.scanner_eventing_subscribe_manager_url == "http://192.168.1.60:80/WDP/SCAN/mgr"
         assert (
-            cfg.scanner_eventing_subscribe_manager_url_status == "http://192.168.1.60:80/WDP/SCAN/mgr"
+            cfg.scanner_eventing_subscribe_manager_url_status
+            == "http://192.168.1.60:80/WDP/SCAN/mgr"
         )
         assert cfg.scanner_subscribe_destination_token == ""
         assert cfg.scanner_subscribe_destination_tokens == {}
