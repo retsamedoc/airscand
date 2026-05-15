@@ -22,7 +22,13 @@ from app.ws_eventing_client import (
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
     get_subscription_status,
 )
-from app.ws_scan import ACTION_GET_STATUS, ACTION_RENEW, ACTION_UNSUBSCRIBE, handle_wsd
+from app.ws_scan import (
+    ACTION_GET_STATUS,
+    ACTION_RENEW,
+    ACTION_SUBSCRIBE,
+    ACTION_UNSUBSCRIBE,
+    handle_wsd,
+)
 from main import _eventing_registration_loop
 from tests.test_ws_scan import (
     _management_envelope,
@@ -90,6 +96,15 @@ def test_audit_ws_eventing_17_parse_soap_fault_peer_subcode_matrix(
 
 
 @pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_wsa_to_mismatch_invalid_message() -> None:
+    """``docs/ws-eventing_audit.md`` §5 — ``wsa:To`` must match this manager endpoint."""
+    payload = _subscribe_push_envelope(manager_to="http://wrong-host/wsd")
+    response = await handle_wsd(_request(payload))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidMessage"
+
+
+@pytest.mark.asyncio
 async def test_audit_ws_eventing_17_inbound_subscribe_empty_notifyto_invalid_message(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -148,6 +163,15 @@ async def test_audit_ws_eventing_17_inbound_renew_wsa_to_mismatch_invalid_messag
 
 
 @pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_missing_delivery_mode_unavailable() -> None:
+    """``docs/ws-eventing_audit.md`` §6 — omitted ``Delivery/@Mode`` faults like non-Push."""
+    payload = _subscribe_push_envelope(delivery_mode="")
+    response = await handle_wsd(_request(payload))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:DeliveryModeRequestedUnavailable"
+
+
+@pytest.mark.asyncio
 async def test_audit_ws_eventing_17_inbound_subscribe_non_push_delivery_mode_unavailable() -> None:
     """``docs/ws-eventing_audit.md`` §6 — non-Push ``Delivery/@Mode`` faults with WSE subcode."""
     pull_uri = "http://schemas.xmlsoap.org/ws/2004/08/eventing/DeliveryModes/Pull"
@@ -164,6 +188,36 @@ async def test_audit_ws_eventing_17_inbound_subscribe_filter_filtering_not_suppo
     response = await handle_wsd(_request(_subscribe_push_envelope(include_filter=True)))
     fault = parse_soap_fault(response.text)
     assert fault.get("fault_subcode") == "wse:FilteringNotSupported"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_omitted_expires_grants_default() -> None:
+    """``docs/ws-eventing_audit.md`` §5 — absent ``Expires`` grants server default ``PT1H``."""
+    response = await handle_wsd(_request(_subscribe_push_envelope(expires_inner=None)))
+    assert "SubscribeResponse" in response.text
+    assert "<wse:Expires>PT1H</wse:Expires>" in response.text
+    assert "<wse:SubscriptionManager>" in response.text
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_granted_expires_capped_by_config(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``docs/ws-eventing_audit.md`` §5 — granted ``Expires`` is capped by config max."""
+    monkeypatch.setattr(
+        "app.ws_scan._max_inbound_eventing_grant_seconds", lambda _c: 1800.0, raising=True
+    )
+    response = await handle_wsd(_request(_subscribe_push_envelope(expires_inner="PT48H")))
+    assert "SubscribeResponse" in response.text
+    assert "<wse:Expires>PT30M</wse:Expires>" in response.text
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_invalid_body_invalid_message() -> None:
+    """``docs/ws-eventing_audit.md`` §5 — missing ``wse:Subscribe`` body → ``InvalidMessage``."""
+    response = await handle_wsd(_request(_minimal_action_envelope(ACTION_SUBSCRIBE)))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidMessage"
 
 
 @pytest.mark.asyncio

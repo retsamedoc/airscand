@@ -35,26 +35,12 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Fault Detail extraction (`docs/ws-scan_audit.md` Low §15):** `parse_soap_fault` surfaces `fault_detail` (serialised `Detail` children, truncated at 4 096 chars) and `soap_fault_log_fields` exposes it in `logging extra=` dicts; `SoapHttpClient.post_text` / `post_retrieve_image` log it on failure (`app/soap/fault.py`, `app/soap/transport.py`).
 - **CancelJob (WIA §7.5):** `cancel_scan_job` sends a WS-Scan **CancelJob** SOAP request on demand; `run_scan_available_chain` calls it automatically on **RetrieveImage** timeout or transport error when `cancel_job_on_retrieve_error=True` (default). Devices that ignore cancel are tolerated — failure is logged, not raised. Action constants `ACTION_CANCEL_JOB` / `ACTION_CANCEL_JOB_RESPONSE` added to `app/soap/namespaces.py`; builder `build_cancel_job_request` added to `app/soap/parsers/scan.py` (`tests/test_ws_eventing_client.py` — 6 new tests).
 - **Outbound WS-Eventing GetStatus:** `get_subscription_status`, `build_get_status_request`, `parse_get_status_response` (`app/soap/builders/eventing.py`, `app/soap/parsers/eventing.py`, `app/ws_eventing_client.py`, `tests/test_ws_eventing_client.py`, `tests/test_ws_eventing_audit_compliance.py`). *Why tests matter:* operators can verify device-reported lease without issuing **Renew**; audit §12 outbound residual closed.
+- **Contract / compliance test suite (WS-Eventing §17 + WS-Scan audit):** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 themes for inbound manager and outbound subscriber (lifecycle, faults, Subscribe §5–§8 including `wsa:To` mismatch, omitted/missing `Delivery/@Mode`, default/capped **Expires**, invalid body, registration resubscribe); `tests/test_ws_scan_audit_compliance.py` for WS-Scan audit themes; `tests/test_inbound_eventing.py` covers `grant_expires_from_request` and parser edge cases. *Residual (product-driven only):* richer expiration types, filter dialect negotiation, supported-modes **Detail** on delivery faults.
+- **WS-Scan audit compliance module:** `tests/test_ws_scan_audit_compliance.py` — §6 retrieve timing/fault logs, §7 ack, §11 push_only, §13–§14 parsers/headers, §16 config guard, §17 Get URL.
 
 ---
 
 ## Backlog (incomplete) — by priority
-
-### 4. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
-
-**Progress:** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 themes by name for both inbound manager and outbound subscriber roles:
-
-- **§1 lifecycle:** happy path Subscribe → Renew → GetStatus → Unsubscribe; **Renew** after monotonic lease expiry → **UnableToRenew** (registry clock only, no asyncio maintenance mocks).
-- **§4 / §11 faults:** parametrized **parse_soap_fault** peer subcode matrix; inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id, **Renew** `wsa:To` mismatch, unknown **Action** → **ActionNotSupported**.
-- **§5–§8 Subscribe validation:** **InvalidExpirationTime**, **DeliveryModeRequestedUnavailable** (non-Push), **FilteringNotSupported** (filter present).
-- **§2 outbound:** primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary; registration loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (patched `main.asyncio.sleep` in one test; real maintenance + real 2s backoff in `test_audit_ws_eventing_17_registration_real_maintenance_resubscribe_no_sleep_patch`); outbound **GetStatus** client (`get_subscription_status`, `build_get_status_request`, `parse_get_status_response`).
-- **§12 inbound:** expired lease on **GetStatus** → **UnableToRenew**; **GetStatus** does not extend lease (monotonic clock, no asyncio maintenance mocks).
-
-**Residual gap:** Inbound **Subscribe** full §5–§8 negotiation matrix (product-driven). WS-Scan audit compliance module added (`tests/test_ws_scan_audit_compliance.py` — §6 retrieve timing/fault logs, §7 ack, §11 push_only, §13–§14 parsers/headers, §16 config guard, §17 Get URL).
-
-**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix covered for MVP hardening; WS-Scan audit-named module covers resolved audit themes; outbound **GetStatus** implemented for diagnostics).
-
-**Verification:** CI runs compliance module; each `test_audit_ws_eventing_17_*` name maps to an audit § or fault bullet.
 
 ---
 
@@ -96,8 +82,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Task 4** (compliance tests) after behavior stabilizes; remaining items per product need (bounded **RetrieveImage** retry, far-term items).
+1. **Task 5** (HTTP/SOAP header parity) when a golden Win10 trace is available; then **Task 6** (CONTRIBUTING/SECURITY) per release hygiene.
 
 ---
 
-*Last updated: WS-Scan audit compliance module (`tests/test_ws_scan_audit_compliance.py`) + `specs/README.md` index.*
+*Last updated: inbound Subscribe §5–§8 audit compliance tests + `grant_expires_from_request` unit tests (Task 4 closed for MVP).*

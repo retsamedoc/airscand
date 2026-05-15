@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.soap.parsers.inbound_eventing import (
+    grant_expires_from_request,
     inbound_subscribe_expires_fault_reason,
     normalize_eventing_epr_address,
     parse_inbound_subscribe_body,
@@ -102,3 +103,33 @@ def test_parse_inbound_subscribe_body_endto_reference_parameters_roundtrip() -> 
     assert parsed.end_to_reference_parameters_xml is not None
     assert "ReferenceParameters" in parsed.end_to_reference_parameters_xml
     assert "urn:uuid:rp-1" in parsed.end_to_reference_parameters_xml
+
+
+def test_grant_expires_from_request_defaults_when_absent() -> None:
+    """Omitted ``Expires`` yields the configured default duration and lease seconds."""
+    granted_str, grant_sec = grant_expires_from_request(None)
+    assert granted_str == "PT1H"
+    assert grant_sec == 3600.0
+
+
+def test_grant_expires_from_request_caps_at_max_seconds() -> None:
+    """Requested lease longer than ``max_seconds`` is truncated in the grant string."""
+    granted_str, grant_sec = grant_expires_from_request("PT48H", max_seconds=3600.0)
+    assert granted_str == "PT1H"
+    assert grant_sec == 3600.0
+
+
+def test_grant_expires_from_request_preserves_request_when_under_cap() -> None:
+    """Shorter requested durations are granted verbatim when within the cap."""
+    granted_str, grant_sec = grant_expires_from_request("PT30M", max_seconds=86400.0)
+    assert granted_str == "PT30M"
+    assert grant_sec == 1800.0
+
+
+def test_parse_inbound_subscribe_body_missing_subscribe_returns_none() -> None:
+    """Malformed subscribe bodies without ``wse:Subscribe`` return ``None``."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body/>
+</soap:Envelope>"""
+    assert parse_inbound_subscribe_body(xml) is None
