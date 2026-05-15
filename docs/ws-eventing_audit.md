@@ -216,9 +216,9 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ### 17. Tests do not assert full spec-level lifecycle or faults
 
-**Code:** [`tests/test_ws_scan.py`](../tests/test_ws_scan.py) checks response action names for eventing operations; [`tests/test_ws_eventing_client.py`](../tests/test_ws_eventing_client.py) exercises subscribe/renew/unsubscribe XML, `parse_renew_response`, and mocked `renew_subscription` / `unsubscribe_from_scanner`; [`tests/test_main_registration.py`](../tests/test_main_registration.py) asserts manager URL + subscription id persistence after registration (maintenance loop stubbed). Still light on end-to-end lease timing, inbound fault mapping, outbound `GetStatus`, and `SubscriptionEnd`.
+**Code:** [`tests/test_ws_scan.py`](../tests/test_ws_scan.py) checks response action names for eventing operations; [`tests/test_ws_eventing_client.py`](../tests/test_ws_eventing_client.py) exercises subscribe/renew/unsubscribe XML, `parse_renew_response`, and mocked `renew_subscription` / `unsubscribe_from_scanner`; [`tests/test_main_registration.py`](../tests/test_main_registration.py) asserts manager URL + subscription id persistence after registration (maintenance loop stubbed). [`tests/test_ws_eventing_audit_compliance.py`](../tests/test_ws_eventing_audit_compliance.py) adds §17-style fault/lifecycle checks (inbound manager edge faults, outbound renew failure → best-effort unsubscribe). Still light on end-to-end lease timing, outbound `GetStatus`, and full **registration**-loop resubscribe without heavy asyncio patching.
 
-**Recommendation:** Add contract tests per §11 checklist.
+**Recommendation:** Add contract tests per §11 checklist; extend the compliance module for remaining matrix rows.
 
 ---
 

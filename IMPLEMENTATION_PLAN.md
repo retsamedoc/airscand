@@ -37,7 +37,9 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ### 4. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
-**Gap:** Limited tests for **fault mapping**, **subscription lifecycle** edge cases, **Renew** failure leading to resubscribe, **inbound** manager behavior.
+**Progress:** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 / §1 / §2 / §4 / §5 themes by name: inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id faults, **Renew** `wsa:To` mismatch, outbound **Renew** SOAP fault → **Unsubscribe** best-effort (`main._eventing_maintenance_loop`).
+
+**Residual gap:** Full outer **registration** loop proving backoff + second **Subscribe** after maintenance exit (without brittle global `asyncio.sleep` patches); outbound **Renew** failure with dual subscriptions (primary + ScannerStatusSummary); more **parse_soap_fault** / peer fault matrix fixtures.
 
 **Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays.
 
@@ -121,4 +123,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: pull vs push image delivery (`push_only` profile, `WSD_IMAGE_DELIVERY_MODE`, `tests/test_ws_eventing_client.py`); backlog renumbered 4–11.*
+*Last updated: WS-Eventing §17 compliance tests (`tests/test_ws_eventing_audit_compliance.py`); Task 4 backlog narrowed; backlog renumbered 4–11.*
