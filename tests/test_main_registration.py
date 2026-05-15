@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import runpy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -39,12 +40,12 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
     )
     attempts = {"discover": 0, "register": 0, "preflight": 0}
 
-    async def fake_discover(_config: object) -> str | None:
+    async def fake_discover(_config: object) -> list[str] | None:
         attempts["discover"] += 1
         if attempts["discover"] < 2:
             return None
         if attempts["discover"] == 2:
-            return "http://192.168.1.60:80/WSD/DEVICE"
+            return ["http://192.168.1.60:80/WSD/DEVICE"]
         return None
 
     async def fake_register(
@@ -97,7 +98,7 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
     async def fake_maintenance(_config: object, *, client_from_address: str) -> None:
         maintenance_done.set()
 
-    monkeypatch.setattr(main, "discover_scanner_xaddr", fake_discover)
+    monkeypatch.setattr(main, "discover_scanner_xaddrs", fake_discover)
     monkeypatch.setattr(main, "preflight_get_scanner_capabilities", fake_preflight_wdp)
     monkeypatch.setattr(main, "register_with_scanner", fake_register)
     orig_maintenance = main._eventing_maintenance_loop
@@ -176,10 +177,10 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
     calls = []
     discover_calls = {"n": 0}
 
-    async def fake_discover(_config: object) -> str | None:
+    async def fake_discover(_config: object) -> list[str] | None:
         discover_calls["n"] += 1
         if discover_calls["n"] == 1:
-            return "http://192.168.1.60:80/WSD/DEVICE"
+            return ["http://192.168.1.60:80/WSD/DEVICE"]
         return None
 
     async def fake_preflight(
@@ -221,7 +222,7 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
     async def fake_maintenance(_config: object, *, client_from_address: str) -> None:
         maintenance_done.set()
 
-    monkeypatch.setattr(main, "discover_scanner_xaddr", fake_discover)
+    monkeypatch.setattr(main, "discover_scanner_xaddrs", fake_discover)
     monkeypatch.setattr(main, "preflight_get_scanner_capabilities", fake_preflight)
     monkeypatch.setattr(main, "register_with_scanner", fake_register)
     orig_maintenance = main._eventing_maintenance_loop
@@ -243,6 +244,122 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         assert cfg.scanner_subscribe_destination_token == ""
         assert cfg.scanner_subscribe_destination_tokens == {}
         assert cfg.use_env_subscribe_destination_token_only is False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        main._eventing_maintenance_loop = orig_maintenance  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_eventing_registration_failover_second_xaddr_after_preflight_timeout(
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
+    """When the first discovered **XAddr** fails to connect, the next candidate is used.
+
+    *Why:* printers often publish multiple **XAddrs**; the first may be an unreachable alias.
+    """
+    cfg = SimpleNamespace(
+        advertise_addr="192.168.1.50",
+        port=5357,
+        endpoint_path="/wsd",
+        uuid="11111111-2222-3333-4444-555555555555",
+        eventing_notify_to_url="",
+        eventing_preflight_get=True,
+        scanner_subscribe_to_url="",
+        scanner_eventing_subscribe_manager_url="",
+        scanner_eventing_subscription_id="",
+        scanner_eventing_subscription_id_status="",
+        scanner_subscribe_destination_tokens={},
+        use_env_subscribe_destination_token_only=False,
+        eventing_renew_after_fraction=0.9,
+        eventing_renew_min_sleep_sec=5.0,
+        eventing_renew_fallback_duration_sec=3600.0,
+    )
+    caplog.set_level(logging.WARNING)
+
+    async def fake_discover(_config: object) -> list[str] | None:
+        return [
+            "http://192.168.1.99:80/WSD/DEVICE",
+            "http://192.168.1.60:80/WSD/DEVICE",
+        ]
+
+    preflight_calls: list[str] = []
+
+    async def fake_preflight(
+        *,
+        scanner_xaddr: str,
+        timeout_sec: float = 5.0,
+        get_to_url: str | None = None,
+        from_address: str | None = None,
+    ) -> dict[str, str | None]:
+        preflight_calls.append(scanner_xaddr)
+        if scanner_xaddr == "http://192.168.1.99:80/WSD/DEVICE":
+            raise asyncio.TimeoutError()
+        assert scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
+        assert get_to_url == "http://192.168.1.60:80/WDP/SCAN"
+        assert from_address == "urn:uuid:11111111-2222-3333-4444-555555555555"
+        return {"suggested_subscribe_to_url": None, "message_id": "urn:uuid:get-1"}
+
+    register_calls: list[str] = []
+
+    async def fake_register(
+        *,
+        scanner_xaddr: str,
+        notify_to: str,
+        timeout_sec: float = 5.0,
+        subscribe_to_url: str | None = None,
+        from_address: str | None = None,
+        subscription_identifier: str | None = None,
+        filter_action: str | None = None,
+        scan_destinations: tuple[tuple[str, str], ...] | None = None,
+    ) -> dict[str, str]:
+        register_calls.append(scanner_xaddr)
+        assert scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
+        assert subscribe_to_url == "http://192.168.1.60:80/WDP/SCAN"
+        assert notify_to == "http://192.168.1.50:5357/wsd"
+        assert from_address == "urn:uuid:11111111-2222-3333-4444-555555555555"
+        n = len(register_calls)
+        return {
+            "status": "200",
+            "identifier": f"sub-{n}",
+            "expires": "PT1H",
+            "subscribe_destination_token": None,
+            "subscription_manager_url": f"http://192.168.1.60:80/WDP/SCAN/mgr{n}",
+        }
+
+    maintenance_done = asyncio.Event()
+
+    async def fake_maintenance(_config: object, *, client_from_address: str) -> None:
+        maintenance_done.set()
+
+    monkeypatch.setattr(main, "discover_scanner_xaddrs", fake_discover)
+    monkeypatch.setattr(main, "preflight_get_scanner_capabilities", fake_preflight)
+    monkeypatch.setattr(main, "register_with_scanner", fake_register)
+    orig_maintenance = main._eventing_maintenance_loop
+    main._eventing_maintenance_loop = fake_maintenance  # type: ignore[method-assign]
+    try:
+        task = asyncio.create_task(_eventing_registration_loop(cfg))
+        await asyncio.wait_for(maintenance_done.wait(), timeout=5.0)
+        assert preflight_calls == [
+            "http://192.168.1.99:80/WSD/DEVICE",
+            "http://192.168.1.60:80/WSD/DEVICE",
+        ]
+        assert register_calls == [
+            "http://192.168.1.60:80/WSD/DEVICE",
+            "http://192.168.1.60:80/WSD/DEVICE",
+        ]
+        assert cfg.scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
+        assert cfg.scanner_eventing_subscription_id == "sub-1"
+        assert cfg.scanner_eventing_subscription_id_status == "sub-2"
+        assert any(
+            r.message == "Scanner XAddr unreachable during registration; trying next candidate"
+            for r in caplog.records
+        )
 
         task.cancel()
         try:

@@ -8,12 +8,15 @@ import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 from app.config import Config
-from app.discovery import discover_scanner_xaddr, start_discovery
+from app.discovery import discover_scanner_xaddrs, start_discovery
 from app.http_server import start_http_server
 from app.inbound_eventing_registry import get_inbound_subscription_registry
 from app.inbound_subscription_end_delivery import dispatch_pending_inbound_subscription_ends
 from app.logging import setup_logging
-from app.soap.transport import configure_soap_http_client_from_config
+from app.soap.transport import (
+    configure_soap_http_client_from_config,
+    is_scanner_xaddr_transport_failover,
+)
 from app.ws_eventing_client import (
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
     parse_iso8601_duration_to_seconds,
@@ -204,177 +207,218 @@ async def _eventing_registration_loop(config: Config) -> None:
 
     while True:
         try:
-            scanner_xaddr = await discover_scanner_xaddr(config)
-            if not scanner_xaddr:
+            scanner_xaddr_candidates = await discover_scanner_xaddrs(config)
+            if not scanner_xaddr_candidates:
                 log.info("Scanner endpoint not yet discovered; retrying registration")
             else:
-                config.scanner_xaddr = scanner_xaddr
-                preflight_details = None
-                subscribe_to_url = _resolve_subscribe_to_url(config, scanner_xaddr)
-                if getattr(config, "eventing_preflight_get", True):
-                    preflight_details = await preflight_get_scanner_capabilities(
-                        scanner_xaddr=scanner_xaddr,
-                        get_to_url=subscribe_to_url,
-                        from_address=client_from_address,
+                registration_finished = False
+                for attempt_index, scanner_xaddr in enumerate(scanner_xaddr_candidates):
+                    log.info(
+                        "Scanner registration trying discovered XAddr",
+                        extra={
+                            "scanner_xaddr": scanner_xaddr,
+                            "xaddr_attempt_index": attempt_index,
+                            "xaddr_candidates_total": len(scanner_xaddr_candidates),
+                        },
                     )
-                    preflight_subscribe_to_url = preflight_details.get("suggested_subscribe_to_url")
-                    if preflight_subscribe_to_url:
-                        subscribe_to_url = preflight_subscribe_to_url
-                log.debug(
-                    "Scanner registration subscribe destination selected",
-                    extra={
-                        "scanner_xaddr": scanner_xaddr,
-                        "subscribe_to_url": subscribe_to_url,
-                        "preflight_message_id": (preflight_details or {}).get("message_id"),
-                    },
-                )
-                subscription_identifier = f"urn:uuid:{uuid.uuid4()}"
-                result = await register_with_scanner(
-                    scanner_xaddr=scanner_xaddr,
-                    subscribe_to_url=subscribe_to_url,
-                    notify_to=notify_to,
-                    from_address=client_from_address,
-                    subscription_identifier=subscription_identifier,
-                )
-                status = int(result.get("status") or "0")
-                if result.get("identifier") and (status == 0 or 200 <= status < 300):
-                    sub_id = str(result.get("identifier") or "").strip()
-                    mgr_url = (result.get("subscription_manager_url") or "").strip()
-                    mgr_ref = str(
-                        result.get("subscription_manager_reference_parameters_xml") or ""
-                    ).strip()
-                    if not mgr_url:
-                        log.warning(
-                            "SubscribeResponse missing SubscriptionManager address; "
-                            "outbound Unsubscribe will be skipped until resubscribe",
+                    config.scanner_xaddr = scanner_xaddr
+                    try:
+                        preflight_details = None
+                        subscribe_to_url = _resolve_subscribe_to_url(config, scanner_xaddr)
+                        if getattr(config, "eventing_preflight_get", True):
+                            preflight_details = await preflight_get_scanner_capabilities(
+                                scanner_xaddr=scanner_xaddr,
+                                get_to_url=subscribe_to_url,
+                                from_address=client_from_address,
+                            )
+                            preflight_subscribe_to_url = preflight_details.get(
+                                "suggested_subscribe_to_url"
+                            )
+                            if preflight_subscribe_to_url:
+                                subscribe_to_url = preflight_subscribe_to_url
+                        log.debug(
+                            "Scanner registration subscribe destination selected",
                             extra={
                                 "scanner_xaddr": scanner_xaddr,
                                 "subscribe_to_url": subscribe_to_url,
+                                "preflight_message_id": (preflight_details or {}).get("message_id"),
                             },
                         )
-                    setattr(config, "scanner_eventing_subscribe_manager_url", mgr_url)
-                    setattr(
-                        config,
-                        "scanner_eventing_subscribe_manager_reference_parameters_xml",
-                        mgr_ref,
-                    )
-                    setattr(config, "scanner_eventing_subscription_id", sub_id)
-                    setattr(
-                        config,
-                        "scanner_eventing_subscribe_expires",
-                        str(result.get("expires") or "").strip(),
-                    )
-                    dest_tok = str(result.get("subscribe_destination_token") or "").strip()
-                    setattr(config, "scanner_subscribe_destination_token", dest_tok)
-                    raw_map = result.get("subscribe_destination_tokens")
-                    if isinstance(raw_map, dict):
-                        setattr(
-                            config,
-                            "scanner_subscribe_destination_tokens",
-                            {str(k): str(v) for k, v in raw_map.items()},
-                        )
-                    else:
-                        setattr(config, "scanner_subscribe_destination_tokens", {})
-                    setattr(config, "use_env_subscribe_destination_token_only", False)
-                    setattr(config, "scanner_eventing_subscription_id_status", "")
-                    setattr(config, "scanner_eventing_subscribe_expires_status", "")
-                    setattr(config, "scanner_eventing_subscribe_manager_url_status", "")
-                    setattr(
-                        config,
-                        "scanner_eventing_subscribe_manager_reference_parameters_xml_status",
-                        "",
-                    )
-                    status_sub_identifier = f"urn:uuid:{uuid.uuid4()}"
-                    try:
-                        status_result = await register_with_scanner(
+                        subscription_identifier = f"urn:uuid:{uuid.uuid4()}"
+                        result = await register_with_scanner(
                             scanner_xaddr=scanner_xaddr,
                             subscribe_to_url=subscribe_to_url,
                             notify_to=notify_to,
                             from_address=client_from_address,
-                            subscription_identifier=status_sub_identifier,
-                            filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+                            subscription_identifier=subscription_identifier,
                         )
-                        st2 = int(status_result.get("status") or "0")
-                        if status_result.get("identifier") and (st2 == 0 or 200 <= st2 < 300):
-                            mgr_s = (status_result.get("subscription_manager_url") or "").strip()
-                            mgr_ref_s = str(
-                                status_result.get("subscription_manager_reference_parameters_xml")
-                                or ""
-                            ).strip()
-                            if not mgr_s:
-                                log.warning(
-                                    "ScannerStatusSummary SubscribeResponse missing "
-                                    "SubscriptionManager address; Unsubscribe for that subscription "
-                                    "will be skipped",
-                                    extra={"scanner_xaddr": scanner_xaddr},
-                                )
-                            setattr(
-                                config,
-                                "scanner_eventing_subscription_id_status",
-                                str(status_result.get("identifier") or "").strip(),
-                            )
-                            setattr(config, "scanner_eventing_subscribe_manager_url_status", mgr_s)
-                            setattr(
-                                config,
-                                "scanner_eventing_subscribe_manager_reference_parameters_xml_status",
-                                mgr_ref_s,
-                            )
-                            setattr(
-                                config,
-                                "scanner_eventing_subscribe_expires_status",
-                                str(status_result.get("expires") or "").strip(),
-                            )
-                            log.info(
-                                "Scanner ScannerStatusSummaryEvent subscribe succeeded",
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if is_scanner_xaddr_transport_failover(exc) and attempt_index + 1 < len(
+                            scanner_xaddr_candidates
+                        ):
+                            log.warning(
+                                "Scanner XAddr unreachable during registration; trying next candidate",
                                 extra={
                                     "scanner_xaddr": scanner_xaddr,
-                                    "subscription_id_status": status_result.get("identifier"),
+                                    "xaddr_attempt_index": attempt_index,
+                                    "xaddr_candidates_total": len(scanner_xaddr_candidates),
+                                    "error": str(exc),
                                 },
+                            )
+                            continue
+                        raise
+
+                    status = int(result.get("status") or "0")
+                    if result.get("identifier") and (status == 0 or 200 <= status < 300):
+                        sub_id = str(result.get("identifier") or "").strip()
+                        mgr_url = (result.get("subscription_manager_url") or "").strip()
+                        mgr_ref = str(
+                            result.get("subscription_manager_reference_parameters_xml") or ""
+                        ).strip()
+                        if not mgr_url:
+                            log.warning(
+                                "SubscribeResponse missing SubscriptionManager address; "
+                                "outbound Unsubscribe will be skipped until resubscribe",
+                                extra={
+                                    "scanner_xaddr": scanner_xaddr,
+                                    "subscribe_to_url": subscribe_to_url,
+                                },
+                            )
+                        setattr(config, "scanner_eventing_subscribe_manager_url", mgr_url)
+                        setattr(
+                            config,
+                            "scanner_eventing_subscribe_manager_reference_parameters_xml",
+                            mgr_ref,
+                        )
+                        setattr(config, "scanner_eventing_subscription_id", sub_id)
+                        setattr(
+                            config,
+                            "scanner_eventing_subscribe_expires",
+                            str(result.get("expires") or "").strip(),
+                        )
+                        dest_tok = str(result.get("subscribe_destination_token") or "").strip()
+                        setattr(config, "scanner_subscribe_destination_token", dest_tok)
+                        raw_map = result.get("subscribe_destination_tokens")
+                        if isinstance(raw_map, dict):
+                            setattr(
+                                config,
+                                "scanner_subscribe_destination_tokens",
+                                {str(k): str(v) for k, v in raw_map.items()},
                             )
                         else:
-                            setattr(config, "scanner_eventing_subscribe_expires_status", "")
-                            log.warning(
-                                "Scanner ScannerStatusSummaryEvent subscribe missing id or non-success",
-                                extra={
-                                    "scanner_xaddr": scanner_xaddr,
-                                    "status": status_result.get("status"),
-                                    "fault_subcode": status_result.get("fault_subcode"),
-                                },
+                            setattr(config, "scanner_subscribe_destination_tokens", {})
+                        setattr(config, "use_env_subscribe_destination_token_only", False)
+                        setattr(config, "scanner_eventing_subscription_id_status", "")
+                        setattr(config, "scanner_eventing_subscribe_expires_status", "")
+                        setattr(config, "scanner_eventing_subscribe_manager_url_status", "")
+                        setattr(
+                            config,
+                            "scanner_eventing_subscribe_manager_reference_parameters_xml_status",
+                            "",
+                        )
+                        status_sub_identifier = f"urn:uuid:{uuid.uuid4()}"
+                        try:
+                            status_result = await register_with_scanner(
+                                scanner_xaddr=scanner_xaddr,
+                                subscribe_to_url=subscribe_to_url,
+                                notify_to=notify_to,
+                                from_address=client_from_address,
+                                subscription_identifier=status_sub_identifier,
+                                filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION,
                             )
-                    except Exception:
-                        log.exception(
-                            "Scanner ScannerStatusSummaryEvent subscribe failed",
+                            st2 = int(status_result.get("status") or "0")
+                            if status_result.get("identifier") and (st2 == 0 or 200 <= st2 < 300):
+                                mgr_s = (
+                                    status_result.get("subscription_manager_url") or ""
+                                ).strip()
+                                mgr_ref_s = str(
+                                    status_result.get(
+                                        "subscription_manager_reference_parameters_xml"
+                                    )
+                                    or ""
+                                ).strip()
+                                if not mgr_s:
+                                    log.warning(
+                                        "ScannerStatusSummary SubscribeResponse missing "
+                                        "SubscriptionManager address; Unsubscribe for that subscription "
+                                        "will be skipped",
+                                        extra={"scanner_xaddr": scanner_xaddr},
+                                    )
+                                setattr(
+                                    config,
+                                    "scanner_eventing_subscription_id_status",
+                                    str(status_result.get("identifier") or "").strip(),
+                                )
+                                setattr(
+                                    config, "scanner_eventing_subscribe_manager_url_status", mgr_s
+                                )
+                                setattr(
+                                    config,
+                                    "scanner_eventing_subscribe_manager_reference_parameters_xml_status",
+                                    mgr_ref_s,
+                                )
+                                setattr(
+                                    config,
+                                    "scanner_eventing_subscribe_expires_status",
+                                    str(status_result.get("expires") or "").strip(),
+                                )
+                                log.info(
+                                    "Scanner ScannerStatusSummaryEvent subscribe succeeded",
+                                    extra={
+                                        "scanner_xaddr": scanner_xaddr,
+                                        "subscription_id_status": status_result.get("identifier"),
+                                    },
+                                )
+                            else:
+                                setattr(config, "scanner_eventing_subscribe_expires_status", "")
+                                log.warning(
+                                    "Scanner ScannerStatusSummaryEvent subscribe missing id or non-success",
+                                    extra={
+                                        "scanner_xaddr": scanner_xaddr,
+                                        "status": status_result.get("status"),
+                                        "fault_subcode": status_result.get("fault_subcode"),
+                                    },
+                                )
+                        except Exception:
+                            log.exception(
+                                "Scanner ScannerStatusSummaryEvent subscribe failed",
+                                extra={"scanner_xaddr": scanner_xaddr},
+                            )
+                        log.info(
+                            "Scanner registration succeeded",
+                            extra={
+                                "scanner_xaddr": scanner_xaddr,
+                                "subscribe_to_url": subscribe_to_url,
+                                "subscription_manager_url": mgr_url,
+                                "subscription_id": result.get("identifier"),
+                                "subscribe_destination_token": result.get(
+                                    "subscribe_destination_token"
+                                ),
+                                "subscribe_destination_tokens_count": len(
+                                    getattr(config, "scanner_subscribe_destination_tokens", {})
+                                    or {}
+                                ),
+                                "expires": result.get("expires"),
+                                "subscription_id_status": getattr(
+                                    config, "scanner_eventing_subscription_id_status", ""
+                                )
+                                or None,
+                            },
+                        )
+                        await _eventing_maintenance_loop(
+                            config, client_from_address=client_from_address
+                        )
+                        log.info(
+                            "Eventing lease maintenance ended; resubscribing",
                             extra={"scanner_xaddr": scanner_xaddr},
                         )
-                    log.info(
-                        "Scanner registration succeeded",
-                        extra={
-                            "scanner_xaddr": scanner_xaddr,
-                            "subscribe_to_url": subscribe_to_url,
-                            "subscription_manager_url": mgr_url,
-                            "subscription_id": result.get("identifier"),
-                            "subscribe_destination_token": result.get(
-                                "subscribe_destination_token"
-                            ),
-                            "subscribe_destination_tokens_count": len(
-                                getattr(config, "scanner_subscribe_destination_tokens", {}) or {}
-                            ),
-                            "expires": result.get("expires"),
-                            "subscription_id_status": getattr(
-                                config, "scanner_eventing_subscription_id_status", ""
-                            )
-                            or None,
-                        },
-                    )
-                    await _eventing_maintenance_loop(
-                        config, client_from_address=client_from_address
-                    )
-                    log.info(
-                        "Eventing lease maintenance ended; resubscribing",
-                        extra={"scanner_xaddr": scanner_xaddr},
-                    )
-                    backoff_sec = 2.0
-                    await asyncio.sleep(backoff_sec)
+                        backoff_sec = 2.0
+                        await asyncio.sleep(backoff_sec)
+                        registration_finished = True
+                        break
+                if registration_finished:
                     continue
         except asyncio.CancelledError:
             raise

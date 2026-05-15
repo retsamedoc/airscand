@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+from errno import ECONNREFUSED
+
 import pytest
 from aiohttp import ClientTimeout
+from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
 
 from app.config import Config
 from app.soap.transport import (
     SoapHttpClient,
     configure_soap_http_client_from_config,
     default_soap_http_client,
+    is_scanner_xaddr_transport_failover,
     reset_soap_http_client_singleton_for_tests,
 )
 
@@ -129,3 +134,21 @@ def test_configure_soap_http_client_from_config_applies_config_timeouts(
     client = default_soap_http_client()
     assert client._connect_timeout_sec == 7.25
     assert client._read_timeout_override_sec is None
+
+
+def test_is_scanner_xaddr_transport_failover_timeout() -> None:
+    """Timeouts map to trying the next discovered **XAddr**."""
+    assert is_scanner_xaddr_transport_failover(asyncio.TimeoutError()) is True
+
+
+def test_is_scanner_xaddr_transport_failover_connector_and_os() -> None:
+    """Connection refused and connector errors map to **XAddr** failover."""
+    assert is_scanner_xaddr_transport_failover(
+        ClientConnectorError(connection_key=None, os_error=OSError(ECONNREFUSED, "refused"))
+    )
+    assert is_scanner_xaddr_transport_failover(ClientOSError(ECONNREFUSED, "refused"))
+
+
+def test_is_scanner_xaddr_transport_failover_excludes_app_errors() -> None:
+    """Non-transport exceptions do not trigger **XAddr** rotation."""
+    assert is_scanner_xaddr_transport_failover(ValueError("bad")) is False

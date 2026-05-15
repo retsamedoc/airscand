@@ -420,15 +420,23 @@ async def _recv_discovery_match(
     return action, relates_to, xaddrs
 
 
-async def discover_scanner_xaddr(
+async def discover_scanner_xaddrs(
     config: Config,
     *,
     timeout_sec: float = 2.0,
     max_attempts: int = 3,
-) -> str | None:
-    """Actively probe multicast and return first scanner XAddr found."""
-    if getattr(config, "scanner_xaddr", ""):
-        return config.scanner_xaddr
+) -> list[str] | None:
+    """Actively probe multicast and return **all** scanner XAddrs from the first matching ProbeMatches.
+
+    Order matches the space-separated list in ``wsd:XAddrs`` (WSD normative ordering for failover).
+
+    Returns:
+        A non-empty ordered list of candidate URLs, ``None`` when discovery yields no match.
+        When ``config.scanner_xaddr`` is set (manual override), returns a single-element list.
+    """
+    override = str(getattr(config, "scanner_xaddr", "") or "").strip()
+    if override:
+        return [override]
 
     sock = _build_ws_discovery_client_socket()
     configure_multicast_interface(sock, config.advertise_addr)
@@ -451,10 +459,14 @@ async def discover_scanner_xaddr(
                 action, relates_to, xaddrs = match
                 if action == ACTION_PROBE_MATCHES and relates_to == probe_mid and xaddrs:
                     log.info(
-                        "Scanner XAddr discovered",
-                        extra={"probe_message_id": probe_mid, "scanner_xaddr": xaddrs[0]},
+                        "Scanner XAddrs discovered",
+                        extra={
+                            "probe_message_id": probe_mid,
+                            "scanner_xaddr": xaddrs[0],
+                            "scanner_xaddrs_count": len(xaddrs),
+                        },
                     )
-                    return xaddrs[0]
+                    return list(xaddrs)
                 if action == ACTION_PROBE_MATCHES and relates_to == probe_mid and not xaddrs:
                     log.warning(
                         "ProbeMatches missing XAddrs",
@@ -477,6 +489,19 @@ async def discover_scanner_xaddr(
         sock.close()
 
     return None
+
+
+async def discover_scanner_xaddr(
+    config: Config,
+    *,
+    timeout_sec: float = 2.0,
+    max_attempts: int = 3,
+) -> str | None:
+    """Actively probe multicast and return first scanner XAddr found (backward-compatible)."""
+    found = await discover_scanner_xaddrs(
+        config, timeout_sec=timeout_sec, max_attempts=max_attempts
+    )
+    return found[0] if found else None
 
 
 async def _send_hello(sock: socket.socket, config: Config, message_number: int) -> None:

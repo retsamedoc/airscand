@@ -8,7 +8,7 @@ This report maps the [WIA client specification](protocol/wia_client_spec.md) to 
 
 ## Executive summary
 
-The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob**, **response RelatesTo validation**, **multi-XAddr failover**, and **RetrieveImage document handling / integrity checks**. **SOAP client timeouts** expose separate **connect** vs **read** (`sock_connect` / `sock_read`) via environment variables (§3). **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
+The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob**, **response RelatesTo validation**, and **RetrieveImage document handling / integrity checks**. **Multi-XAddr** registration-time failover over ordered discovery candidates is implemented (see §4); outbound **WS-Scan** legs after a successful subscribe still use the selected ``scanner_xaddr`` only. **SOAP client timeouts** expose separate **connect** vs **read** (`sock_connect` / `sock_read`) via environment variables (§3). **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
 
 ---
 
@@ -20,7 +20,7 @@ The project implements a **device-initiated** path (WS-Eventing **ScanAvailableE
 |-------------|--------|--------|
 | SOAP 1.2 | **Met** | `NS_SOAP` uses `http://www.w3.org/2003/05/soap-envelope` (SOAP 1.2) in outbound envelopes. |
 | WS-Addressing 2004/08 | **Met** | `Action`, `To`, `MessageID`, `ReplyTo` on outbound requests. |
-| WS-Discovery | **Met** | Multicast probe and `ProbeMatches` handling in [`discover_scanner_xaddr`](../app/discovery.py). |
+| WS-Discovery | **Met** | Multicast probe and `ProbeMatches` handling in [`discover_scanner_xaddrs`](../app/discovery.py) / [`discover_scanner_xaddr`](../app/discovery.py). |
 | WS-Scan | **Partial** | Core operations present; **GetJobStatus** implemented when enabled (see §6–7). |
 | WS-Eventing | **Partial** | Outbound **Subscribe** and inbound notify handling; full subscription lifecycle gaps are documented in [ws-eventing_audit.md](ws-eventing_audit.md). |
 
@@ -42,10 +42,10 @@ The project implements a **device-initiated** path (WS-Eventing **ScanAvailableE
 
 | Requirement | Status | Notes |
 |-------------|--------|--------|
-| Multicast Probe, listen for ProbeMatch | **Met** | [`build_probe`](../app/discovery.py) + [`discover_scanner_xaddr`](../app/discovery.py). |
+| Multicast Probe, listen for ProbeMatch | **Met** | [`build_probe`](../app/discovery.py) + [`discover_scanner_xaddrs`](../app/discovery.py). |
 | Filter for scanner type | **Clarify** | Probe uses `<wsd:Types>wscn:ScanDeviceType</wsd:Types>`. The spec text says `ScannerServiceType`; Microsoft WS-Scan materials typically use **ScanDeviceType**. Confirm target devices expect the same QName; align spec wording if needed. |
 | Extract all XAddrs | **Met** | [`extract_xaddrs`](../app/discovery.py) splits space-separated list. |
-| Attempt connection **in order** | **Gap** | [`discover_scanner_xaddr`](../app/discovery.py) returns **`xaddrs[0]`** only; later SOAP does not iterate remaining XAddrs on failure. |
+| Attempt connection **in order** | **Partial** | [`discover_scanner_xaddrs`](../app/discovery.py) preserves **ProbeMatches** order; [`main._eventing_registration_loop`](../main.py) tries each **XAddr** on transport-layer failure via [`is_scanner_xaddr_transport_failover`](../app/soap/transport.py). Post-registration **WS-Scan** SOAP uses ``config.scanner_xaddr`` only (no mid-chain rotation). |
 
 ---
 
@@ -180,7 +180,7 @@ Use this as a prioritized backlog against [wia_client_spec.md](protocol/wia_clie
 
 - [ ] **Outbound SOAP response validation**: optionally verify `wsa:RelatesTo` matches the request `wsa:MessageID` and expected `wsa:Action` (with tolerance flags per §5.3).
 - [ ] **Timeouts**: expose **connect** and **read** timeouts via config/env; align defaults with §3.2 (connect ≤ 2s, read 2–10s).
-- [ ] **Multi-XAddr failover**: when discovering, try **each** XAddr in order for subsequent HTTP operations until one responds acceptably.
+- [x] **Multi-XAddr failover** (registration): ordered candidates from [`discover_scanner_xaddrs`](../app/discovery.py); [`main._eventing_registration_loop`](../main.py) advances on [`is_scanner_xaddr_transport_failover`](../app/soap/transport.py). Residual: scan-chain SOAP does not rotate **XAddr** mid-job.
 - [ ] **`RetrieveImage` body handling**: parse **Document** / base64 (or MTOM if needed), support large responses, **validate integrity** (e.g. magic bytes / length), **retry on truncation** per §7.4.
 
 ### Medium

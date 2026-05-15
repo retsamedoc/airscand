@@ -24,23 +24,11 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Outbound SOAP HTTP timeouts:** `SoapHttpClient` uses aiohttp `ClientTimeout(sock_connect=…, sock_read=…)`; `WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC` (default **10**) and optional `WSD_SOAP_HTTP_READ_TIMEOUT_SEC` (global read override); `main.configure_soap_http_client_from_config` after `Config()` (`tests/test_soap_transport.py`, `tests/test_config.py`).
 - **Inbound Subscribe validation (MVP):** optional **`wse:EndTo`** requires non-empty **`wsa:Address`** when **`EndTo`** is present; **`EndTo`** may differ from **`NotifyTo`** because manager-emitted **`SubscriptionEnd`** is POSTed to **`EndTo`** (or **`NotifyTo`** when **`EndTo`** is omitted). Non-empty invalid **`wse:Expires`** → **`InvalidExpirationTime`**; filter/delivery faults unchanged (`app/soap/parsers/inbound_eventing.py`, `tests/test_inbound_eventing.py`, `tests/test_ws_scan.py`).
 - **`SubscriptionEnd` (WS-Eventing, inbound roles):** When a managed lease expires without **Renew**, or **Unsubscribe**/**Renew**/**GetStatus** hits an already-expired id, the manager queues **`SubscriptionEnd`** (SOAP **`SubscriptionEnd`** action, **Status** URI `SourceCancelling`) to the stored subscriber EPR; **`main._inbound_subscription_lease_sweep_loop`** also expires idle leases every 5s. The sink accepts inbound **`SubscriptionEnd`** notifications and returns **`SubscriptionEndResponse`** (`app/inbound_eventing_registry.py`, `app/inbound_subscription_end_delivery.py`, `app/soap/builders/eventing.py`, `app/soap/namespaces.py`, `app/soap/parsers/subscription_end.py`, `app/ws_scan.py`, `main.py`, `tests/test_subscription_end.py`, `tests/test_ws_scan.py`). *Why tests matter:* without them, lease teardown silently breaks peers that rely on **EndTo** correlation or expect SOAP (not bare HTTP) for teardown.
+- **Multi-XAddr registration failover:** [`discover_scanner_xaddrs`](app/discovery.py) returns the full **ProbeMatches** list in order; [`main._eventing_registration_loop`](main.py) tries each candidate and advances on transport-layer failures classified by [`is_scanner_xaddr_transport_failover`](app/soap/transport.py) (`asyncio.TimeoutError`, `ClientConnectorError`, `ClientOSError`). Logs include `xaddr_attempt_index`, `xaddr_candidates_total`, and `scanner_xaddr` per attempt (`tests/test_discovery.py`, `tests/test_main_registration.py`, `tests/test_soap_transport.py`). *Residual:* per-scan outbound legs after registration still target `config.scanner_xaddr` only (no mid-chain rotation).
 
 ---
 
 ## Backlog (incomplete) — by priority
-
-### 2. Multi-**XAddr** failover (`app/discovery.py`, orchestration)
-
-**Gap:** Discovery returns first **XAddr** only; no ordered retry on SOAP failures (`docs/wia_client_audit.md` §4).
-
-**Done when:** On outbound SOAP failure to first **XAddr**, try remaining addresses in **ProbeMatches** order (policy for which errors retry configurable or documented).
-
-**Verification:**
-
-- Test double: discovery returns two **XAddrs**; first host fails connect, second succeeds → registration or scan chain succeeds using second.
-- Logs include which **XAddr** was selected per attempt.
-
----
 
 ### 3. Outbound SOAP response validation (**RelatesTo**, **Action**) (`app/ws_eventing_client.py`, `app/soap/transport.py`)
 
@@ -164,10 +152,9 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Task 2** (multi-**XAddr** failover).  
-2. **Tasks 7 + 5** (tests + parsing robustness) in parallel after behavior stabilizes.  
-3. Remaining items per product need (RelatesTo validation, pull/push, far-term items).
+1. **Tasks 7 + 5** (tests + parsing robustness) in parallel after behavior stabilizes.  
+2. Remaining items per product need (RelatesTo validation, pull/push, far-term items).
 
 ---
 
-*Last updated: WS-Eventing SubscriptionEnd (inbound manager emission + sink ack); backlog 2–14.*
+*Last updated: multi-XAddr registration failover (`discover_scanner_xaddrs`, `main`, transport classifier); backlog 3–14.*

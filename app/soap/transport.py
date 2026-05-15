@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
+from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
 
 from app.soap.addressing import WSA_MESSAGE_ID_PATTERN, extract_wsa_action, soap_action_short
 from app.soap.fault import parse_soap_fault
@@ -47,6 +48,24 @@ def configure_soap_http_client_from_config(config: Config) -> None:
         connect_timeout_sec=config.soap_http_connect_timeout_sec,
         read_timeout_override_sec=config.soap_http_read_timeout_sec,
     )
+
+
+def is_scanner_xaddr_transport_failover(exc: BaseException) -> bool:
+    """Return True when the next WS-Discovery **XAddr** candidate should be tried.
+
+    Used after outbound SOAP (or preflight **Get**) toward a scanner endpoint: connection-level
+    failures and full request timeouts warrant trying the next address in ProbeMatches order.
+    Application-level SOAP faults and HTTP 4xx/5xx responses are not treated here.
+
+    Args:
+        exc: Exception raised from :meth:`SoapHttpClient.post_text` / ``post_retrieve_image``.
+
+    Returns:
+        Whether registration (or similar) should fail over to another **XAddr**.
+    """
+    if isinstance(exc, asyncio.TimeoutError):
+        return True
+    return isinstance(exc, (ClientConnectorError, ClientOSError))
 
 
 def reset_soap_http_client_singleton_for_tests() -> None:

@@ -17,7 +17,7 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 ### Mid-term
 
 - **WIA operation hardening**:
-  - Multi-XAddr failover after discovery (try all candidate XAddrs in order).
+  - Multi-XAddr failover for **eventing registration** is implemented (`discover_scanner_xaddrs`, `main._eventing_registration_loop`); extending the same policy to mid-scan SOAP is still open.
   - Retrieve-image integrity and truncation handling / retry policy.
   - Explicit idempotent retry policy for SOAP operations.
   See `wia_client_audit` high/medium checklist.

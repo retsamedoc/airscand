@@ -53,7 +53,7 @@ flowchart TB
     Printer --> MC --> DISC
     Printer -->|SOAP POST WSD path| SRV --> WSD
     Printer -->|POST /scan| SRV --> SCAN
-    REG -->|discover_scanner_xaddr| DISC
+    REG -->|discover_scanner_xaddrs| DISC
     REG -->|Subscribe SOAP| HTTP_SCAN
     WSD -->|ScanAvailableEvent ack + task| CHAIN
     CHAIN -->|Validate / Create / Retrieve| HTTP_SCAN
@@ -68,7 +68,7 @@ flowchart TB
 | `main.py` | Orchestration: logging, three tasks, signal handling, WS-Eventing unsubscribe on exit. |
 | `app/config.py` | `Config` dataclass: env-driven settings, persistent UUID and WS-Discovery sequence id under `XDG_STATE_HOME`. |
 | `app/logging.py` | Root logger setup: JSON or human **AirscandConsoleFormatter** (DEBUG JSON, INFO+ human), optional wrap and inline context keys. |
-| `app/discovery.py` | WS-Discovery XML builders (using `app.soap.envelope` for Probe/Resolve), extraction via `app.soap.parsers.discovery`, multicast loop, active `discover_scanner_xaddr` client probe, self-probe filtering. |
+| `app/discovery.py` | WS-Discovery XML builders (using `app.soap.envelope` for Probe/Resolve), extraction via `app.soap.parsers.discovery`, multicast loop, active `discover_scanner_xaddrs` / `discover_scanner_xaddr` client probe, self-probe filtering. |
 | `app/http_server.py` | Minimal aiohttp wiring: POST `endpoint_path` → `handle_wsd`, POST `scan_path` → `handle_scan`. |
 | `app/ws_scan.py` | Inbound SOAP dispatch by `wsa:Action`: WS-Eventing **sink** and **subscription manager** (**Subscribe** / **Renew** / **GetStatus** / **Unsubscribe**), **CreateScanJob** response, **ScanAvailableEvent** ack + schedules `run_scan_available_chain`, **ScannerStatusSummaryEvent** → coordination; response envelopes and faults via `app.soap.envelope` / `app.soap.builders.faults`. |
 | `app/soap/` | Shared **namespaces**, **addressing** (regex + `MessageID`), **envelope** builders, **fault** parsing, **transport** (`SoapHttpClient`: text SOAP + retrieve-image / MTOM), **parsers** (`scan`, `discovery`, `eventing`, `transfer`), optional **xmlutil** for Phase-2 ElementTree hooks. |
@@ -88,7 +88,7 @@ Shared SOAP helpers live under **`app/soap/`**; `discovery.py` and `ws_eventing_
 - Listens on **UDP 3702**, joins multicast group **239.255.255.250**, optional `IP_MULTICAST_IF` from `WSD_ADVERTISE_ADDR`.
 - **Probe** → **ProbeMatches** with types including `wscn:ScanDeviceType` and **XAddr** `http://{advertise}:{port}{endpoint_path}`.
 - **Resolve** when EPR matches `urn:uuid:{config.uuid}` → **ResolveMatches**.
-- Outbound **Probe** (for `discover_scanner_xaddr`) uses a transient socket; outbound **MessageID**s are remembered to ignore reflected self-traffic.
+- Outbound **Probe** (for `discover_scanner_xaddrs`) uses a transient socket; outbound **MessageID**s are remembered to ignore reflected self-traffic.
 - **Hello** at `WSD_HELLO_INTERVAL_SEC` with **AppSequence**; **Bye** on shutdown.
 
 ### HTTP server and routing (`app/http_server.py`)
@@ -115,7 +115,7 @@ Implements the flow described in [design.md §6.2](design.md) (metadata probe, v
 
 ### WS-Eventing registration (`main.py` + `app/ws_eventing_client.py`)
 
-- `_eventing_registration_loop` calls `discover_scanner_xaddr`, then optional `preflight_get_scanner_capabilities` (WS-Transfer **Get**) to refine **Subscribe** URL, then `register_with_scanner` for **ScanAvailableEvent** and again with `filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION`. On success it enters **`_eventing_maintenance_loop`**, which schedules **`renew_subscription`** against the stored subscription manager URL (and parallel **`*_status`** fields when both subscriptions exist) until renew fails or the loop exits, prompting resubscribe.
+- `_eventing_registration_loop` calls `discover_scanner_xaddrs`, then optional `preflight_get_scanner_capabilities` (WS-Transfer **Get**) to refine **Subscribe** URL, then `register_with_scanner` for **ScanAvailableEvent** and again with `filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION`. On transport failure to a candidate **XAddr**, it tries the next address from **ProbeMatches** order (`is_scanner_xaddr_transport_failover`). On success it enters **`_eventing_maintenance_loop`**, which schedules **`renew_subscription`** against the stored subscription manager URL (and parallel **`*_status`** fields when both subscriptions exist) until renew fails or the loop exits, prompting resubscribe.
 - **NotifyTo** defaults to `http://{advertise_addr}:{port}{endpoint_path}` unless `WSD_EVENTING_NOTIFY_TO_URL` is set.
 - **Unsubscribe** on shutdown (and after failed **Renew** before resubscribe) uses **`_unsubscribe_eventing_best_effort`**, posting to the stored subscription manager **Address** with **ReferenceParameters** XML from **SubscribeResponse** when the device supplies them.
 

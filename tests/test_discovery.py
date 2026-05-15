@@ -26,6 +26,7 @@ from app.discovery import (
     build_resolve,
     build_resolve_matches,
     discover_scanner_xaddr,
+    discover_scanner_xaddrs,
     extract_action,
     extract_relates_to,
     extract_resolve_epr_address,
@@ -350,6 +351,50 @@ def test_discover_scanner_xaddr_from_probe_matches(monkeypatch: MonkeyPatch) -> 
 
     xaddr = asyncio.run(discover_scanner_xaddr(cfg, timeout_sec=0.1, max_attempts=1))
     assert xaddr == "http://192.168.1.60:80/WSD/DEVICE"
+
+
+def test_discover_scanner_xaddrs_uses_config_override_as_singleton_list() -> None:
+    """Manual ``scanner_xaddr`` yields a one-element list for consistent failover typing."""
+    cfg = make_config(scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE")
+    assert asyncio.run(discover_scanner_xaddrs(cfg)) == ["http://192.168.1.60:80/WSD/DEVICE"]
+
+
+def test_discover_scanner_xaddrs_from_probe_matches_preserves_order(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Active discovery preserves **ProbeMatches** **XAddrs** order for downstream failover."""
+    cfg = make_config(scanner_xaddr="")
+
+    class DummySock:
+        def sendto(self, _data: bytes, _addr: tuple[str, int]) -> None:
+            return None
+
+        def setsockopt(self, *_args: object) -> None:
+            return None
+
+        def setblocking(self, _v: bool) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    async def fake_recv(sock: object, timeout_sec: float) -> tuple[str, str, list[str]]:
+        return (
+            ACTION_PROBE_MATCHES,
+            "urn:uuid:probe-1",
+            ["http://192.168.1.60:80/WSD/DEVICE", "http://192.168.1.61/WSD/DEVICE"],
+        )
+
+    monkeypatch.setattr("app.discovery._build_ws_discovery_client_socket", lambda: DummySock())
+    monkeypatch.setattr("app.discovery._recv_discovery_match", fake_recv)
+    monkeypatch.setattr("app.discovery.build_probe", lambda: ("urn:uuid:probe-1", "<x/>"))
+    monkeypatch.setattr("app.discovery.time.monotonic", lambda: SELF_PROBE_TTL_SEC + 10.0)
+
+    addrs = asyncio.run(discover_scanner_xaddrs(cfg, timeout_sec=0.1, max_attempts=1))
+    assert addrs == [
+        "http://192.168.1.60:80/WSD/DEVICE",
+        "http://192.168.1.61/WSD/DEVICE",
+    ]
 
 
 def test_handle_discovery_packet_logs_invalid_missing_action(caplog: LogCaptureFixture) -> None:
