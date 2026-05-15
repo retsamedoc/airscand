@@ -17,14 +17,13 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **SubscribeResponse** parsing: identifier, expires, subscription manager address + reference parameters XML, destination token map (`app/soap/parsers/eventing.py`).
 - **Device-initiated scan chain**: **ScanAvailableEvent** SOAP ack, **ValidateScanTicket** → **CreateScanJob** → optional **GetJobStatus** → **RetrieveImage** / MTOM, coordination with **ScannerStatusSummaryEvent** (`app/ws_scan.py`, `app/ws_eventing_client.py`, audits).
 - **Push path** `/scan`: atomic save, empty body rejection (`app/scan_receiver.py`, `app/scan_storage.py`, tests).
-
-- **Inbound WS-Eventing subscription manager** (``handle_wsd``): **Subscribe** validates Push + optional Action filter, grants bounded **Expires**, stores subscription id in ``app/inbound_eventing_registry.py``; **Renew** / **GetStatus** / **Unsubscribe** correlate ``wse:Identifier`` and return SOAP faults (HTTP 500) for unknown/expired ids; **GetStatus** returns remaining lease without mutating expiry. See ``app/soap/parsers/inbound_eventing.py``, ``app/soap/builders/faults.py``, ``tests/test_ws_scan.py``. Residual: richer subscribe contract (``NotifyTo``/``EndTo``/grants matrix) remains in backlog item 6; **SubscriptionEnd** still item 5.
+- **Inbound WS-Eventing subscription manager** (`app/ws_scan.py`, `app/inbound_eventing_registry.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/builders/faults.py`, `app/soap/envelope.py`): **Subscribe** allocates stable **Identifier** + granted **Expires**; **Renew** extends lease; **GetStatus** returns stored expiration without mutating lease; **Unsubscribe** removes state; unknown/expired ids and validation failures return **SOAP 1.2 faults** (`tests/test_ws_scan.py`).
 
 ---
 
 ## Backlog (incomplete) — by priority
 
-### 2. SOAP fault instead of plain text for unknown `/wsd` actions (`app/ws_scan.py`)
+### 1. SOAP fault instead of plain text for unknown `/wsd` actions (`app/ws_scan.py`)
 
 **Gap:** Unsupported actions fall through to **`text/plain` “OK”** (`docs/ws-eventing_audit.md` §9; see `handle_wsd` default branch).
 
@@ -37,7 +36,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 3. Documentation reconciliation (audits, ROADMAP, status)
+### 2. Documentation reconciliation (audits, ROADMAP, status)
 
 **Gap:** No remaining drift tracked for outbound **Renew** / shutdown **Unsubscribe** vs the docs listed in **Done when** (as of this refresh).
 
@@ -47,7 +46,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 4. `SoapHttpClient` connect vs read timeouts (`app/soap/transport.py`, `app/config.py`)
+### 3. `SoapHttpClient` connect vs read timeouts (`app/soap/transport.py`, `app/config.py`)
 
 **Gap:** Single **`ClientTimeout(total=...)`** per call; WIA audit §3 expects configurable **connect** and **read** splits (`docs/wia_client_audit.md`).
 
@@ -60,7 +59,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 5. `SubscriptionEnd` support (WS-Eventing)
+### 4. `SubscriptionEnd` support (WS-Eventing)
 
 **Gap:** No builder/parser/send path (`docs/ws-eventing_audit.md` §3; grep confirms no `SubscriptionEnd` in code).
 
@@ -73,7 +72,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 6. Inbound **Subscribe** contract enforcement (delivery, sink EPR, expiration grants)
+### 5. Inbound **Subscribe** contract enforcement (delivery, sink EPR, expiration grants)
 
 **Gap:** **NotifyTo** / **EndTo** / **Expires** request handling and granted expiration computation not validated on server (`docs/ws-eventing_audit.md` §5, §6, §8, §13).
 
@@ -83,7 +82,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 7. Multi-**XAddr** failover (`app/discovery.py`, orchestration)
+### 6. Multi-**XAddr** failover (`app/discovery.py`, orchestration)
 
 **Gap:** Discovery returns first **XAddr** only; no ordered retry on SOAP failures (`docs/wia_client_audit.md` §4).
 
@@ -96,7 +95,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 8. Outbound SOAP response validation (**RelatesTo**, **Action**) (`app/ws_eventing_client.py`, `app/soap/transport.py`)
+### 7. Outbound SOAP response validation (**RelatesTo**, **Action**) (`app/ws_eventing_client.py`, `app/soap/transport.py`)
 
 **Gap:** Responses not asserted against outbound **MessageID** / expected action (`docs/wia_client_audit.md` §5).
 
@@ -106,7 +105,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 9. **RetrieveImage** integrity / truncation handling (`docs/wia_client_audit.md` §7+)
+### 8. **RetrieveImage** integrity / truncation handling (`docs/wia_client_audit.md` §7+)
 
 **Gap:** Limited explicit validation of full document bytes / truncation vs **Content-Length** / MTOM completeness.
 
@@ -116,7 +115,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 10. Namespace-aware XML on critical eventing and fault paths (`docs/ws-eventing_audit.md` §11)
+### 9. Namespace-aware XML on critical eventing and fault paths (`docs/ws-eventing_audit.md` §11)
 
 **Gap:** Regex-based extraction for identifiers, manager EPR, etc.
 
@@ -126,7 +125,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 11. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
+### 10. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
 
 **Gap:** **RetrieveImage** path always attempted for device-initiated flow; push-only devices may need different handling.
 
@@ -136,7 +135,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 12. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
+### 11. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
 **Gap:** Limited tests for **fault mapping**, **subscription lifecycle** edge cases, **Renew** failure leading to resubscribe, **inbound** manager behavior.
 
@@ -146,7 +145,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 13. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
+### 12. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
 
 **Gap:** Only `Content-Type: application/soap+xml; charset=utf-8` on some legs.
 
@@ -156,7 +155,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 14. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
+### 13. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
 
 **Gap:** `parse_soap_fault` does not surface **Detail** for diagnostics.
 
@@ -166,7 +165,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 15. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
+### 14. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
 
 **Gap:** Assumes `app["config"]` present (`isinstance` guard unlike `handle_scan`).
 
@@ -176,7 +175,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 16. Developer and security posture (`docs/ROADMAP.md` Future)
+### 15. Developer and security posture (`docs/ROADMAP.md` Future)
 
 **Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
 
@@ -186,7 +185,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 17. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
+### 16. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
 
 **Gap:** State spread across async tasks and flags.
 
@@ -196,7 +195,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 18. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
+### 17. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
 
 **Gap:** Not implemented per audits.
 
@@ -206,7 +205,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 19. Optional **`specs/`** entry point (documentation)
+### 18. Optional **`specs/`** entry point (documentation)
 
 **Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
 
@@ -218,12 +217,12 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Task 3** (doc truth) so all contributors align on what already ships.  
-2. **Tasks 2 + 6** (SOAP fault surface for unknown actions + fuller inbound Subscribe contract) — highest interoperability risk for non-Epson peers; inbound subscription manager MVP is **shipped** (see Verified complete).  
-3. **Task 4** (timeouts) — low risk, high operability.  
-4. **Tasks 12 + 10** (tests + parsing robustness) in parallel after behavior stabilizes.  
+1. **Task 2** (doc truth) so all contributors align on what already ships.  
+2. **Tasks 1 + 5** (SOAP fault for unknown `/wsd` actions + deeper inbound **Subscribe** contract) — highest interoperability risk for non-Epson peers.  
+3. **Task 3** (timeouts) — low risk, high operability.  
+4. **Tasks 11 + 9** (tests + parsing robustness) in parallel after behavior stabilizes.  
 5. Remaining items per product need (failover, SubscriptionEnd, pull/push, far-term items).
 
 ---
 
-*Last updated from repository review (code + `docs/*`); `docs/ws-eventing_audit.md` and `docs/ROADMAP.md` reflect outbound Renew, manager EPR persistence, and shutdown Unsubscribe.*
+*Last updated: inbound subscription manager state + SOAP faults shipped; backlog renumbered.*

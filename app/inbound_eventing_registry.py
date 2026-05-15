@@ -1,105 +1,123 @@
-"""In-memory subscription state for inbound WS-Eventing (local subscription manager)."""
+"""In-memory subscription state for inbound WS-Eventing (subscription manager role)."""
 
 from __future__ import annotations
 
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 
-from app.soap.parsers.eventing import parse_iso8601_duration_to_seconds
-from app.soap.parsers.inbound_eventing import _format_iso8601_duration_from_seconds
+__all__ = [
+    "InboundSubscription",
+    "InboundSubscriptionRegistry",
+    "get_inbound_subscription_registry",
+    "reset_inbound_subscription_registry",
+]
 
 
 @dataclass
-class _InboundSubscription:
-    """Lease record for one inbound subscription id."""
+class InboundSubscription:
+    """Granted lease and addressing for one inbound subscription."""
 
-    expires_at: float
-    expires_granted_str: str
+    identifier: str
+    granted_expires: str
+    expires_at_monotonic: float
+    manager_address: str
 
 
-class InboundEventingRegistry:
-    """Thread-safe map of subscription id → lease metadata for inbound manager ops."""
+class InboundSubscriptionRegistry:
+    """Thread-safe registry keyed by subscription identifier (``wsman:Identifier`` value)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._subs: dict[str, _InboundSubscription] = {}
+        self._subs: dict[str, InboundSubscription] = {}
 
-    def reset_for_testing(self) -> None:
-        """Clear all subscriptions (tests only)."""
+    def reset(self) -> None:
+        """Drop all subscriptions (for tests)."""
         with self._lock:
             self._subs.clear()
 
-    def create(self, identifier: str, granted_seconds: float, granted_expires_str: str) -> None:
-        """Register a new subscription after a successful inbound ``Subscribe``."""
-        now = time.time()
+    def create(
+        self,
+        *,
+        manager_address: str,
+        granted_expires: str,
+        grant_seconds: float,
+    ) -> InboundSubscription:
+        """Allocate a new subscription id and store the granted lease."""
+        identifier = f"urn:uuid:{uuid.uuid4()}"
+        deadline = time.monotonic() + float(grant_seconds)
+        sub = InboundSubscription(
+            identifier=identifier,
+            granted_expires=granted_expires,
+            expires_at_monotonic=deadline,
+            manager_address=manager_address,
+        )
         with self._lock:
-            self._subs[identifier] = _InboundSubscription(
-                expires_at=now + float(granted_seconds),
-                expires_granted_str=granted_expires_str,
-            )
+            self._subs[identifier] = sub
+        return sub
 
-    def _get_live(self, identifier: str) -> _InboundSubscription | None:
-        rec = self._subs.get(identifier)
-        if rec is None:
-            return None
-        if time.time() > rec.expires_at:
-            return None
-        return rec
+    def _pop_if_expired_locked(self, sub: InboundSubscription) -> bool:
+        if time.monotonic() < sub.expires_at_monotonic:
+            return False
+        self._subs.pop(sub.identifier, None)
+        return True
 
     def renew(
         self,
-        identifier: str,
         *,
-        requested_expires_raw: str | None,
-        max_grant_seconds: float,
-    ) -> str | None:
-        """Extend lease; return new ``wse:Expires`` string or None if not renewable."""
-        try:
-            if requested_expires_raw and requested_expires_raw.strip():
-                req_sec = parse_iso8601_duration_to_seconds(requested_expires_raw.strip())
-            else:
-                req_sec = parse_iso8601_duration_to_seconds("PT1H")
-        except ValueError:
-            return None
-        grant = min(max(req_sec, 1.0), max(1.0, max_grant_seconds))
-        granted_str = _format_iso8601_duration_from_seconds(grant)
-        now = time.time()
+        identifier: str,
+        manager_address: str,
+        granted_expires: str,
+        grant_seconds: float,
+    ) -> InboundSubscription | None:
+        """Extend lease; return None if unknown, wrong manager, or already expired."""
         with self._lock:
-            rec = self._subs.get(identifier)
-            if rec is None or now > rec.expires_at:
+            sub = self._subs.get(identifier)
+            if sub is None:
                 return None
-            rec.expires_at = now + grant
-            rec.expires_granted_str = granted_str
-        return granted_str
+            if sub.manager_address != manager_address:
+                return None
+            if self._pop_if_expired_locked(sub):
+                return None
+            sub.expires_at_monotonic = time.monotonic() + float(grant_seconds)
+            sub.granted_expires = granted_expires
+            return sub
 
-    def get_status_expires(self, identifier: str) -> str | None:
-        """Return remaining lease as ``xs:duration`` without mutating stored expiry deadline."""
+    def get_status(self, identifier: str, manager_address: str) -> InboundSubscription | None:
+        """Return active subscription without changing lease timestamps."""
         with self._lock:
-            rec = self._subs.get(identifier)
-            if rec is None:
+            sub = self._subs.get(identifier)
+            if sub is None:
                 return None
-            now = time.time()
-            if now > rec.expires_at:
+            if sub.manager_address != manager_address:
                 return None
-            remaining = max(0.0, rec.expires_at - now)
-        return _format_iso8601_duration_from_seconds(remaining)
+            if self._pop_if_expired_locked(sub):
+                return None
+            return self._subs.get(identifier)
 
-    def unsubscribe(self, identifier: str) -> bool:
-        """Remove subscription; return True only if it existed and was not already expired."""
-        now = time.time()
+    def unsubscribe(self, identifier: str, manager_address: str) -> bool:
+        """Remove subscription; return False if missing or manager mismatch."""
         with self._lock:
-            rec = self._subs.pop(identifier, None)
-            if rec is None:
+            sub = self._subs.get(identifier)
+            if sub is None or sub.manager_address != manager_address:
                 return False
-            if now > rec.expires_at:
-                return False
-        return True
+            del self._subs[identifier]
+            return True
 
 
-_REGISTRY = InboundEventingRegistry()
+_registry: InboundSubscriptionRegistry | None = None
 
 
-def inbound_eventing_registry() -> InboundEventingRegistry:
-    """Return the process-wide inbound eventing subscription registry."""
-    return _REGISTRY
+def get_inbound_subscription_registry() -> InboundSubscriptionRegistry:
+    """Return process-wide registry (lazily created)."""
+    global _registry
+    if _registry is None:
+        _registry = InboundSubscriptionRegistry()
+    return _registry
+
+
+def reset_inbound_subscription_registry() -> None:
+    """Reset the process-wide registry (tests)."""
+    global _registry
+    _registry = None

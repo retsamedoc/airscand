@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.soap.addressing import new_message_id
 from app.soap.namespaces import (
+    ACTION_WSA_FAULT,
     NS_PUB,
     NS_SCA,
     NS_SOAP,
@@ -98,6 +99,15 @@ def build_inbound_response_envelope(
   </soap:Body>
 </soap:Envelope>
 """
+
+
+def build_inbound_fault_envelope(*, relates_to: str | None, fault_body_xml: str) -> str:
+    """SOAP 1.2 fault envelope for inbound endpoints (WS-Addressing 2004/08 fault action)."""
+    return build_inbound_response_envelope(
+        action=ACTION_WSA_FAULT,
+        relates_to=relates_to,
+        body_xml=fault_body_xml,
+    )
 
 
 def build_discovery_probe_envelope(

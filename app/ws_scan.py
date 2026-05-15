@@ -6,25 +6,26 @@ import uuid
 
 from aiohttp import web
 
-from app.inbound_eventing_registry import inbound_eventing_registry
+from app.inbound_eventing_registry import get_inbound_subscription_registry
 from app.quirks import get_profile
 from app.scanner_status_coordination import notify_scanner_state
 from app.soap.addressing import extract_action, extract_message_id_optional, soap_action_short
-from app.soap.builders.faults import (
-    build_addressing_fault_envelope,
-    build_ws_eventing_fault_body,
-)
-from app.soap.envelope import build_inbound_response_envelope
+from app.soap.builders.faults import build_wse_fault_body
+from app.soap.envelope import build_inbound_fault_envelope, build_inbound_response_envelope
 from app.soap.namespaces import (
+    ACTION_WSA_FAULT,
     NS_SCA,
     NS_WSE,
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+    WSA_ANONYMOUS,
 )
-from app.soap.parsers.eventing import parse_iso8601_duration_to_seconds
 from app.soap.parsers.inbound_eventing import (
-    analyze_inbound_subscribe_envelope,
-    extract_renew_or_getstatus_expires_request,
-    extract_subscription_identifier_from_soap_headers,
+    PUSH_DELIVERY_MODE_URI,
+    extract_management_subscription_identifier,
+    extract_wsa_to_optional,
+    grant_expires_from_request,
+    parse_inbound_renew_expires_optional,
+    parse_inbound_subscribe_body,
 )
 from app.ws_eventing_client import (
     parse_scanner_status_summary_event,
@@ -32,9 +33,6 @@ from app.ws_eventing_client import (
 )
 
 log = logging.getLogger(__name__)
-
-# Upper bound for inbound granted lease (wall-clock); keeps memory leases bounded.
-_DEFAULT_INBOUND_EVENTING_MAX_GRANT_SEC = 86400.0
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
 ACTION_RENEW = f"{NS_WSE}/Renew"
@@ -90,63 +88,70 @@ def extract_message_id(text: str) -> str | None:
     return extract_message_id_optional(text)
 
 
-def _inbound_eventing_max_grant_seconds(config: object | None) -> float:
-    """Return maximum granted lease duration for inbound WS-Eventing (seconds)."""
-    raw = getattr(config, "inbound_eventing_max_grant_sec", None)
-    if raw is not None:
-        try:
-            v = float(raw)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
-    return _DEFAULT_INBOUND_EVENTING_MAX_GRANT_SEC
+def _normalize_manager_addr(url: str) -> str:
+    return (url or "").strip().rstrip("/")
 
 
-def _eventing_fault_http_response(
-    *,
+def _inbound_eventing_fault_response(
     relates_to: str | None,
+    *,
     subcode_local: str,
     reason: str,
-    response_action_log: str,
+    log_action: str,
+    log_extras: dict[str, object] | None = None,
 ) -> web.Response:
-    """Build HTTP 500 with SOAP 1.2 fault envelope (WS-Addressing fault Action)."""
-    fault_inner = build_ws_eventing_fault_body(subcode_local=subcode_local, reason=reason)
-    xml = build_addressing_fault_envelope(relates_to=relates_to, fault_body_inner_xml=fault_inner)
+    """Return SOAP 1.2 fault (HTTP 200) for inbound WS-Eventing validation or lifecycle errors."""
+    fault_body = build_wse_fault_body(subcode_local=subcode_local, reason=reason)
+    xml = build_inbound_fault_envelope(relates_to=relates_to, fault_body_xml=fault_body)
+    extra = {"http_status": 200, "bytes": len(xml.encode("utf-8")), "fault_subcode": subcode_local}
+    if log_extras:
+        extra.update(log_extras)
     log.info(
-        response_action_log,
+        f"{soap_action_short(log_action) or log_action}",
         extra={
             "soap_leg": "server_response",
-            "soap_action": "SOAPFault",
-            "http_status": 500,
-            "fault_subcode": subcode_local,
-            "bytes": len(xml.encode("utf-8")),
+            "soap_action": soap_action_short(log_action),
+            **extra,
         },
     )
     return web.Response(
         text=xml,
         content_type="application/soap+xml",
         charset="utf-8",
-        status=500,
+        status=200,
     )
 
 
+def _manager_to_matches_expected(to_hdr: str | None, manager_addr: str) -> bool:
+    if not to_hdr or not to_hdr.strip():
+        return True
+    if to_hdr.strip() == WSA_ANONYMOUS:
+        return True
+    return _normalize_manager_addr(to_hdr) == _normalize_manager_addr(manager_addr)
+
+
+def _max_inbound_eventing_grant_seconds(config: object) -> float:
+    """Upper bound for granted ``wse:Expires`` on inbound Subscribe/Renew (default one day)."""
+    raw = getattr(config, "inbound_eventing_max_grant_sec", None)
+    if raw is None:
+        return 86400.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 86400.0
+    return v if v > 0 else 86400.0
+
+
 def build_eventing_subscribe_response(
-    relates_to: str | None,
-    xaddr: str,
-    *,
-    identifier: str | None = None,
-    expires: str | None = None,
+    relates_to: str | None, xaddr: str, identifier: str, expires: str
 ) -> str:
     """Build SOAP SubscribeResponse payload for WS-Eventing."""
-    sub_id = identifier or str(uuid.uuid4())
-    exp = expires or "PT1H"
     body = f"""    <wse:SubscribeResponse>
       <wse:SubscriptionManager>
         <wsa:Address>{xaddr}</wsa:Address>
-        <wsman:Identifier>{sub_id}</wsman:Identifier>
+        <wsman:Identifier>{identifier}</wsman:Identifier>
       </wse:SubscriptionManager>
-      <wse:Expires>{exp}</wse:Expires>
+      <wse:Expires>{expires}</wse:Expires>
     </wse:SubscribeResponse>"""
     return build_inbound_response_envelope(
         action=ACTION_SUBSCRIBE_RESPONSE, relates_to=relates_to, body_xml=body
@@ -234,12 +239,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
     action = extract_action(text)
     relates_to = extract_message_id(text)
     config = request.app.get("config")
-    if config is None:
-        log.error("handle_wsd missing app config")
-        return web.Response(status=500, text="Internal Server Error")
     xaddr = f"http://{config.advertise_addr}:{config.port}{config.endpoint_path}"
-    max_grant = _inbound_eventing_max_grant_seconds(config)
-    reg = inbound_eventing_registry()
 
     log.info(
         f"{soap_action_short(action) or 'unknown'}",
@@ -260,23 +260,59 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_SUBSCRIBE:
         if not relates_to:
             log.warning("Subscribe request missing MessageID")
-        analysis = analyze_inbound_subscribe_envelope(text, max_grant_seconds=max_grant)
-        if not analysis.ok:
-            assert analysis.fault_subcode is not None
-            assert analysis.fault_reason is not None
-            return _eventing_fault_http_response(
-                relates_to=relates_to,
-                subcode_local=analysis.fault_subcode,
-                reason=analysis.fault_reason,
-                response_action_log=f"SubscribeFault:{analysis.fault_subcode}",
+        mgr = _normalize_manager_addr(xaddr)
+        to_hdr = extract_wsa_to_optional(text)
+        if not _manager_to_matches_expected(to_hdr, mgr):
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="InvalidMessage",
+                reason="wsa:To does not match this subscription manager endpoint",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"wsa_to": to_hdr, "expected_manager": mgr},
             )
-        sub_identifier = str(uuid.uuid4())
-        reg.create(sub_identifier, analysis.granted_seconds, analysis.granted_expires_str)
+        parsed = parse_inbound_subscribe_body(text)
+        if parsed is None:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="InvalidMessage",
+                reason="Invalid or missing wse:Subscribe body",
+                log_action=ACTION_WSA_FAULT,
+            )
+        if parsed.has_filter:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="FilteringNotSupported",
+                reason="Event filtering is not supported by this endpoint",
+                log_action=ACTION_WSA_FAULT,
+            )
+        mode = parsed.delivery_mode
+        if not mode or mode.rstrip("/").lower() != PUSH_DELIVERY_MODE_URI.rstrip("/").lower():
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="DeliveryModeRequestedUnavailable",
+                reason="Only Push delivery mode is supported",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"delivery_mode": mode},
+            )
+        if not parsed.notify_to_address:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="InvalidMessage",
+                reason="wse:NotifyTo/wsa:Address is required for Push delivery",
+                log_action=ACTION_WSA_FAULT,
+            )
+        granted_str, grant_sec = grant_expires_from_request(
+            parsed.requested_expires,
+            max_seconds=_max_inbound_eventing_grant_seconds(config),
+        )
+        reg = get_inbound_subscription_registry()
+        sub = reg.create(
+            manager_address=mgr,
+            granted_expires=granted_str,
+            grant_seconds=grant_sec,
+        )
         response_xml = build_eventing_subscribe_response(
-            relates_to,
-            xaddr,
-            identifier=sub_identifier,
-            expires=analysis.granted_expires_str,
+            relates_to, xaddr, sub.identifier, sub.granted_expires
         )
         log.info(
             f"{soap_action_short(ACTION_SUBSCRIBE_RESPONSE) or 'SubscribeResponse'}",
@@ -285,7 +321,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 "soap_action": soap_action_short(ACTION_SUBSCRIBE_RESPONSE),
                 "http_status": 200,
                 "bytes": len(response_xml.encode("utf-8")),
-                "subscription_id": sub_identifier,
+                "subscription_id": sub.identifier,
             },
         )
         return web.Response(
@@ -296,36 +332,44 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_RENEW:
         if not relates_to:
             log.warning("Renew request missing MessageID")
-        sub_id = extract_subscription_identifier_from_soap_headers(text)
-        if not sub_id:
-            return _eventing_fault_http_response(
-                relates_to=relates_to,
+        mgr = _normalize_manager_addr(xaddr)
+        to_hdr = extract_wsa_to_optional(text)
+        if not _manager_to_matches_expected(to_hdr, mgr):
+            return _inbound_eventing_fault_response(
+                relates_to,
                 subcode_local="InvalidMessage",
-                reason="Missing wse:Identifier for Renew",
-                response_action_log="RenewFault:InvalidMessage",
+                reason="wsa:To does not match this subscription manager endpoint",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"wsa_to": to_hdr, "expected_manager": mgr},
             )
-        raw_expires = extract_renew_or_getstatus_expires_request(text)
-        if raw_expires and raw_expires.strip():
-            try:
-                parse_iso8601_duration_to_seconds(raw_expires.strip())
-            except ValueError:
-                return _eventing_fault_http_response(
-                    relates_to=relates_to,
-                    subcode_local="UnacceptableInitialTerminationTime",
-                    reason=f"Invalid wse:Expires on Renew: {raw_expires!r}",
-                    response_action_log="RenewFault:UnacceptableInitialTerminationTime",
-                )
-        new_expires = reg.renew(
-            sub_id, requested_expires_raw=raw_expires, max_grant_seconds=max_grant
-        )
-        if new_expires is None:
-            return _eventing_fault_http_response(
-                relates_to=relates_to,
+        sub_id = extract_management_subscription_identifier(text)
+        if not sub_id:
+            return _inbound_eventing_fault_response(
+                relates_to,
                 subcode_local="UnableToRenew",
-                reason="Unknown or expired subscription identifier",
-                response_action_log="RenewFault:UnableToRenew",
+                reason="Missing subscription identifier in SOAP header",
+                log_action=ACTION_WSA_FAULT,
             )
-        response_xml = build_eventing_renew_response(relates_to, new_expires)
+        req_exp = parse_inbound_renew_expires_optional(text)
+        granted_str, grant_sec = grant_expires_from_request(
+            req_exp, max_seconds=_max_inbound_eventing_grant_seconds(config)
+        )
+        reg = get_inbound_subscription_registry()
+        updated = reg.renew(
+            identifier=sub_id,
+            manager_address=mgr,
+            granted_expires=granted_str,
+            grant_seconds=grant_sec,
+        )
+        if updated is None:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="UnableToRenew",
+                reason="Unknown or expired subscription",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"subscription_id": sub_id},
+            )
+        response_xml = build_eventing_renew_response(relates_to, updated.granted_expires)
         log.info(
             f"{soap_action_short(ACTION_RENEW_RESPONSE) or 'RenewResponse'}",
             extra={
@@ -344,23 +388,35 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_GET_STATUS:
         if not relates_to:
             log.warning("GetStatus request missing MessageID")
-        sub_id = extract_subscription_identifier_from_soap_headers(text)
-        if not sub_id:
-            return _eventing_fault_http_response(
-                relates_to=relates_to,
+        mgr = _normalize_manager_addr(xaddr)
+        to_hdr = extract_wsa_to_optional(text)
+        if not _manager_to_matches_expected(to_hdr, mgr):
+            return _inbound_eventing_fault_response(
+                relates_to,
                 subcode_local="InvalidMessage",
-                reason="Missing wse:Identifier for GetStatus",
-                response_action_log="GetStatusFault:InvalidMessage",
+                reason="wsa:To does not match this subscription manager endpoint",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"wsa_to": to_hdr, "expected_manager": mgr},
             )
-        expires_live = reg.get_status_expires(sub_id)
-        if expires_live is None:
-            return _eventing_fault_http_response(
-                relates_to=relates_to,
+        sub_id = extract_management_subscription_identifier(text)
+        if not sub_id:
+            return _inbound_eventing_fault_response(
+                relates_to,
                 subcode_local="UnableToRenew",
-                reason="Unknown or expired subscription identifier",
-                response_action_log="GetStatusFault:UnableToRenew",
+                reason="Missing subscription identifier in SOAP header",
+                log_action=ACTION_WSA_FAULT,
             )
-        response_xml = build_eventing_get_status_response(relates_to, expires_live)
+        reg = get_inbound_subscription_registry()
+        sub = reg.get_status(sub_id, mgr)
+        if sub is None:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="UnableToRenew",
+                reason="Unknown or expired subscription",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"subscription_id": sub_id},
+            )
+        response_xml = build_eventing_get_status_response(relates_to, sub.granted_expires)
         log.info(
             f"{soap_action_short(ACTION_GET_STATUS_RESPONSE) or 'GetStatusResponse'}",
             extra={
@@ -379,20 +435,32 @@ async def handle_wsd(request: web.Request) -> web.Response:
     if action == ACTION_UNSUBSCRIBE:
         if not relates_to:
             log.warning("Unsubscribe request missing MessageID")
-        sub_id = extract_subscription_identifier_from_soap_headers(text)
-        if not sub_id:
-            return _eventing_fault_http_response(
-                relates_to=relates_to,
+        mgr = _normalize_manager_addr(xaddr)
+        to_hdr = extract_wsa_to_optional(text)
+        if not _manager_to_matches_expected(to_hdr, mgr):
+            return _inbound_eventing_fault_response(
+                relates_to,
                 subcode_local="InvalidMessage",
-                reason="Missing wse:Identifier for Unsubscribe",
-                response_action_log="UnsubscribeFault:InvalidMessage",
+                reason="wsa:To does not match this subscription manager endpoint",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"wsa_to": to_hdr, "expected_manager": mgr},
             )
-        if not reg.unsubscribe(sub_id):
-            return _eventing_fault_http_response(
-                relates_to=relates_to,
-                subcode_local="UnableToRenew",
-                reason="Unknown or expired subscription identifier",
-                response_action_log="UnsubscribeFault:UnableToRenew",
+        sub_id = extract_management_subscription_identifier(text)
+        if not sub_id:
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="UnableToDestroySubscription",
+                reason="Missing subscription identifier in SOAP header",
+                log_action=ACTION_WSA_FAULT,
+            )
+        reg = get_inbound_subscription_registry()
+        if not reg.unsubscribe(sub_id, mgr):
+            return _inbound_eventing_fault_response(
+                relates_to,
+                subcode_local="UnableToDestroySubscription",
+                reason="Unknown subscription or wrong subscription manager",
+                log_action=ACTION_WSA_FAULT,
+                log_extras={"subscription_id": sub_id},
             )
         response_xml = build_eventing_unsubscribe_response(relates_to)
         log.info(

@@ -10,7 +10,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 |------|-------------------|--------|
 | Subscriber | `register_with_scanner`, `_eventing_registration_loop`, `_eventing_maintenance_loop`, `renew_subscription`, `unsubscribe_from_scanner` | Sends `Subscribe`; persists manager URL + reference parameters + `Expires` from `SubscribeResponse` / `RenewResponse`; `_eventing_maintenance_loop` schedules `Renew` before lease fraction; `_unsubscribe_eventing_best_effort` on shutdown / failed renew. No outbound `GetStatus` client. |
 | Event sink | `handle_wsd` (`ScanAvailableEvent`) | Receives notifications; for **ScanAvailableEvent** responds with SOAP 1.2 (`application/soap+xml`), `wsa:RelatesTo`, and [`build_scan_available_event_ack_response`](../app/ws_scan.py) (synthetic `ScanAvailableEventResponse` action). Unsupported actions still use plain `text/plain` “OK” in the default branch (§9). |
-| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** registry in `app/inbound_eventing_registry.py`, SOAP faults for bad ids / bad subscribe, **GetStatus** returns remaining lease without mutating expiry. Residual: **SubscriptionEnd**, fuller **EndTo**/grant matrix (§5–§8), header **Identifier** parsing robustness (§11). |
+| Subscription Manager / Event Source (inbound) | `handle_wsd` for `Subscribe` / `Renew` / `GetStatus` / `Unsubscribe` | **MVP:** in-memory registry ([`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py)), [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py) + SOAP faults ([`build_wse_fault_body`](../app/soap/builders/faults.py), [`build_inbound_fault_envelope`](../app/soap/envelope.py)) for unknown/expired ids, unsupported **Delivery/@Mode**, and **Filter**; **GetStatus** returns stored granted **Expires** without extending the lease. **Residual:** **SubscriptionEnd**; fuller **EndTo** / grant matrix vs §5–§8 ([`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) backlog item 5); unknown SOAP actions still `text/plain` “OK” (§9). |
 
 ---
 
@@ -18,8 +18,8 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 | Severity | Count | Themes |
 |----------|------:|--------|
-| Critical | 1 | **`SubscriptionEnd`** missing (inbound subscription manager MVP: §1) |
-| High | 3 | **SOAP faults** still missing for some paths (e.g. unknown WSD actions §9); **Subscribe** contract incomplete vs §5–§8 (**EndTo**, grants); **delivery mode** / **filter** edge cases |
+| Critical | 1 | **`SubscriptionEnd`** missing |
+| High | 3 | Inbound **Subscribe** contract **residual** (EndTo, fuller §5–§8 matrix); **SOAP faults** still missing for unknown `/wsd` actions (§9); **regex**-heavy parsing on some legs (§11) |
 | Medium | 4 | **Non-SOAP fallbacks** (#9); **regex** parsing (#11); **`GetStatus`** semantics (#12); **EndTo** / **Filter** (#13) _(notification ack for `ScanAvailableEvent`: [resolved §10](#10-scanavailableevent-notification-ack--resolved))_ |
 | Low | 4 | Security SHOULDs; **WSDL/metadata**; test coverage gaps; **SOAP 1.1** vs **1.2** only |
 
@@ -27,13 +27,13 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ## Critical
 
-### 1. Inbound lifecycle operations — **implemented (MVP)** {#1-inbound-lifecycle-operations-implemented-mvp}
+### 1. Inbound lifecycle operations — **MVP implemented** {#1-inbound-lifecycle-mvp}
 
 **Spec:** `Renew`, `GetStatus`, and `Unsubscribe` MUST be directed at the **Subscription Manager** EPR and MUST honor subscription identity; `GetStatus` MUST NOT mutate state; successful `Unsubscribe` MUST stop notifications for that subscription.
 
-**Code (current):** [`handle_wsd`](../app/ws_scan.py) maintains subscriptions in [`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py), validates inbound [`Subscribe`](../app/soap/parsers/inbound_eventing.py) (Push + optional Action filter), returns SOAP faults (WS-Addressing fault Action, HTTP 500) for unknown identifiers or unsupported subscribe contracts, and returns **GetStatus** `Expires` as the **remaining** lease duration without extending it.
+**Code (current):** [`handle_wsd`](../app/ws_scan.py) stores subscriptions in [`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py), validates **Push** `Delivery/@Mode`, rejects unsupported **Filter**, requires **NotifyTo**/`wsa:Address`, grants **Expires** (capped by `Config.inbound_eventing_max_grant_sec` / default), and returns SOAP faults (`wse:UnableToRenew`, `wse:UnableToDestroySubscription`, `wse:DeliveryModeRequestedUnavailable`, `wse:FilteringNotSupported`, `wse:InvalidMessage`) on validation and unknown/expired identifier paths. **GetStatus** reads stored granted expiration without calling **Renew**.
 
-**Residual:** No **SubscriptionEnd** yet (see §3). Inbound **Subscribe** does not yet enforce the full **EndTo** / **NotifyTo** / **Expires** matrix from §5–§8 (see backlog `IMPLEMENTATION_PLAN.md` item 6). Parsing remains ElementTree for Subscribe bodies and regex-oriented for management **Identifier** extraction in headers.
+**Residual:** No **SubscriptionEnd** (see §3). Inbound **Subscribe** does not yet enforce the full **EndTo** / **Expires** negotiation matrix from §5–§8 (see backlog). Management **Identifier** extraction remains regex-oriented on the SOAP header slice (§11).
 
 ---
 
@@ -65,39 +65,39 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ## High
 
-### 4. Server does not generate WS-Eventing SOAP faults (violates §5, §11.5)
+### 4. WS-Eventing SOAP faults — **partial** (inbound manager yes; unknown `/wsd` actions no)
 
 **Spec:** Faults such as `DeliveryModeRequestedUnavailable`, `InvalidExpirationTime`, `UnsupportedExpirationType`, `FilteringNotSupported` / `FilteringRequestedUnavailable`, `UnableToRenew`, `InvalidMessage`, etc., MUST be represented as SOAP faults with appropriate codes/reasons.
 
-**Code:** [`handle_wsd`](../app/ws_scan.py) never builds `soap:Fault` responses for eventing. Unsupported actions fall through to `text/plain` “OK” (see §6 below).
+**Code:** [`handle_wsd`](../app/ws_scan.py) builds SOAP faults for inbound **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** validation and lifecycle errors via [`build_wse_fault_body`](../app/soap/builders/faults.py). Unsupported **SOAP actions** still fall through to `text/plain` “OK” (see §9 below).
 
-**Risk:** Strict clients receive success or non-SOAP bodies where faults are required.
+**Risk:** Strict clients still receive non-SOAP bodies for unknown actions on the WSD endpoint.
 
-**Recommendation:** Centralize fault builders; map validation failures to the spec subcodes local names / namespaces used in your interop profile.
+**Recommendation:** Return a SOAP fault for the default branch; keep centralized fault builders.
 
 ---
 
-### 5. Inbound `Subscribe` does not validate message content (violates §3.2–3.3, §4.4, §7)
+### 5. Inbound `Subscribe` — **partial** (Push/NotifyTo/Filter/Expires grant; not full §5–§8)
 
 **Spec:** Event Source MUST validate **delivery mode**; unsupported mode MUST fault (optionally advertising supported modes). If filtering is requested but unsupported, MUST fault. `Subscribe` MUST include **Delivery** and **sink** EPR (NotifyTo); response MUST include **SubscriptionManager** EPR and **granted Expires**.
 
-**Code:** [`handle_wsd`](../app/ws_scan.py) for `ACTION_SUBSCRIBE` ignores body; always returns `SubscribeResponse` with fixed `PT1H` and random identifier. No check of `Mode`, `NotifyTo`, `Filter`, or `Expires`.
+**Code:** [`handle_wsd`](../app/ws_scan.py) parses [`parse_inbound_subscribe_body`](../app/soap/parsers/inbound_eventing.py), enforces Push, faults unsupported **Filter**, requires **NotifyTo** address, and grants **Expires** via [`grant_expires_from_request`](../app/soap/parsers/inbound_eventing.py). **EndTo** and richer expiration negotiation are not yet modeled.
 
-**Risk:** Appears compliant in traces while accepting arbitrary or malicious subscribe payloads.
+**Risk:** Peers that require strict **EndTo** handling or additional validation may still fault or behave unexpectedly.
 
-**Recommendation:** Parse body (namespace-aware XML); reject unsupported modes and filters with §5 faults; compute granted expiration.
+**Recommendation:** Extend validation per §5–§8 and backlog item 5 in `IMPLEMENTATION_PLAN.md`.
 
 ---
 
-### 6. `DeliveryModeRequestedUnavailable` path missing on both sides (violates §3.2, §4.4, §5)
+### 6. `DeliveryModeRequestedUnavailable` — **inbound path present** (outbound always Push)
 
 **Spec:** Push MUST be supported; other modes MAY be extended; unsupported requested mode MUST fault.
 
-**Code:** Client always emits Push in [`build_subscribe_request`](../app/ws_eventing_client.py). Server never inspects inbound `Delivery/@Mode`.
+**Code:** Client always emits Push in [`build_subscribe_request`](../app/soap/builders/eventing.py). Inbound [`handle_wsd`](../app/ws_scan.py) rejects non-Push `Delivery/@Mode` with `DeliveryModeRequestedUnavailable`.
 
-**Risk:** No way to negotiate or signal unsupported modes correctly when extending.
+**Risk:** No client-side negotiation for non-Push modes when extending.
 
-**Recommendation:** Server validates `Mode`; client remains Push-only until another mode is implemented.
+**Recommendation:** Keep client Push-only until another mode is implemented end-to-end.
 
 ---
 
@@ -115,7 +115,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Spec:** If a filter is present and the event source does not support filtering, it MUST fault (`FilteringNotSupported` / `FilteringRequestedUnavailable` as appropriate).
 
-**Code:** [`build_subscribe_request`](../app/ws_eventing_client.py) always includes `wse:Filter` with dialect `http://schemas.xmlsoap.org/ws/2006/02/devprof/Action` and action `ScanAvailableEvent`. Inbound server does not honor this rule when acting as event source.
+**Code:** [`build_subscribe_request`](../app/ws_eventing_client.py) always includes `wse:Filter` with dialect `http://schemas.xmlsoap.org/ws/2006/02/devprof/Action` and action `ScanAvailableEvent`. Inbound [`handle_wsd`](../app/ws_scan.py) faults when **Filter** is present (`FilteringNotSupported`).
 
 **Risk:** Devices that strictly reject filters may fault; the stack does not implement the prescribed fault *handling* matrix beyond generic `parse_soap_fault`.
 
@@ -155,15 +155,13 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ---
 
-### 12. `GetStatus` response does not reflect real expiration (violates §3.5)
+### 12. `GetStatus` response — **resolved for inbound manager** {#12-getstatus-resolved-inbound}
 
 **Spec:** MUST return **current** expiration without mutating state.
 
-**Code:** [`build_eventing_get_status_response`](../app/ws_scan.py) always returns `PT1H`.
+**Implementation:** For inbound subscriptions, [`handle_wsd`](../app/ws_scan.py) returns the stored granted **Expires** string from [`InboundSubscriptionRegistry.get_status`](../app/inbound_eventing_registry.py) without extending the lease.
 
-**Risk:** Misleading status for any peer that polls `GetStatus`.
-
-**Recommendation:** Tie response to stored `expires_at` for the resolved subscription.
+**Residual:** Outbound client **GetStatus** is still not implemented.
 
 ---
 

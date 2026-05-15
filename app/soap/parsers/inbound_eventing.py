@@ -1,4 +1,4 @@
-"""Parse inbound WS-Eventing Subscribe and management headers for the local subscription manager."""
+"""Parse inbound WS-Eventing Subscribe/Renew bodies and management headers."""
 
 from __future__ import annotations
 
@@ -6,197 +6,174 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
-from app.soap.namespaces import (
-    FILTER_DIALECT_DEVPROF_ACTION,
-    NS_SOAP,
-    SCAN_AVAILABLE_EVENT_ACTION,
-    SCANNER_STATUS_SUMMARY_EVENT_ACTION,
-    WSE_DELIVERY_MODE_PUSH,
-)
-from app.soap.parsers.eventing import EXPIRES_PATTERN, parse_iso8601_duration_to_seconds
+from app.soap.parsers.eventing import IDENTIFIER_PATTERN, parse_iso8601_duration_to_seconds
 
-_SUPPORTED_FILTER_ACTIONS = frozenset(
-    {
-        SCAN_AVAILABLE_EVENT_ACTION,
-        SCANNER_STATUS_SUMMARY_EVENT_ACTION,
-    }
+__all__ = [
+    "PUSH_DELIVERY_MODE_URI",
+    "extract_management_subscription_identifier",
+    "extract_wsa_to_optional",
+    "parse_inbound_renew_expires_optional",
+    "parse_inbound_subscribe_body",
+    "seconds_to_xs_duration",
+    "grant_expires_from_request",
+]
+
+# Canonical Push mode URI (case-insensitive compare).
+PUSH_DELIVERY_MODE_URI = "http://schemas.xmlsoap.org/ws/2004/08/eventing/DeliveryModes/Push"
+
+_HEADER_INNER_PATTERN = re.compile(
+    r"<(?:[^:>\s]+:)?Header\b[^>]*>(.*)</(?:[^:>\s]+:)?Header>",
+    re.DOTALL | re.IGNORECASE,
 )
+_WSA_TO_PATTERN = re.compile(
+    r"<(?:[^:>\s]+:)?To\b[^>]*>\s*([^<]+?)\s*</(?:[^:>\s]+:)?To>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _child_by_local(parent: ET.Element, local: str) -> ET.Element | None:
+    for ch in parent:
+        if _local_name(ch.tag) == local:
+            return ch
+    return None
+
+
+def _text_direct(el: ET.Element | None) -> str:
+    if el is None:
+        return ""
+    return (el.text or "").strip()
+
+
+def extract_wsa_to_optional(soap_text: str) -> str | None:
+    """Return first ``wsa:To`` in the SOAP header, if any."""
+    m = _HEADER_INNER_PATTERN.search(soap_text)
+    segment = m.group(1) if m else soap_text
+    to_m = _WSA_TO_PATTERN.search(segment)
+    return to_m.group(1).strip() if to_m else None
+
+
+def extract_management_subscription_identifier(soap_text: str) -> str | None:
+    """Extract subscription id from the SOAP header (Renew/Unsubscribe/GetStatus pattern)."""
+    m = _HEADER_INNER_PATTERN.search(soap_text)
+    segment = m.group(1) if m else soap_text
+    id_m = IDENTIFIER_PATTERN.search(segment)
+    return id_m.group(1).strip() if id_m else None
 
 
 @dataclass(frozen=True)
-class InboundSubscribeAnalysis:
-    """Outcome of validating an inbound ``Subscribe`` body."""
+class ParsedInboundSubscribe:
+    """Fields needed to validate an inbound ``Subscribe``."""
 
-    fault_subcode: str | None
-    fault_reason: str | None
-    granted_seconds: float
-    granted_expires_str: str
-
-    @property
-    def ok(self) -> bool:
-        """Return True when the subscribe should succeed."""
-        return self.fault_subcode is None
+    delivery_mode: str | None
+    notify_to_address: str
+    requested_expires: str | None
+    has_filter: bool
 
 
-def extract_subscription_identifier_from_soap_headers(soap_text: str) -> str | None:
-    """Return the first ``wse:Identifier`` (or unprefixed ``Identifier``) in the SOAP Header.
-
-    Renew / GetStatus / Unsubscribe requests carry the subscription id in the header block
-    (before ``soap:Body``), matching how :func:`app.soap.builders.eventing.build_renew_request`
-    serializes outbound management calls.
-    """
-    lower = soap_text.lower()
-    idx_body = lower.find("<soap:body")
-    if idx_body == -1:
-        idx_body = lower.find("<body")
-    head = soap_text[:idx_body] if idx_body != -1 else soap_text
-    m = re.search(
-        r"<(?:[^:>/\s]+:)?Identifier>\s*([^<\s]+)\s*</(?:[^:>/\s]+:)?Identifier>",
-        head,
-        re.DOTALL,
-    )
-    return m.group(1).strip() if m else None
-
-
-def _fault(granted: float, granted_str: str, subcode: str, reason: str) -> InboundSubscribeAnalysis:
-    return InboundSubscribeAnalysis(
-        fault_subcode=subcode,
-        fault_reason=reason,
-        granted_seconds=granted,
-        granted_expires_str=granted_str,
-    )
-
-
-def _ok(granted_seconds: float, granted_str: str) -> InboundSubscribeAnalysis:
-    return InboundSubscribeAnalysis(
-        fault_subcode=None,
-        fault_reason=None,
-        granted_seconds=granted_seconds,
-        granted_expires_str=granted_str,
-    )
-
-
-def analyze_inbound_subscribe_envelope(
-    soap_text: str, *, max_grant_seconds: float
-) -> InboundSubscribeAnalysis:
-    """Validate inbound ``Subscribe`` XML for a minimal Push + optional Action filter profile.
-
-    Args:
-        soap_text: Full SOAP 1.2 envelope text.
-        max_grant_seconds: Upper bound for granted lease duration (wall-clock seconds).
-
-    Returns:
-        Analysis including either fault fields or granted lease duration and ``wse:Expires`` text.
-    """
+def parse_inbound_subscribe_body(soap_text: str) -> ParsedInboundSubscribe | None:
+    """Parse ``wse:Subscribe`` under ``soap:Body``; return ``None`` if missing or malformed."""
     try:
         root = ET.fromstring(soap_text)
     except ET.ParseError:
-        return _fault(0.0, "PT0S", "InvalidMessage", "SOAP envelope is not well-formed XML")
-
-    body = root.find(f".//{{{NS_SOAP}}}Body")
+        return None
+    body: ET.Element | None = None
+    for ch in root:
+        if _local_name(ch.tag) == "Body":
+            body = ch
+            break
     if body is None:
-        return _fault(0.0, "PT0S", "InvalidMessage", "Missing SOAP Body")
-
-    subscribe_el = None
-    for child in body:
-        tag = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
-        if tag == "Subscribe":
-            subscribe_el = child
+        return None
+    subscribe_el: ET.Element | None = None
+    for ch in body:
+        if _local_name(ch.tag) == "Subscribe":
+            subscribe_el = ch
             break
     if subscribe_el is None:
-        return _fault(0.0, "PT0S", "InvalidMessage", "Missing wse:Subscribe in SOAP Body")
+        return None
 
-    delivery = None
-    for child in subscribe_el:
-        tag = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
-        if tag == "Delivery":
-            delivery = child
+    delivery_el = _child_by_local(subscribe_el, "Delivery")
+    mode: str | None = None
+    if delivery_el is not None:
+        mode = (delivery_el.get("Mode") or "").strip() or None
+
+    notify_el = _child_by_local(delivery_el, "NotifyTo") if delivery_el is not None else None
+    addr_el = _child_by_local(notify_el, "Address") if notify_el is not None else None
+    notify_addr = _text_direct(addr_el)
+
+    expires_el = _child_by_local(subscribe_el, "Expires")
+    requested_expires = _text_direct(expires_el) or None
+
+    has_filter = _child_by_local(subscribe_el, "Filter") is not None
+
+    return ParsedInboundSubscribe(
+        delivery_mode=mode,
+        notify_to_address=notify_addr,
+        requested_expires=requested_expires,
+        has_filter=has_filter,
+    )
+
+
+def parse_inbound_renew_expires_optional(soap_text: str) -> str | None:
+    """Return ``wse:Expires`` text inside ``wse:Renew`` if present."""
+    try:
+        root = ET.fromstring(soap_text)
+    except ET.ParseError:
+        return None
+    body: ET.Element | None = None
+    for ch in root:
+        if _local_name(ch.tag) == "Body":
+            body = ch
             break
-    if delivery is None:
-        return _fault(0.0, "PT0S", "InvalidMessage", "Missing wse:Delivery")
-
-    mode = (delivery.get("Mode") or delivery.get("mode") or "").strip()
-    if mode != WSE_DELIVERY_MODE_PUSH:
-        return _fault(
-            0.0,
-            "PT0S",
-            "DeliveryModeRequestedUnavailable",
-            "Only Push delivery mode is supported for inbound Subscribe",
-        )
-
-    notify_addr: str | None = None
-    for child in delivery:
-        tag = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
-        if tag != "NotifyTo":
-            continue
-        for sub in child:
-            st = sub.tag.split("}", 1)[-1] if "}" in sub.tag else sub.tag
-            if st == "Address" and (sub.text or "").strip():
-                notify_addr = (sub.text or "").strip()
-                break
-        if notify_addr:
+    if body is None:
+        return None
+    renew_el: ET.Element | None = None
+    for ch in body:
+        if _local_name(ch.tag) == "Renew":
+            renew_el = ch
             break
-    if not notify_addr:
-        return _fault(0.0, "PT0S", "InvalidMessage", "Missing or empty wse:NotifyTo/wsa:Address")
-
-    filter_elems = [
-        c for c in subscribe_el if (c.tag.split("}", 1)[-1] if "}" in c.tag else c.tag) == "Filter"
-    ]
-    if filter_elems:
-        fe = filter_elems[0]
-        dialect = (fe.get("Dialect") or fe.get("dialect") or "").strip()
-        action_text = (fe.text or "").strip()
-        if dialect != FILTER_DIALECT_DEVPROF_ACTION or action_text not in _SUPPORTED_FILTER_ACTIONS:
-            return _fault(
-                0.0,
-                "PT0S",
-                "FilteringNotSupported",
-                "Unsupported wse:Filter dialect or action for this event source",
-            )
-
-    expires_el = None
-    for child in subscribe_el:
-        tag = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
-        if tag == "Expires":
-            expires_el = child
-            break
-    raw_expires = (expires_el.text or "").strip() if expires_el is not None else ""
-    if raw_expires:
-        try:
-            requested = parse_iso8601_duration_to_seconds(raw_expires)
-        except ValueError:
-            return _fault(
-                0.0,
-                "PT0S",
-                "UnacceptableInitialTerminationTime",
-                f"Could not parse requested wse:Expires duration: {raw_expires!r}",
-            )
-    else:
-        requested = parse_iso8601_duration_to_seconds("PT1H")
-
-    granted = min(max(requested, 1.0), max(1.0, max_grant_seconds))
-    granted_str = _format_iso8601_duration_from_seconds(granted)
-    return _ok(granted, granted_str)
+    if renew_el is None:
+        return None
+    exp_el = _child_by_local(renew_el, "Expires")
+    return _text_direct(exp_el) or None
 
 
-def extract_renew_or_getstatus_expires_request(soap_text: str) -> str | None:
-    """Return raw ``wse:Expires`` text from a Renew body, if present."""
-    m = EXPIRES_PATTERN.search(soap_text)
-    return m.group(1).strip() if m else None
+def seconds_to_xs_duration(sec: float) -> str:
+    """Format a non-negative duration in seconds as ``xs:duration`` (PT… form)."""
+    s = max(1, int(round(float(sec))))
+    if s % 3600 == 0:
+        return f"PT{s // 3600}H"
+    if s % 60 == 0:
+        return f"PT{s // 60}M"
+    return f"PT{s}S"
 
 
-def _format_iso8601_duration_from_seconds(sec: float) -> str:
-    """Format a non-negative duration as ``xs:duration`` (``PT…`` form)."""
-    if sec <= 0:
-        return "PT0S"
-    total = int(round(sec))
-    h, rem = divmod(total, 3600)
-    m, s = divmod(rem, 60)
-    parts: list[str] = []
-    if h:
-        parts.append(f"{h}H")
-    if m:
-        parts.append(f"{m}M")
-    if s or not parts:
-        parts.append(f"{s}S")
-    return "PT" + "".join(parts)
+def grant_expires_from_request(
+    requested: str | None,
+    *,
+    default_duration: str = "PT1H",
+    max_seconds: float = 86400.0,
+) -> tuple[str, float]:
+    """Choose granted ``wse:Expires`` string and lease length in seconds."""
+    try:
+        default_sec = parse_iso8601_duration_to_seconds(default_duration)
+    except ValueError:
+        default_duration = "PT1H"
+        default_sec = 3600.0
+    raw = (requested or "").strip()
+    if not raw:
+        return default_duration, min(default_sec, max_seconds)
+    try:
+        req_sec = parse_iso8601_duration_to_seconds(raw)
+    except ValueError:
+        return default_duration, min(default_sec, max_seconds)
+    if req_sec <= 0:
+        return default_duration, min(default_sec, max_seconds)
+    granted_sec = min(req_sec, max_seconds)
+    granted_str = raw if granted_sec == req_sec else seconds_to_xs_duration(granted_sec)
+    return granted_str, granted_sec

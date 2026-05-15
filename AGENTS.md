@@ -1,11 +1,11 @@
-# Agent operational notes
+# Agents
 
-Keep this file short. Status and backlog live in `IMPLEMENTATION_PLAN.md`.
+Keep this file short; backlog and status belong in `IMPLEMENTATION_PLAN.md`.
 
-## Verify changes
+## Commands
 
-- `uv run ruff check app tests && uv run ruff format app tests`
-- `uv run pytest` (full suite; no network required for default tests)
+- Tests: `uv run pytest tests/` (default `addopts` in `pyproject.toml` enable coverage; add `--no-cov` for a faster run).
+- Lint / format: `uv run ruff check app tests` and `uv run ruff format app tests`.
 
 ## Run the daemon
 
