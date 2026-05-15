@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from app.mtom import MtomPayloadIntegrityReport
 from app.soap.namespaces import ACTION_VALIDATE_SCAN_TICKET_RESPONSE
 from app.soap.outbound_response_validation import check_outbound_soap_response_correlation
+from app.soap.transport import HttpBodyIntegrityReport
 from app.ws_eventing_client import (
     ACTION_CREATE_SCAN_JOB,
     ACTION_GET,
@@ -72,6 +74,13 @@ _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML = """<soap:Envelope xmlns:soap="http://www.w
 </soap:Envelope>"""
 
 
+def _retrieve_image_http_ok(body: bytes) -> HttpBodyIntegrityReport:
+    """HTTP integrity helper for mocks (no ``Content-Length`` → always OK)."""
+    return HttpBodyIntegrityReport(
+        ok=True, body_len=len(body), content_length=None, reason_code=None
+    )
+
+
 def _fake_retrieve_image_from_xml(
     xml: str,
     *,
@@ -82,9 +91,10 @@ def _fake_retrieve_image_from_xml(
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         assert ACTION_RETRIEVE_IMAGE in payload
-        return (status, xml.encode("utf-8"), content_type)
+        raw = xml.encode("utf-8")
+        return (status, raw, content_type, _retrieve_image_http_ok(raw))
 
     return fake_post_soap_retrieve_image
 
@@ -1222,14 +1232,11 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         retrieve_payloads.append(payload)
         assert ACTION_RETRIEVE_IMAGE in payload
-        return (
-            200,
-            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
-            "application/soap+xml; charset=utf-8",
-        )
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
@@ -1489,13 +1496,10 @@ async def test_run_scan_available_chain_polls_get_job_status_before_retrieve(
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         retrieve_payloads.append(payload)
-        return (
-            200,
-            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
-            "application/soap+xml; charset=utf-8",
-        )
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
 
     monkeypatch.setattr("app.ws_eventing_client.asyncio.sleep", instant_sleep)
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
@@ -1664,13 +1668,10 @@ async def test_run_scan_available_chain_prefers_validate_response_message_id_for
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         retrieve_payloads.append(payload)
-        return (
-            200,
-            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
-            "application/soap+xml; charset=utf-8",
-        )
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
@@ -1814,13 +1815,10 @@ async def test_run_scan_available_chain_uses_event_destination_token(
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         retrieve_payloads.append(payload)
-        return (
-            200,
-            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
-            "application/soap+xml; charset=utf-8",
-        )
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
@@ -2009,13 +2007,10 @@ async def test_run_scan_available_chain_uses_scan_identifier_when_no_destination
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         retrieve_payloads.append(payload)
-        return (
-            200,
-            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
-            "application/soap+xml; charset=utf-8",
-        )
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
@@ -2078,13 +2073,10 @@ async def test_run_scan_available_chain_retries_create_without_token_on_invalid_
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         retrieve_payloads.append(payload)
-        return (
-            200,
-            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8"),
-            "application/soap+xml; charset=utf-8",
-        )
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
@@ -2298,8 +2290,13 @@ async def test_run_scan_available_chain_destination_subdir_and_post_hooks(
     def fake_parse_mtom(
         body: bytes,
         content_type: str | None,
-    ) -> tuple[str, bytes | None, str | None]:
-        return (_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML, b"\xff\xd8fakejpeg", "image/jpeg")
+    ) -> tuple[str, bytes | None, str | None, MtomPayloadIntegrityReport]:
+        return (
+            _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML,
+            b"\xff\xd8fakejpeg",
+            "image/jpeg",
+            MtomPayloadIntegrityReport(ok=True),
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(

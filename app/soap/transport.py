@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
@@ -16,6 +17,40 @@ if TYPE_CHECKING:
     from app.config import Config
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class HttpBodyIntegrityReport:
+    """Compares the downloaded body length to ``Content-Length`` when the header is present.
+
+    Chunked MTOM responses often omit ``Content-Length``; in that case ``ok`` is True and
+    ``content_length`` is None. A mismatch indicates truncation or a buggy peer and must not
+    be treated as a complete image payload.
+    """
+
+    ok: bool
+    body_len: int
+    content_length: int | None
+    reason_code: str | None = None
+
+
+def http_body_integrity_from_aiohttp_response(
+    body: bytes, response: object
+) -> HttpBodyIntegrityReport:
+    """Build an integrity report using aiohttp's parsed ``content_length`` (may be None)."""
+    n = len(body)
+    cl = getattr(response, "content_length", None)
+    if cl is None:
+        return HttpBodyIntegrityReport(ok=True, body_len=n, content_length=None, reason_code=None)
+    if cl != n:
+        return HttpBodyIntegrityReport(
+            ok=False,
+            body_len=n,
+            content_length=cl,
+            reason_code="http_content_length_mismatch",
+        )
+    return HttpBodyIntegrityReport(ok=True, body_len=n, content_length=cl, reason_code=None)
+
 
 _shared_session: ClientSession | None = None
 
@@ -217,8 +252,8 @@ class SoapHttpClient:
         url: str,
         payload: str,
         timeout_sec: float,
-    ) -> tuple[int, bytes, str | None]:
-        """POST RetrieveImage; return status, raw body bytes, Content-Type."""
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        """POST RetrieveImage; return status, body bytes, Content-Type, and length integrity."""
         headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
         req_action = extract_wsa_action(payload)
         req_action_short = soap_action_short(req_action)
@@ -252,6 +287,7 @@ class SoapHttpClient:
                 timeout=timeout,
             ) as response:
                 body = await response.read()
+                http_integrity = http_body_integrity_from_aiohttp_response(body, response)
                 resp_ct = response.headers.get("Content-Type")
                 is_mtom = bool(resp_ct and "multipart/related" in resp_ct.lower())
                 soap_text_probe = body[: min(4096, len(body))].decode("utf-8", errors="replace")
@@ -260,7 +296,7 @@ class SoapHttpClient:
                 resp_mid_m = WSA_MESSAGE_ID_PATTERN.search(soap_text_probe) if not is_mtom else None
                 resp_message_id = resp_mid_m.group(1).strip() if resp_mid_m else None
                 fault = {} if is_mtom else parse_soap_fault(soap_text_probe)
-                resp_extra: dict[str, str | int | float | None] = {
+                resp_extra: dict[str, str | int | float | bool | None] = {
                     "soap_leg": "client_response",
                     "soap_action": resp_action_short,
                     "wsa_message_id": resp_message_id,
@@ -268,7 +304,12 @@ class SoapHttpClient:
                     "http_status": response.status,
                     "bytes": len(body),
                     "response_content_type": resp_ct,
+                    "http_body_len": http_integrity.body_len,
+                    "http_content_length": http_integrity.content_length,
+                    "http_body_integrity_ok": http_integrity.ok,
                 }
+                if not http_integrity.ok:
+                    resp_extra["http_body_integrity_reason"] = http_integrity.reason_code
                 if fault.get("fault_subcode"):
                     resp_extra["fault_subcode"] = fault["fault_subcode"]
                 if fault.get("fault_reason"):
@@ -280,7 +321,19 @@ class SoapHttpClient:
                         f"{resp_action_short or 'unknown'} indicates failure",
                         extra=warn_extra,
                     )
-                return response.status, body, resp_ct
+                if not http_integrity.ok:
+                    log.warning(
+                        "RetrieveImage HTTP body length does not match Content-Length",
+                        extra={
+                            "soap_leg": "client_response",
+                            "soap_action": resp_action_short,
+                            "url": url,
+                            "http_body_len": http_integrity.body_len,
+                            "http_content_length": http_integrity.content_length,
+                            "reason_code": http_integrity.reason_code,
+                        },
+                    )
+                return response.status, body, resp_ct, http_integrity
         except asyncio.TimeoutError:
             log.warning(
                 f"{req_action_short or 'unknown'} timed out",

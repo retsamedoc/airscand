@@ -110,7 +110,7 @@ Implements the flow described in [design.md §6.2](design.md) (metadata probe, v
 2. **ValidateScanTicket** to `{scanner_xaddr}`-derived **`/WDP/SCAN`** URL (`resolve_wdp_scan_url`).
 3. **CreateScanJob** with resolved **DestinationToken** / **ScanIdentifier** (precedence documented in code: subscribe map, event body, validate response heuristics, subscription id). Optional retry without **DestinationToken** on `ClientErrorInvalidDestinationToken` when enabled in config.
 4. **GetJobStatus** polling until ready or terminal failure (can be disabled per **ScannerProfile**, e.g. Epson WF-3640).
-5. **RetrieveImage** via `_post_soap_retrieve_image` (long timeout); body parsed with `parse_retrieve_image_mtom`, image bytes passed to `save_scan_file` when `output_dir` is set.
+5. **RetrieveImage** via `_post_soap_retrieve_image` (long timeout); raw bytes checked against HTTP ``Content-Length`` when present, then parsed with `parse_retrieve_image_mtom` (MTOM closing delimiter, part ``Content-Length``, resolved **xop** part, JPEG/PNG/TIFF/PDF magic vs declared MIME). Failing checks surface ``airscand:RetrieveImagePayloadIntegrity`` and skip `save_scan_file` even when the SOAP envelope claims success.
 6. Optional **Idle** wait: `begin_retrieve_idle_wait` / `await_scanner_idle_after_retrieve` / `end_retrieve_idle_wait` coordinated with inbound **ScannerStatusSummaryEvent** in `ws_scan`.
 
 ### WS-Eventing registration (`main.py` + `app/ws_eventing_client.py`)

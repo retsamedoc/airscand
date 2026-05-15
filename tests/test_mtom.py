@@ -12,6 +12,7 @@ from app.mtom import (
     normalize_cid,
     parse_retrieve_image_mtom,
 )
+from app.soap.transport import HttpBodyIntegrityReport
 from app.ws_eventing_client import (
     ACTION_CREATE_SCAN_JOB,
     ACTION_GET_SCANNER_ELEMENTS,
@@ -76,10 +77,11 @@ def test_parse_retrieve_image_mtom_extracts_jpeg() -> None:
         image_bytes=_JPEG_PREFIX + b"data",
         cid="9CAED324E3C0_417441432@epson",
     )
-    soap_text, image_bytes, image_ct = parse_retrieve_image_mtom(body, outer_ct)
+    soap_text, image_bytes, image_ct, integrity = parse_retrieve_image_mtom(body, outer_ct)
     assert "RetrieveImageResponse" in soap_text
     assert image_bytes == _JPEG_PREFIX + b"data"
     assert image_ct is not None and "jpeg" in image_ct.lower()
+    assert integrity.ok is True
 
 
 def test_parse_retrieve_image_mtom_non_multipart_returns_soap_only() -> None:
@@ -89,12 +91,13 @@ def test_parse_retrieve_image_mtom_non_multipart_returns_soap_only() -> None:
         "<soap:Body><sca:RetrieveImageResponse><sca:Status>Success</sca:Status></sca:RetrieveImageResponse>"
         "</soap:Body></soap:Envelope>"
     )
-    soap_text, image_bytes, image_ct = parse_retrieve_image_mtom(
+    soap_text, image_bytes, image_ct, integrity = parse_retrieve_image_mtom(
         xml.encode("utf-8"), "application/soap+xml"
     )
     assert "Success" in soap_text
     assert image_bytes is None
     assert image_ct is None
+    assert integrity.ok is True
 
 
 @pytest.mark.asyncio
@@ -134,9 +137,17 @@ async def test_run_scan_available_chain_saves_mtom_image(
 
     async def fake_post_soap_retrieve_image(
         *, url: str, payload: str, timeout_sec: float
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         assert ACTION_RETRIEVE_IMAGE in payload
-        return (200, mtom_body, outer_ct)
+        raw = mtom_body
+        return (
+            200,
+            raw,
+            outer_ct,
+            HttpBodyIntegrityReport(
+                ok=True, body_len=len(raw), content_length=None, reason_code=None
+            ),
+        )
 
     monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
     monkeypatch.setattr(
@@ -155,3 +166,135 @@ async def test_run_scan_available_chain_saves_mtom_image(
     saved = tmp_path / "scan_mtom-test-id.jpg"
     assert saved.read_bytes() == _JPEG_PREFIX + b"x"
     assert len(calls) == 3
+
+
+def _mtom_soap_only_body(*, boundary: str, soap_xml: str) -> bytes:
+    """Multipart with SOAP referencing a CID but no binary part (integrity failure)."""
+    chunks: list[bytes] = []
+    chunks.append(f"--{boundary}\r\n".encode("ascii"))
+    chunks.append(b"Content-Type: application/xop+xml\r\n\r\n")
+    chunks.append(soap_xml.encode("utf-8"))
+    chunks.append(f"\r\n--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks)
+
+
+def test_parse_retrieve_image_mtom_missing_binary_part_fails() -> None:
+    """SOAP references ``xop:Include`` but the related part is absent."""
+    boundary = "b_miss"
+    outer_ct = f'multipart/related; type="application/xop+xml"; boundary="{boundary}"'
+    body = _mtom_soap_only_body(boundary=boundary, soap_xml=_EPSON_SOAP)
+    _, image, _, integrity = parse_retrieve_image_mtom(body, outer_ct)
+    assert image is None
+    assert integrity.ok is False
+    assert integrity.reason_code == "mtom_missing_binary_part"
+
+
+def test_parse_retrieve_image_mtom_incomplete_multipart_fails() -> None:
+    """Body truncated before closing ``--boundary--`` delimiter."""
+    boundary = "mime_boundary_trunc"
+    outer_ct = f'multipart/related; type="application/xop+xml"; boundary="{boundary}"'
+    full = _build_mtom_http_body(
+        boundary=boundary,
+        soap_xml=_EPSON_SOAP,
+        image_bytes=_JPEG_PREFIX + b"z",
+        cid="9CAED324E3C0_417441432@epson",
+    )
+    truncated = full[:-8]
+    _, image, _, integrity = parse_retrieve_image_mtom(truncated, outer_ct)
+    assert integrity.ok is False
+    assert integrity.reason_code == "mtom_incomplete_multipart"
+    assert image is not None
+
+
+def test_parse_retrieve_image_mtom_part_content_length_mismatch_fails() -> None:
+    """Per-part ``Content-Length`` disagrees with actual octets."""
+    boundary = "b_cl"
+    outer_ct = f'multipart/related; type="application/xop+xml"; boundary="{boundary}"'
+    chunks: list[bytes] = []
+    chunks.append(f"--{boundary}\r\n".encode("ascii"))
+    chunks.append(b"Content-Type: application/xop+xml\r\n\r\n")
+    chunks.append(_EPSON_SOAP.encode("utf-8"))
+    chunks.append(f"\r\n--{boundary}\r\n".encode("ascii"))
+    chunks.append(
+        b"Content-Type:image/jpeg\r\nContent-Length:9999\r\nContent-ID:<9CAED324E3C0_417441432@epson>\r\n\r\n"
+    )
+    chunks.append(_JPEG_PREFIX + b"x")
+    chunks.append(f"\r\n--{boundary}--\r\n".encode("ascii"))
+    body = b"".join(chunks)
+    _, _, _, integrity = parse_retrieve_image_mtom(body, outer_ct)
+    assert integrity.ok is False
+    assert integrity.reason_code == "mtom_part_content_length_mismatch"
+
+
+def test_parse_retrieve_image_mtom_magic_mismatch_fails() -> None:
+    """Declared ``image/jpeg`` must begin with JPEG SOI marker."""
+    boundary = "b_magic"
+    outer_ct = f'multipart/related; type="application/xop+xml"; boundary="{boundary}"'
+    soap = _EPSON_SOAP.replace("9CAED324E3C0_417441432@epson", "badmagic@local")
+    body = _build_mtom_http_body(
+        boundary=boundary,
+        soap_xml=soap,
+        image_bytes=b"not-a-jpeg",
+        cid="badmagic@local",
+    )
+    _, image, _, integrity = parse_retrieve_image_mtom(body, outer_ct)
+    assert image == b"not-a-jpeg"
+    assert integrity.ok is False
+    assert integrity.reason_code == "mtom_magic_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_skips_save_on_mtom_integrity_failure(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Corrupt MTOM (missing binary) does not write a scan file."""
+    boundary = "b_bad_chain"
+    outer_ct = f'multipart/related; type="application/xop+xml"; boundary="{boundary}"'
+    bad_body = _mtom_soap_only_body(boundary=boundary, soap_xml=_EPSON_SOAP)
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, "<soap:Envelope/>"
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>j1</sca:JobId><sca:JobToken>t1</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        assert ACTION_RETRIEVE_IMAGE in payload
+        return (
+            200,
+            bad_body,
+            outer_ct,
+            HttpBodyIntegrityReport(
+                ok=True, body_len=len(bad_body), content_length=None, reason_code=None
+            ),
+        )
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        output_dir=tmp_path,
+    )
+    assert result.get("retrieve_http_status") == "200"
+    assert result.get("retrieve_fault_subcode") == "airscand:RetrieveImagePayloadIntegrity"
+    assert result.get("saved_scan_path") is None
+    assert list(tmp_path.iterdir()) == []

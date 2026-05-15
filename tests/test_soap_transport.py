@@ -14,6 +14,7 @@ from app.soap.transport import (
     SoapHttpClient,
     configure_soap_http_client_from_config,
     default_soap_http_client,
+    http_body_integrity_from_aiohttp_response,
     is_scanner_xaddr_transport_failover,
     reset_soap_http_client_singleton_for_tests,
 )
@@ -32,9 +33,11 @@ class _FakeResponse:
 
     status = 200
     headers: dict[str, str] = {}
+    content_length: int | None = None
 
-    def __init__(self, body_text: str = "") -> None:
+    def __init__(self, body_text: str = "", *, content_length: int | None = None) -> None:
         self._body_text = body_text
+        self.content_length = content_length
 
     async def text(self) -> str:
         return self._body_text
@@ -112,14 +115,42 @@ async def test_soap_http_client_post_retrieve_image_uses_same_timeout_split() ->
     client = SoapHttpClient(
         session=session, connect_timeout_sec=3.0, read_timeout_override_sec=None
     )
-    await client.post_retrieve_image(
+    status, _body, _ct, rep = await client.post_retrieve_image(
         url="http://127.0.0.1:9/retrieve",
         payload="<x/>",
         timeout_sec=120.0,
     )
+    assert status == 200
+    assert rep.ok is True
     assert session.last_timeout is not None
     assert session.last_timeout.sock_connect == 3.0
     assert session.last_timeout.sock_read == 120.0
+
+
+def test_http_body_integrity_from_aiohttp_response_mismatch() -> None:
+    """When ``content_length`` disagrees with actual bytes, the report is not OK."""
+
+    class _Resp:
+        content_length = 100
+        headers: dict[str, str] = {}
+
+    rep = http_body_integrity_from_aiohttp_response(b"x" * 5, _Resp())
+    assert rep.ok is False
+    assert rep.reason_code == "http_content_length_mismatch"
+    assert rep.body_len == 5
+    assert rep.content_length == 100
+
+
+def test_http_body_integrity_from_aiohttp_response_no_header() -> None:
+    """Chunked or omitted ``Content-Length`` yields OK (length not asserted)."""
+
+    class _Resp:
+        content_length = None
+        headers: dict[str, str] = {}
+
+    rep = http_body_integrity_from_aiohttp_response(b"abc", _Resp())
+    assert rep.ok is True
+    assert rep.content_length is None
 
 
 def test_configure_soap_http_client_from_config_applies_config_timeouts(

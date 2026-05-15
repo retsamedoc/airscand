@@ -27,22 +27,13 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Multi-XAddr registration failover:** [`discover_scanner_xaddrs`](app/discovery.py) returns the full **ProbeMatches** list in order; [`main._eventing_registration_loop`](main.py) tries each candidate and advances on transport-layer failures classified by [`is_scanner_xaddr_transport_failover`](app/soap/transport.py) (`asyncio.TimeoutError`, `ClientConnectorError`, `ClientOSError`). Logs include `xaddr_attempt_index`, `xaddr_candidates_total`, and `scanner_xaddr` per attempt (`tests/test_discovery.py`, `tests/test_main_registration.py`, `tests/test_soap_transport.py`). *Residual:* per-scan outbound legs after registration still target `config.scanner_xaddr` only (no mid-chain rotation).
 
 - **Outbound SOAP response validation (RelatesTo / Action):** Optional strict checks for **Subscribe**, **ValidateScanTicket**, **CreateScanJob**, **GetJobStatus** (when polling), and **RetrieveImage** (SOAP envelope from MTOM) via ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` / ``Config.validate_outbound_soap_response`` (`app/soap/outbound_response_validation.py`, `app/ws_eventing_client.py`, `main.py`, `app/ws_scan.py`). Default **off** for interop with devices that omit headers (`docs/protocol/vendor_quirks.md`). *Why tests matter:* wrong correlation otherwise accepts mis-attributed HTTP replies as if they matched the in-flight SOAP leg.
+- **RetrieveImage payload integrity (pull / MTOM):** When HTTP provides ``Content-Length``, downloaded byte length must match. For ``multipart/related``, checks include closing boundary, optional per-part ``Content-Length``, **xop:Include** → binary part resolution, non-empty payload, and JPEG/PNG/TIFF/PDF magic vs declared MIME. Failures log structured ``integrity_reason_codes`` / lengths and return fault ``airscand:RetrieveImagePayloadIntegrity`` without persisting (`app/mtom.py`, `app/soap/transport.py`, `app/ws_eventing_client.py`, `tests/test_mtom.py`, `tests/test_soap_transport.py`). *Residual:* bounded automatic **RetrieveImage** retry after truncation is not implemented (operators see explicit failure).
 
 ---
 
 ## Backlog (incomplete) — by priority
 
-### 4. **RetrieveImage** integrity / truncation handling (`docs/wia_client_audit.md` §7+)
-
-**Gap:** Limited explicit validation of full document bytes / truncation vs **Content-Length** / MTOM completeness.
-
-**Done when:** Documented behavior for partial MTOM, missing parts, and size mismatch; implementation matches (retry, fail, or warn-only per product choice).
-
-**Verification:** Tests with synthetic MTOM: complete image passes; truncated / missing CID fails with explicit outcome; logs include byte counts and outcome.
-
----
-
-### 5. Namespace-aware XML on critical eventing and fault paths (`docs/ws-eventing_audit.md` §11)
+### 4. Namespace-aware XML on critical eventing and fault paths (`docs/ws-eventing_audit.md` §11)
 
 **Gap:** Regex-based extraction for identifiers, manager EPR, etc.
 
@@ -52,7 +43,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 6. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
+### 5. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
 
 **Gap:** **RetrieveImage** path always attempted for device-initiated flow; push-only devices may need different handling.
 
@@ -62,7 +53,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 7. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
+### 6. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
 **Gap:** Limited tests for **fault mapping**, **subscription lifecycle** edge cases, **Renew** failure leading to resubscribe, **inbound** manager behavior.
 
@@ -72,7 +63,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 8. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
+### 7. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
 
 **Gap:** Only `Content-Type: application/soap+xml; charset=utf-8` on some legs.
 
@@ -82,7 +73,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 9. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
+### 8. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
 
 **Gap:** `parse_soap_fault` does not surface **Detail** for diagnostics.
 
@@ -92,7 +83,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 10. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
+### 9. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
 
 **Gap:** Assumes `app["config"]` present (`isinstance` guard unlike `handle_scan`).
 
@@ -102,7 +93,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 11. Developer and security posture (`docs/ROADMAP.md` Future)
+### 10. Developer and security posture (`docs/ROADMAP.md` Future)
 
 **Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
 
@@ -112,7 +103,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 12. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
+### 11. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
 
 **Gap:** State spread across async tasks and flags.
 
@@ -122,7 +113,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 13. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
+### 12. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
 
 **Gap:** Not implemented per audits.
 
@@ -132,7 +123,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 14. Optional **`specs/`** entry point (documentation)
+### 13. Optional **`specs/`** entry point (documentation)
 
 **Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
 
@@ -144,9 +135,9 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Tasks 7 + 5** (tests + parsing robustness) in parallel after behavior stabilizes.  
-2. Remaining items per product need (RetrieveImage integrity, pull/push, far-term items).
+1. **Tasks 6 + 4** (tests + parsing robustness) in parallel after behavior stabilizes.  
+2. Remaining items per product need (bounded **RetrieveImage** retry, pull/push, far-term items).
 
 ---
 
-*Last updated: outbound SOAP response correlation (opt-in `WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`); backlog 4–14.*
+*Last updated: **RetrieveImage** integrity (HTTP length + MTOM structure/magic); backlog renumbered 4–13.*

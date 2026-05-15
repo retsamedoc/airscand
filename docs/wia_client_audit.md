@@ -86,8 +86,8 @@ The spec’s logical sequence is:
 | **CreateScanJob** — store JobId | **Met** | Parsed and returned in chain result. |
 | **GetJobStatus** — poll until terminal, 200–500ms initial, backoff ~2s | **Partial** | Implemented in [`app/soap/parsers/scan.py`](../app/soap/parsers/scan.py) + [`poll_get_job_status_until_ready`](../app/ws_eventing_client.py); intervals align with intent; may be off by profile. |
 | **RetrieveImage** — only when ready | **Partial** | Gated when polling enabled; see §6. |
-| **RetrieveImage** — base64, large payloads, chunked | **Gap** | [`parse_retrieve_image_response`](../app/soap/parsers/scan.py) extracts **Status** and faults only; **no** decoding of document bytes, size limits, or integrity validation per §7.4. |
-| **RetrieveImage** — truncated retry | **Gap** | No retry path for truncated image payload. |
+| **RetrieveImage** — base64, large payloads, chunked | **Partial** | [`parse_retrieve_image_mtom`](../app/mtom.py) returns **integrity** metadata: HTTP ``Content-Length`` vs actual bytes (via [`post_retrieve_image`](../app/soap/transport.py)), MTOM closing delimiter, per-part lengths, **xop** resolution, and image magic vs MIME. On failure the chain records ``airscand:RetrieveImagePayloadIntegrity`` and does not persist (`app/ws_eventing_client.py`). **Bounded automatic retry** after truncation remains a follow-up (see `IMPLEMENTATION_PLAN.md`). |
+| **RetrieveImage** — truncated retry | **Gap** | No bounded automatic **RetrieveImage** retry loop yet; operators rely on the next device event / manual rerun. |
 | **CancelJob** | **Gap** | **Not implemented.** |
 
 ---
@@ -181,7 +181,8 @@ Use this as a prioritized backlog against [wia_client_spec.md](protocol/wia_clie
 - [x] **Outbound SOAP response validation**: optional verify `wsa:RelatesTo` matches the request `wsa:MessageID` and expected `wsa:Action` via ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` (`app/soap/outbound_response_validation.py`, `tests/test_outbound_response_validation.py`, `tests/test_ws_eventing_client.py`).
 - [ ] **Timeouts**: expose **connect** and **read** timeouts via config/env; align defaults with §3.2 (connect ≤ 2s, read 2–10s).
 - [x] **Multi-XAddr failover** (registration): ordered candidates from [`discover_scanner_xaddrs`](../app/discovery.py); [`main._eventing_registration_loop`](../main.py) advances on [`is_scanner_xaddr_transport_failover`](../app/soap/transport.py). Residual: scan-chain SOAP does not rotate **XAddr** mid-job.
-- [ ] **`RetrieveImage` body handling**: parse **Document** / base64 (or MTOM if needed), support large responses, **validate integrity** (e.g. magic bytes / length), **retry on truncation** per §7.4.
+- [x] **`RetrieveImage` integrity (pull / MTOM)**: HTTP body vs ``Content-Length`` when present (`SoapHttpClient.post_retrieve_image`); MTOM closing delimiter, optional per-part ``Content-Length``, **xop:Include** resolution, non-empty binary, and JPEG/PNG/TIFF/PDF magic vs declared MIME (`app/mtom.py`, `app/ws_eventing_client.py`, `tests/test_mtom.py`). **Why:** prevents persisting truncated or wrong-part payloads when SOAP still says success.
+- [ ] **`RetrieveImage` bounded automatic retry** after integrity or transport truncation (§7.4 / §10.2): not implemented; failures surface ``airscand:RetrieveImagePayloadIntegrity`` or SOAP faults for operator visibility.
 
 ### Medium
 

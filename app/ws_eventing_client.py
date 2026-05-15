@@ -35,7 +35,7 @@ parse_scanner_capabilities = scanner_capabilities.parse_scanner_capabilities
 # Re-export for callers/tests.
 InputSourceCapabilities = scanner_capabilities.InputSourceCapabilities
 ScannerCapabilities = scanner_capabilities.ScannerCapabilities
-from app.soap.transport import default_soap_http_client
+from app.soap.transport import HttpBodyIntegrityReport, default_soap_http_client
 
 # Re-export namespace constants for tests and main (explicit aliases satisfy static analysis).
 ACTION_CREATE_SCAN_JOB = namespaces.ACTION_CREATE_SCAN_JOB
@@ -151,8 +151,8 @@ async def _post_soap_retrieve_image(
     url: str,
     payload: str,
     timeout_sec: float,
-) -> tuple[int, bytes, str | None]:
-    """POST SOAP payload and return status, raw response body, and response Content-Type."""
+) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+    """POST SOAP payload; return status, body, Content-Type, and HTTP length integrity."""
     return await default_soap_http_client().post_retrieve_image(
         url=url, payload=payload, timeout_sec=timeout_sec
     )
@@ -1375,14 +1375,50 @@ async def run_scan_available_chain(
     saved_scan_bytes_val: int | None = None
     retrieve_details: dict[str, str | None] = {}
     try:
-        retrieve_status, retrieve_body, retrieve_ct = await _post_soap_retrieve_image(
+        (
+            retrieve_status,
+            retrieve_body,
+            retrieve_ct,
+            http_integrity,
+        ) = await _post_soap_retrieve_image(
             url=target_url,
             payload=retrieve_payload,
             timeout_sec=retrieve_image_timeout_sec,
         )
-        soap_text, image_bytes, image_part_ct = parse_retrieve_image_mtom(
+        soap_text, image_bytes, image_part_ct, mtom_integrity = parse_retrieve_image_mtom(
             retrieve_body, retrieve_ct
         )
+        if not http_integrity.ok or not mtom_integrity.ok:
+            reasons: list[str] = []
+            integ_extra: dict[str, object] = {
+                "http_body_len": http_integrity.body_len,
+                "http_content_length": http_integrity.content_length,
+                "http_integrity_ok": http_integrity.ok,
+                "mtom_integrity_ok": mtom_integrity.ok,
+            }
+            if not http_integrity.ok:
+                reasons.append(http_integrity.reason_code or "http_integrity")
+            if not mtom_integrity.ok:
+                reasons.append(mtom_integrity.reason_code or "mtom_integrity")
+                integ_extra.update(mtom_integrity.extra)
+            log.warning(
+                "RetrieveImage payload integrity check failed",
+                extra={
+                    "target_url": target_url,
+                    "job_id": resolved_job_id,
+                    "integrity_reason_codes": ",".join(reasons),
+                    **{k: v for k, v in integ_extra.items()},
+                },
+            )
+            image_bytes = None
+            if not retrieve_details:
+                retrieve_details = {
+                    "fault_code": "soap:Client",
+                    "fault_subcode": "airscand:RetrieveImagePayloadIntegrity",
+                    "fault_reason": "RetrieveImage response failed payload integrity checks: "
+                    + ", ".join(reasons),
+                    "status": None,
+                }
         if validate_outbound_soap_response:
             try:
                 check_outbound_soap_response_correlation(

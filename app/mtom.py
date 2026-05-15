@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from email import message_from_bytes
 from email.policy import default as email_policy
 
 __all__ = [
+    "MtomPayloadIntegrityReport",
     "extract_boundary_from_content_type",
     "extract_xop_include_cid",
     "normalize_cid",
@@ -18,6 +20,20 @@ XOP_INCLUDE_HREF_PATTERN = re.compile(
     r"<[^>]*:Include\b[^>]*\bhref\s*=\s*[\"']cid:([^\"']+)[\"']",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+@dataclass
+class MtomPayloadIntegrityReport:
+    """Outcome of structural checks on a RetrieveImage HTTP body (MTOM or SOAP-only).
+
+    Why: scanners occasionally truncate chunked MTOM streams or omit binary parts; treating
+    those as success would persist corrupt scans. This report drives explicit failure instead
+    of silent data loss.
+    """
+
+    ok: bool
+    reason_code: str | None = None
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 def extract_boundary_from_content_type(content_type: str) -> str | None:
@@ -53,6 +69,55 @@ def extract_xop_include_cid(soap_xml: str) -> str | None:
     return match.group(1).strip()
 
 
+def _multipart_has_closing_delimiter(body: bytes, boundary: str) -> bool:
+    """Return True when the raw body ends with a closing multipart delimiter for ``boundary``."""
+    try:
+        b = boundary.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    candidates = (
+        b"\r\n--" + b + b"--\r\n",
+        b"\r\n--" + b + b"--\n",
+        b"\n--" + b + b"--\n",
+        b"\n--" + b + b"--\r\n",
+        b"--" + b + b"--\r\n",
+        b"--" + b + b"--\n",
+        b"--" + b + b"--",
+    )
+    return any(body.endswith(s) for s in candidates)
+
+
+def _parse_positive_int_header(value: str) -> int | None:
+    stripped = value.strip()
+    if not stripped.isdigit():
+        return None
+    return int(stripped)
+
+
+def _mime_main_type(content_type: str | None) -> str | None:
+    if not content_type:
+        return None
+    return content_type.split(";", 1)[0].strip().lower()
+
+
+def _binary_magic_matches_declared_mime(content_type: str | None, data: bytes) -> bool:
+    """Return False when a declared image MIME clearly disagrees with leading magic bytes."""
+    if not data:
+        return False
+    main = _mime_main_type(content_type)
+    if main in (None, "", "application/octet-stream", "binary/octet-stream"):
+        return True
+    if main in ("image/jpeg", "image/jpg", "image/pjpeg"):
+        return data.startswith(b"\xff\xd8")
+    if main == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n") or data.startswith(b"\x89PNG\n")
+    if main in ("image/tiff", "image/tif", "image/x-tiff"):
+        return data.startswith(b"II*\x00") or data.startswith(b"MM\x00*")
+    if main == "application/pdf":
+        return data.startswith(b"%PDF")
+    return True
+
+
 def parse_multipart_related_parts(
     body: bytes, content_type_header: str
 ) -> list[tuple[dict[str, str], bytes]]:
@@ -85,29 +150,61 @@ def parse_multipart_related_parts(
 def parse_retrieve_image_mtom(
     body: bytes,
     response_content_type: str | None,
-) -> tuple[str, bytes | None, str | None]:
+) -> tuple[str, bytes | None, str | None, MtomPayloadIntegrityReport]:
     """Parse RetrieveImage HTTP body.
 
-    Returns ``(soap_xml_text, image_bytes_or_none, image_part_content_type_or_none)``.
-    For non-multipart responses, returns ``(decoded_soap_text, None, None)``.
+    Returns ``(soap_xml_text, image_bytes_or_none, image_part_content_type_or_none, integrity)``.
+    For non-multipart responses, returns ``(decoded_soap_text, None, None, integrity)`` where
+    integrity is OK (no MTOM binary contract applies).
+
+    Integrity checks (multipart): closing boundary present, per-part ``Content-Length`` when
+    present matches payload size, ``xop:Include`` references resolve to a non-empty part, and
+    declared image MIME matches magic bytes when the MIME is specific enough to verify.
     """
+    report = MtomPayloadIntegrityReport(ok=True, extra={"mtom_raw_body_len": len(body)})
     ct = (response_content_type or "").lower()
     if "multipart/related" not in ct:
         soap_text = body.decode("utf-8", errors="replace")
-        return soap_text, None, None
+        return soap_text, None, None, report
 
-    outer = response_content_type or ""
-    if not extract_boundary_from_content_type(outer):
+    outer = (response_content_type or "").strip()
+    boundary = extract_boundary_from_content_type(outer)
+    if not boundary:
+        report.ok = False
+        report.reason_code = "mtom_outer_boundary_missing"
         soap_text = body.decode("utf-8", errors="replace")
-        return soap_text, None, None
+        return soap_text, None, None, report
 
-    part_list = parse_multipart_related_parts(body, outer.strip())
+    part_list = parse_multipart_related_parts(body, outer)
     if not part_list:
+        report.ok = False
+        report.reason_code = "mtom_no_parts"
         soap_text = body.decode("utf-8", errors="replace")
-        return soap_text, None, None
+        return soap_text, None, None, report
+
+    if not _multipart_has_closing_delimiter(body, boundary):
+        report.ok = False
+        report.reason_code = "mtom_incomplete_multipart"
+        report.extra["multipart_boundary"] = boundary
+        report.extra["multipart_complete"] = False
+    else:
+        report.extra["multipart_complete"] = True
+
+    for hdrs, payload in part_list:
+        cl_raw = hdrs.get("Content-Length") or hdrs.get("Content-length")
+        if not cl_raw:
+            continue
+        expected = _parse_positive_int_header(str(cl_raw))
+        if expected is None:
+            continue
+        if expected != len(payload):
+            report.ok = False
+            report.reason_code = "mtom_part_content_length_mismatch"
+            report.extra["part_content_length_expected"] = expected
+            report.extra["part_payload_len"] = len(payload)
+            break
 
     soap_xml: str | None = None
-    soap_headers: dict[str, str] = {}
     for hdrs, payload in part_list:
         ctype = (hdrs.get("Content-Type") or hdrs.get("Content-type") or "").lower()
         if (
@@ -119,29 +216,40 @@ def parse_retrieve_image_mtom(
                 soap_xml = payload.decode("utf-8")
             except UnicodeDecodeError:
                 soap_xml = payload.decode("utf-8", errors="replace")
-            soap_headers = hdrs
             break
 
     if soap_xml is None:
-        # Fallback: first part is usually SOAP in MTOM
         soap_headers, first_payload = part_list[0]
         soap_xml = first_payload.decode("utf-8", errors="replace")
+        report.extra.setdefault("mtom_soap_fallback_first_part", True)
 
     cid_ref = extract_xop_include_cid(soap_xml)
-    if not cid_ref:
-        return soap_xml, None, None
-
-    target = normalize_cid(f"cid:{cid_ref}")
     image_bytes: bytes | None = None
     image_ct: str | None = None
-    for hdrs, payload in part_list:
-        raw_cid = hdrs.get("Content-ID") or hdrs.get("Content-Id") or ""
-        if not raw_cid:
-            continue
-        if normalize_cid(raw_cid) != target:
-            continue
-        image_bytes = payload
-        image_ct = hdrs.get("Content-Type") or hdrs.get("Content-type")
-        break
+    if cid_ref:
+        target = normalize_cid(f"cid:{cid_ref}")
+        for hdrs, payload in part_list:
+            raw_cid = hdrs.get("Content-ID") or hdrs.get("Content-Id") or ""
+            if not raw_cid:
+                continue
+            if normalize_cid(raw_cid) != target:
+                continue
+            image_bytes = payload
+            image_ct = hdrs.get("Content-Type") or hdrs.get("Content-type")
+            break
 
-    return soap_xml, image_bytes, image_ct
+    if cid_ref and image_bytes is None:
+        report.ok = False
+        report.reason_code = "mtom_missing_binary_part"
+        report.extra["xop_cid"] = cid_ref
+    if image_bytes is not None:
+        report.extra["image_byte_len"] = len(image_bytes)
+        if len(image_bytes) == 0:
+            report.ok = False
+            report.reason_code = "mtom_empty_binary_part"
+        elif not _binary_magic_matches_declared_mime(image_ct, image_bytes):
+            report.ok = False
+            report.reason_code = "mtom_magic_mismatch"
+            report.extra["image_content_type"] = image_ct
+
+    return soap_xml, image_bytes, image_ct, report
