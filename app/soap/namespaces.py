@@ -25,6 +25,19 @@ SCANNER_STATUS_SUMMARY_EVENT_ACTION = f"{NS_SCA}/ScannerStatusSummaryEvent"
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
 ACTION_RENEW = f"{NS_WSE}/Renew"
 ACTION_UNSUBSCRIBE = f"{NS_WSE}/Unsubscribe"
+ACTION_SUBSCRIPTION_END = f"{NS_WSE}/SubscriptionEnd"
+ACTION_SUBSCRIPTION_END_RESPONSE = f"{NS_WSE}/SubscriptionEndResponse"
+
+# WS-Eventing SubscriptionEnd status codes (xs:anyURI).
+STATUS_SUBSCRIPTION_END_SOURCE_CANCELLING = (
+    "http://schemas.xmlsoap.org/ws/2004/08/eventing/SourceCancelling"
+)
+STATUS_SUBSCRIPTION_END_SOURCE_SHUTTING_DOWN = (
+    "http://schemas.xmlsoap.org/ws/2004/08/eventing/SourceShuttingDown"
+)
+STATUS_SUBSCRIPTION_END_DELIVERY_FAILURE = (
+    "http://schemas.xmlsoap.org/ws/2004/08/eventing/DeliveryFailure"
+)
 ACTION_GET = f"{NS_WST}/Get"
 ACTION_VALIDATE_SCAN_TICKET = f"{NS_SCA}/ValidateScanTicket"
 ACTION_CREATE_SCAN_JOB = f"{NS_SCA}/CreateScanJob"

@@ -22,26 +22,14 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 - **Documentation reconciliation (status, ROADMAP, architecture, audits):** `docs/status.md` Phase 5 distinguishes **inbound shipped vs residual** and **outbound residual** (why: avoids duplicating work on already-landed SOAP paths); `docs/ROADMAP.md` near-term matches; `docs/architecture.md` package map matches `app/soap/` layout; `docs/ws-eventing_audit.md` defines outbound vs inbound terminology at top.
 - **Outbound SOAP HTTP timeouts:** `SoapHttpClient` uses aiohttp `ClientTimeout(sock_connect=…, sock_read=…)`; `WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC` (default **10**) and optional `WSD_SOAP_HTTP_READ_TIMEOUT_SEC` (global read override); `main.configure_soap_http_client_from_config` after `Config()` (`tests/test_soap_transport.py`, `tests/test_config.py`).
-- **Inbound Subscribe validation (MVP):** optional **`wse:EndTo`** must include **`wsa:Address`** matching **`NotifyTo`** (no separate **SubscriptionEnd** EPR until backlog item 2); non-empty invalid **`wse:Expires`** → **`InvalidExpirationTime`**; filter/delivery faults unchanged (`app/soap/parsers/inbound_eventing.py`, `tests/test_inbound_eventing.py`, `tests/test_ws_scan.py`).
+- **Inbound Subscribe validation (MVP):** optional **`wse:EndTo`** requires non-empty **`wsa:Address`** when **`EndTo`** is present; **`EndTo`** may differ from **`NotifyTo`** because manager-emitted **`SubscriptionEnd`** is POSTed to **`EndTo`** (or **`NotifyTo`** when **`EndTo`** is omitted). Non-empty invalid **`wse:Expires`** → **`InvalidExpirationTime`**; filter/delivery faults unchanged (`app/soap/parsers/inbound_eventing.py`, `tests/test_inbound_eventing.py`, `tests/test_ws_scan.py`).
+- **`SubscriptionEnd` (WS-Eventing, inbound roles):** When a managed lease expires without **Renew**, or **Unsubscribe**/**Renew**/**GetStatus** hits an already-expired id, the manager queues **`SubscriptionEnd`** (SOAP **`SubscriptionEnd`** action, **Status** URI `SourceCancelling`) to the stored subscriber EPR; **`main._inbound_subscription_lease_sweep_loop`** also expires idle leases every 5s. The sink accepts inbound **`SubscriptionEnd`** notifications and returns **`SubscriptionEndResponse`** (`app/inbound_eventing_registry.py`, `app/inbound_subscription_end_delivery.py`, `app/soap/builders/eventing.py`, `app/soap/namespaces.py`, `app/soap/parsers/subscription_end.py`, `app/ws_scan.py`, `main.py`, `tests/test_subscription_end.py`, `tests/test_ws_scan.py`). *Why tests matter:* without them, lease teardown silently breaks peers that rely on **EndTo** correlation or expect SOAP (not bare HTTP) for teardown.
 
 ---
 
 ## Backlog (incomplete) — by priority
 
-### 2. `SubscriptionEnd` support (WS-Eventing)
-
-**Gap:** No builder/parser/send path (`docs/ws-eventing_audit.md` §3; grep confirms no `SubscriptionEnd` in code).
-
-**Done when:** Product policy documented (when airscand emits or must accept **SubscriptionEnd**); implementation matches policy for **EndTo** / teardown.
-
-**Verification:**
-
-- If outbound emission is in scope: when subscription is torn down unexpectedly (define triggers), a one-way notification matching expected **Action** and addressing is sent (mock transport records XML).
-- If inbound only: parser + handler acknowledges or logs per interop needs without breaking sink.
-
----
-
-### 3. Multi-**XAddr** failover (`app/discovery.py`, orchestration)
+### 2. Multi-**XAddr** failover (`app/discovery.py`, orchestration)
 
 **Gap:** Discovery returns first **XAddr** only; no ordered retry on SOAP failures (`docs/wia_client_audit.md` §4).
 
@@ -54,7 +42,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 4. Outbound SOAP response validation (**RelatesTo**, **Action**) (`app/ws_eventing_client.py`, `app/soap/transport.py`)
+### 3. Outbound SOAP response validation (**RelatesTo**, **Action**) (`app/ws_eventing_client.py`, `app/soap/transport.py`)
 
 **Gap:** Responses not asserted against outbound **MessageID** / expected action (`docs/wia_client_audit.md` §5).
 
@@ -64,7 +52,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 5. **RetrieveImage** integrity / truncation handling (`docs/wia_client_audit.md` §7+)
+### 4. **RetrieveImage** integrity / truncation handling (`docs/wia_client_audit.md` §7+)
 
 **Gap:** Limited explicit validation of full document bytes / truncation vs **Content-Length** / MTOM completeness.
 
@@ -74,7 +62,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 6. Namespace-aware XML on critical eventing and fault paths (`docs/ws-eventing_audit.md` §11)
+### 5. Namespace-aware XML on critical eventing and fault paths (`docs/ws-eventing_audit.md` §11)
 
 **Gap:** Regex-based extraction for identifiers, manager EPR, etc.
 
@@ -84,7 +72,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 7. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
+### 6. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
 
 **Gap:** **RetrieveImage** path always attempted for device-initiated flow; push-only devices may need different handling.
 
@@ -94,7 +82,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 8. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
+### 7. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
 **Gap:** Limited tests for **fault mapping**, **subscription lifecycle** edge cases, **Renew** failure leading to resubscribe, **inbound** manager behavior.
 
@@ -104,7 +92,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 9. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
+### 8. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
 
 **Gap:** Only `Content-Type: application/soap+xml; charset=utf-8` on some legs.
 
@@ -114,7 +102,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 10. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
+### 9. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
 
 **Gap:** `parse_soap_fault` does not surface **Detail** for diagnostics.
 
@@ -124,7 +112,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 11. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
+### 10. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
 
 **Gap:** Assumes `app["config"]` present (`isinstance` guard unlike `handle_scan`).
 
@@ -134,7 +122,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 12. Developer and security posture (`docs/ROADMAP.md` Future)
+### 11. Developer and security posture (`docs/ROADMAP.md` Future)
 
 **Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
 
@@ -144,7 +132,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 13. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
+### 12. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
 
 **Gap:** State spread across async tasks and flags.
 
@@ -154,7 +142,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 14. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
+### 13. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
 
 **Gap:** Not implemented per audits.
 
@@ -164,7 +152,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 15. Optional **`specs/`** entry point (documentation)
+### 14. Optional **`specs/`** entry point (documentation)
 
 **Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
 
@@ -176,11 +164,10 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Task 2** (`SubscriptionEnd` + distinct **EndTo** when supported).  
-2. **Task 3** (multi-**XAddr** failover).  
-3. **Tasks 8 + 6** (tests + parsing robustness) in parallel after behavior stabilizes.  
-4. Remaining items per product need (RelatesTo validation, pull/push, far-term items).
+1. **Task 2** (multi-**XAddr** failover).  
+2. **Tasks 7 + 5** (tests + parsing robustness) in parallel after behavior stabilizes.  
+3. Remaining items per product need (RelatesTo validation, pull/push, far-term items).
 
 ---
 
-*Last updated: inbound Subscribe EndTo/Expires validation; backlog 2–15.*
+*Last updated: WS-Eventing SubscriptionEnd (inbound manager emission + sink ack); backlog 2–14.*

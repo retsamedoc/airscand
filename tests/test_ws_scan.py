@@ -11,6 +11,7 @@ import pytest
 
 from app.inbound_eventing_registry import reset_inbound_subscription_registry
 from app.soap.fault import parse_soap_fault
+from app.soap.namespaces import ACTION_SUBSCRIPTION_END, ACTION_SUBSCRIPTION_END_RESPONSE
 from app.soap.parsers.inbound_eventing import PUSH_DELIVERY_MODE_URI
 from app.ws_scan import (
     ACTION_CREATE_SCAN_JOB,
@@ -27,6 +28,7 @@ from app.ws_scan import (
     build_eventing_subscribe_response,
     build_scan_available_event_ack_response,
     build_scanner_status_summary_event_ack_response,
+    build_subscription_end_ack_response,
     extract_action,
     extract_message_id,
     handle_wsd,
@@ -98,6 +100,30 @@ def _subscribe_push_envelope(
         <wse:NotifyTo><wsa:Address>{notify_to}</wsa:Address></wse:NotifyTo>
       </wse:Delivery>
 {end_to_lines}{filter_line}{expires_lines}    </wse:Subscribe>
+  </soap:Body>
+</soap:Envelope>""".encode()
+
+
+def _subscription_end_envelope(message_id: str = "urn:uuid:end-1") -> bytes:
+    """Inbound ``SubscriptionEnd`` notification toward this host's sink."""
+    return f"""<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+  xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing"
+  xmlns:wsman="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">
+  <soap:Header>
+    <wsa:Action>{ACTION_SUBSCRIPTION_END}</wsa:Action>
+    <wsa:MessageID>{message_id}</wsa:MessageID>
+  </soap:Header>
+  <soap:Body>
+    <wse:SubscriptionEnd>
+      <wse:SubscriptionManager>
+        <wsa:Address>http://scanner/mgr</wsa:Address>
+        <wsman:Identifier>urn:uuid:gone</wsman:Identifier>
+      </wse:SubscriptionManager>
+      <wse:Status>http://schemas.xmlsoap.org/ws/2004/08/eventing/SourceShuttingDown</wse:Status>
+      <wse:Reason xml:lang="en">Test</wse:Reason>
+    </wse:SubscriptionEnd>
   </soap:Body>
 </soap:Envelope>""".encode()
 
@@ -316,14 +342,32 @@ async def test_handle_wsd_subscribe_endto_empty_address_faults() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_wsd_subscribe_endto_mismatch_faults() -> None:
-    """``EndTo`` address that differs from ``NotifyTo`` is rejected for this manager."""
+async def test_handle_wsd_subscribe_distinct_endto_succeeds() -> None:
+    """``EndTo`` may differ from ``NotifyTo``; ``SubscriptionEnd`` is POSTed to ``EndTo`` on expiry."""
+    notify = "http://192.168.1.99:5358/client"
+    end_url = "http://192.168.1.77:9999/subscription-end"
     payload = _subscribe_push_envelope(
-        end_to_lines=("      <wse:EndTo><wsa:Address>http://other/end</wsa:Address></wse:EndTo>\n"),
+        notify_to=notify,
+        end_to_lines=f"      <wse:EndTo><wsa:Address>{end_url}</wsa:Address></wse:EndTo>\n",
     )
     response = await handle_wsd(_request(payload))
-    fault = parse_soap_fault(response.text)
-    assert fault.get("fault_subcode") == "wse:InvalidMessage"
+    assert response.content_type == "application/soap+xml"
+    assert "SubscribeResponse" in response.text
+
+
+@pytest.mark.asyncio
+async def test_handle_wsd_subscription_end_returns_soap_ack() -> None:
+    """Inbound ``SubscriptionEnd`` yields SOAP ack with ``SubscriptionEndResponse`` action."""
+    response = await handle_wsd(_request(_subscription_end_envelope()))
+    assert response.content_type == "application/soap+xml"
+    assert ACTION_SUBSCRIPTION_END_RESPONSE in response.text
+    assert "<wsa:RelatesTo>urn:uuid:end-1</wsa:RelatesTo>" in response.text
+
+
+def test_build_subscription_end_ack_matches_response_action() -> None:
+    """Ack builder uses the WS-Eventing ``SubscriptionEndResponse`` action."""
+    xml = build_subscription_end_ack_response("urn:uuid:mid-1")
+    assert ACTION_SUBSCRIPTION_END_RESPONSE in xml
 
 
 @pytest.mark.asyncio

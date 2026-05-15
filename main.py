@@ -10,6 +10,8 @@ from urllib.parse import urlsplit, urlunsplit
 from app.config import Config
 from app.discovery import discover_scanner_xaddr, start_discovery
 from app.http_server import start_http_server
+from app.inbound_eventing_registry import get_inbound_subscription_registry
+from app.inbound_subscription_end_delivery import dispatch_pending_inbound_subscription_ends
 from app.logging import setup_logging
 from app.soap.transport import configure_soap_http_client_from_config
 from app.ws_eventing_client import (
@@ -390,6 +392,34 @@ async def _eventing_registration_loop(config: Config) -> None:
         backoff_sec = min(backoff_sec * 2, max_backoff_sec)
 
 
+def _subscription_end_http_timeout_sec(config: Config) -> float:
+    """HTTP read timeout for manager-emitted ``SubscriptionEnd`` POSTs."""
+    raw = config.soap_http_read_timeout_sec
+    if raw is None:
+        return 30.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 30.0
+    return v if v > 0 else 30.0
+
+
+async def _inbound_subscription_lease_sweep_loop(config: Config) -> None:
+    """Periodically expire inbound manager leases and deliver ``SubscriptionEnd`` to subscribers."""
+    while True:
+        await asyncio.sleep(5.0)
+        try:
+            reg = get_inbound_subscription_registry()
+            reg.sweep_expired_leases()
+            await dispatch_pending_inbound_subscription_ends(
+                timeout_sec=_subscription_end_http_timeout_sec(config),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Inbound subscription lease sweep failed")
+
+
 async def _shutdown_services(
     config: Config,
     tasks: list[asyncio.Task[None]],
@@ -413,6 +443,7 @@ async def main() -> None:
         asyncio.create_task(start_discovery(config)),
         asyncio.create_task(start_http_server(config)),
         asyncio.create_task(_eventing_registration_loop(config)),
+        asyncio.create_task(_inbound_subscription_lease_sweep_loop(config)),
     ]
     shutdown_task: asyncio.Task[None] | None = None
     shutdown_started = False

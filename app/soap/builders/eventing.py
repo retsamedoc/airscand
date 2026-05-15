@@ -2,21 +2,73 @@
 
 from __future__ import annotations
 
+from xml.sax.saxutils import escape
+
 from app.destinations import DEFAULT_DESTINATIONS, subscribe_tuple_destinations
 from app.soap.addressing import new_message_id
 from app.soap.envelope import build_outbound_client_envelope
 from app.soap.namespaces import (
     ACTION_RENEW,
     ACTION_SUBSCRIBE,
+    ACTION_SUBSCRIPTION_END,
     ACTION_UNSUBSCRIBE,
     FILTER_DIALECT_DEVPROF_ACTION,
     NS_SCA,
     NS_WSE,
+    NS_WSMAN,
     SCAN_AVAILABLE_EVENT_ACTION,
 )
 from app.soap.parsers.eventing import effective_subscription_identifier_for_unsubscribe
 
 DEFAULT_SCAN_DESTINATIONS = subscribe_tuple_destinations(DEFAULT_DESTINATIONS)
+
+
+def _xml_text(s: str) -> str:
+    return escape(s, entities={"'": "&apos;", '"': "&quot;"})
+
+
+def build_subscription_end_notification(
+    *,
+    subscription_end_to_address: str,
+    reference_parameters_xml: str | None,
+    manager_address: str,
+    subscription_identifier: str,
+    status_uri: str,
+    reason_en: str,
+    from_address: str | None = None,
+    message_id: str | None = None,
+) -> tuple[str, str]:
+    """Build WS-Eventing ``SubscriptionEnd`` one-way SOAP envelope toward the subscriber ``EndTo``.
+
+    ``reference_parameters_xml`` is optional header fragment (typically ``wsa:ReferenceParameters``)
+    copied from the original ``EndTo`` EPR so the subscriber can correlate the manager endpoint.
+    """
+    addr = (subscription_end_to_address or "").strip()
+    ref_block = ""
+    if reference_parameters_xml and reference_parameters_xml.strip():
+        ref_block = f"{reference_parameters_xml.strip()}\n"
+    body_inner = f"""    <wse:SubscriptionEnd>
+      <wse:SubscriptionManager>
+        <wsa:Address>{_xml_text(manager_address)}</wsa:Address>
+        <wsman:Identifier>{_xml_text(subscription_identifier)}</wsman:Identifier>
+      </wse:SubscriptionManager>
+      <wse:Status>{_xml_text(status_uri)}</wse:Status>
+      <wse:Reason xml:lang="en">{_xml_text(reason_en)}</wse:Reason>
+    </wse:SubscriptionEnd>"""
+    return build_outbound_client_envelope(
+        xmlns_extra={
+            "wse": NS_WSE,
+            "wsman": NS_WSMAN,
+            "xml": "http://www.w3.org/XML/1998/namespace",
+        },
+        action=ACTION_SUBSCRIPTION_END,
+        to_url=addr,
+        body_inner_xml=body_inner,
+        message_id=message_id,
+        from_address=from_address,
+        reply_to_anonymous=True,
+        between_to_and_message_id=ref_block,
+    )
 
 
 def build_subscribe_request(

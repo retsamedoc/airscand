@@ -7,12 +7,15 @@ import uuid
 from aiohttp import web
 
 from app.inbound_eventing_registry import get_inbound_subscription_registry
+from app.inbound_subscription_end_delivery import dispatch_pending_inbound_subscription_ends
 from app.quirks import get_profile
 from app.scanner_status_coordination import notify_scanner_state
 from app.soap.addressing import extract_action, extract_message_id_optional, soap_action_short
 from app.soap.builders.faults import build_action_not_supported_fault_body, build_wse_fault_body
 from app.soap.envelope import build_inbound_fault_envelope, build_inbound_response_envelope
 from app.soap.namespaces import (
+    ACTION_SUBSCRIPTION_END,
+    ACTION_SUBSCRIPTION_END_RESPONSE,
     ACTION_WSA_FAULT,
     NS_SCA,
     NS_WSE,
@@ -25,10 +28,10 @@ from app.soap.parsers.inbound_eventing import (
     extract_wsa_to_optional,
     grant_expires_from_request,
     inbound_subscribe_expires_fault_reason,
-    normalize_eventing_epr_address,
     parse_inbound_renew_expires_optional,
     parse_inbound_subscribe_body,
 )
+from app.soap.parsers.subscription_end import parse_inbound_subscription_end
 from app.ws_eventing_client import (
     parse_scanner_status_summary_event,
     run_scan_available_chain,
@@ -132,6 +135,25 @@ def _manager_to_matches_expected(to_hdr: str | None, manager_addr: str) -> bool:
     return _normalize_manager_addr(to_hdr) == _normalize_manager_addr(manager_addr)
 
 
+def _subscription_end_http_timeout_sec(config: object) -> float:
+    """Read timeout for outbound ``SubscriptionEnd`` POSTs (subscriber ``EndTo``)."""
+    raw = getattr(config, "soap_http_read_timeout_sec", None)
+    if raw is None:
+        return 30.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 30.0
+    return v if v > 0 else 30.0
+
+
+async def _dispatch_pending_subscription_ends(config: object) -> None:
+    """Flush manager-queued ``SubscriptionEnd`` notifications after registry mutations."""
+    await dispatch_pending_inbound_subscription_ends(
+        timeout_sec=_subscription_end_http_timeout_sec(config),
+    )
+
+
 def _max_inbound_eventing_grant_seconds(config: object) -> float:
     """Upper bound for granted ``wse:Expires`` on inbound Subscribe/Renew (default one day)."""
     raw = getattr(config, "inbound_eventing_max_grant_sec", None)
@@ -203,6 +225,15 @@ def build_scanner_status_summary_event_ack_response(relates_to: str | None) -> s
     """Return a SOAP 1.2 envelope acknowledging ScannerStatusSummaryEvent delivery."""
     return build_inbound_response_envelope(
         action=ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE,
+        relates_to=relates_to,
+        body_xml="",
+    )
+
+
+def build_subscription_end_ack_response(relates_to: str | None) -> str:
+    """Return a SOAP 1.2 envelope acknowledging ``SubscriptionEnd`` at the sink."""
+    return build_inbound_response_envelope(
+        action=ACTION_SUBSCRIPTION_END_RESPONSE,
         relates_to=relates_to,
         body_xml="",
     )
@@ -310,19 +341,6 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 reason="wse:EndTo/wsa:Address is required when wse:EndTo is present",
                 log_action=ACTION_WSA_FAULT,
             )
-        notify_norm = normalize_eventing_epr_address(parsed.notify_to_address)
-        end_norm = normalize_eventing_epr_address(parsed.end_to_address)
-        if end_norm and end_norm != notify_norm:
-            return _inbound_eventing_fault_response(
-                relates_to,
-                subcode_local="InvalidMessage",
-                reason=(
-                    "wse:EndTo/wsa:Address must match wse:NotifyTo/wsa:Address for this "
-                    "subscription manager (SubscriptionEnd is delivered to EndTo only)"
-                ),
-                log_action=ACTION_WSA_FAULT,
-                log_extras={"notify_to": parsed.notify_to_address, "end_to": parsed.end_to_address},
-            )
         expires_fault = inbound_subscribe_expires_fault_reason(parsed.requested_expires)
         if expires_fault:
             return _inbound_eventing_fault_response(
@@ -335,11 +353,19 @@ async def handle_wsd(request: web.Request) -> web.Response:
             parsed.requested_expires,
             max_seconds=_max_inbound_eventing_grant_seconds(config),
         )
+        subscription_end_url = (
+            parsed.end_to_address.strip()
+            if parsed.has_end_to and parsed.end_to_address.strip()
+            else parsed.notify_to_address.strip()
+        )
         reg = get_inbound_subscription_registry()
         sub = reg.create(
             manager_address=mgr,
             granted_expires=granted_str,
             grant_seconds=grant_sec,
+            notify_to_address=parsed.notify_to_address.strip(),
+            subscription_end_to_url=subscription_end_url,
+            subscription_end_reference_parameters_xml=parsed.end_to_reference_parameters_xml,
         )
         response_xml = build_eventing_subscribe_response(
             relates_to, xaddr, sub.identifier, sub.granted_expires
@@ -391,6 +417,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
             granted_expires=granted_str,
             grant_seconds=grant_sec,
         )
+        await _dispatch_pending_subscription_ends(config)
         if updated is None:
             return _inbound_eventing_fault_response(
                 relates_to,
@@ -438,6 +465,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
             )
         reg = get_inbound_subscription_registry()
         sub = reg.get_status(sub_id, mgr)
+        await _dispatch_pending_subscription_ends(config)
         if sub is None:
             return _inbound_eventing_fault_response(
                 relates_to,
@@ -484,7 +512,9 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 log_action=ACTION_WSA_FAULT,
             )
         reg = get_inbound_subscription_registry()
-        if not reg.unsubscribe(sub_id, mgr):
+        ok = reg.unsubscribe(sub_id, mgr)
+        await _dispatch_pending_subscription_ends(config)
+        if not ok:
             return _inbound_eventing_fault_response(
                 relates_to,
                 subcode_local="UnableToDestroySubscription",
@@ -505,6 +535,39 @@ async def handle_wsd(request: web.Request) -> web.Response:
         )
         return web.Response(
             text=response_xml,
+            content_type="application/soap+xml",
+            charset="utf-8",
+        )
+    if action == ACTION_SUBSCRIPTION_END:
+        parsed_end = parse_inbound_subscription_end(text)
+        if parsed_end is None:
+            log.warning(
+                "SubscriptionEnd received but body could not be parsed",
+                extra={"wsa_message_id": relates_to},
+            )
+        else:
+            log.info(
+                "SubscriptionEnd received at sink",
+                extra={
+                    "soap_leg": "server_response_prep",
+                    "subscription_end_status": parsed_end.status_uri,
+                    "subscription_end_reasons": list(parsed_end.reasons),
+                    "subscription_id": parsed_end.subscription_identifier,
+                    "wsa_message_id": relates_to,
+                },
+            )
+        ack_xml = build_subscription_end_ack_response(relates_to)
+        log.info(
+            f"{soap_action_short(ACTION_SUBSCRIPTION_END_RESPONSE) or 'SubscriptionEndResponse'}",
+            extra={
+                "soap_leg": "server_response",
+                "soap_action": soap_action_short(ACTION_SUBSCRIPTION_END_RESPONSE),
+                "http_status": 200,
+                "bytes": len(ack_xml.encode("utf-8")),
+            },
+        )
+        return web.Response(
+            text=ack_xml,
             content_type="application/soap+xml",
             charset="utf-8",
         )

@@ -75,6 +75,7 @@ class ParsedInboundSubscribe:
     notify_to_address: str
     has_end_to: bool
     end_to_address: str
+    end_to_reference_parameters_xml: str | None
     requested_expires: str | None
     has_filter: bool
 
@@ -143,6 +144,11 @@ def parse_inbound_subscribe_body(soap_text: str) -> ParsedInboundSubscribe | Non
     end_addr_el = _child_by_local(end_el, "Address") if end_el is not None else None
     end_addr = _text_direct(end_addr_el)
     has_end_to = end_el is not None
+    end_ref_xml: str | None = None
+    if end_el is not None:
+        ref_el = _child_by_local(end_el, "ReferenceParameters")
+        if ref_el is not None:
+            end_ref_xml = ET.tostring(ref_el, encoding="unicode").strip() or None
 
     expires_el = _child_by_local(subscribe_el, "Expires")
     requested_expires = _text_direct(expires_el) or None
@@ -154,6 +160,7 @@ def parse_inbound_subscribe_body(soap_text: str) -> ParsedInboundSubscribe | Non
         notify_to_address=notify_addr,
         has_end_to=has_end_to,
         end_to_address=end_addr,
+        end_to_reference_parameters_xml=end_ref_xml,
         requested_expires=requested_expires,
         has_filter=has_filter,
     )

@@ -54,6 +54,7 @@ def test_parse_inbound_subscribe_body_extracts_endto() -> None:
     assert parsed.has_end_to is True
     assert parsed.end_to_address == "http://a/notify"
     assert parsed.notify_to_address == "http://a/notify"
+    assert parsed.end_to_reference_parameters_xml is None
 
 
 def test_parse_inbound_subscribe_body_endto_without_address() -> None:
@@ -75,3 +76,29 @@ def test_parse_inbound_subscribe_body_endto_without_address() -> None:
     assert parsed is not None
     assert parsed.has_end_to is True
     assert parsed.end_to_address == ""
+    assert parsed.end_to_reference_parameters_xml is None
+
+
+def test_parse_inbound_subscribe_body_endto_reference_parameters_roundtrip() -> None:
+    """``EndTo`` ``wsa:ReferenceParameters`` is preserved for ``SubscriptionEnd`` addressing."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+  xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing">
+  <soap:Body>
+    <wse:Subscribe>
+      <wse:Delivery Mode="http://schemas.xmlsoap.org/ws/2004/08/eventing/DeliveryModes/Push">
+        <wse:NotifyTo><wsa:Address>http://notify/</wsa:Address></wse:NotifyTo>
+      </wse:Delivery>
+      <wse:EndTo>
+        <wsa:Address>http://end/</wsa:Address>
+        <wsa:ReferenceParameters><wse:Identifier>urn:uuid:rp-1</wse:Identifier></wsa:ReferenceParameters>
+      </wse:EndTo>
+    </wse:Subscribe>
+  </soap:Body>
+</soap:Envelope>"""
+    parsed = parse_inbound_subscribe_body(xml)
+    assert parsed is not None
+    assert parsed.end_to_reference_parameters_xml is not None
+    assert "ReferenceParameters" in parsed.end_to_reference_parameters_xml
+    assert "urn:uuid:rp-1" in parsed.end_to_reference_parameters_xml
