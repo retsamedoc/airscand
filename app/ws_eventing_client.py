@@ -12,7 +12,7 @@ from aiohttp import ClientError
 
 from app.destinations import DEFAULT_DESTINATIONS, ScanDestination, lookup_destination
 from app.mtom import parse_retrieve_image_mtom
-from app.quirks import ScannerProfile
+from app.quirks import ImageDeliveryMode, ScannerProfile
 from app.scan_storage import save_scan_file
 from app.scanner_status_coordination import (
     await_scanner_idle_after_retrieve,
@@ -881,11 +881,16 @@ async def run_scan_available_chain(
     output_dir: str | Path | None = None,
     scan_destinations: Sequence[ScanDestination] | None = None,
     validate_outbound_soap_response: bool = False,
+    image_delivery_mode: ImageDeliveryMode = "pull",
 ) -> dict[str, str | None]:
     """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage.
 
     ``timeout_sec`` applies to control SOAP calls; ``retrieve_image_timeout_sec`` applies only to
     RetrieveImage (chunked MTOM bodies often need far longer than fast request/response pairs).
+
+    When ``image_delivery_mode`` is ``push_only``, outbound **RetrieveImage** is not invoked after a
+    successful **CreateScanJob**; the device is expected to POST image bytes to this host's scan URL
+    (see ``WSD_SCAN_PATH``). **JobToken** is not required in that mode.
     """
     target_url = resolve_wdp_scan_url(scanner_xaddr)
     if scanner_profile is not None:
@@ -895,6 +900,7 @@ async def run_scan_available_chain(
                 "scanner_profile": scanner_profile.key,
                 "target_url": target_url,
                 "poll_get_job_status_before_retrieve": poll_get_job_status_before_retrieve,
+                "image_delivery_mode": image_delivery_mode,
             },
         )
     scanner_metadata: dict[str, str | None] = {
@@ -1281,15 +1287,84 @@ async def run_scan_available_chain(
             "saved_scan_bytes": None,
         }
 
-    create_completed_monotonic = time.monotonic()
     create_job_token = create_details.get("job_token")
-    if not create_job_token:
+    if image_delivery_mode != "push_only":
+        if not create_job_token:
+            log.info(
+                "RetrieveImage skipped: CreateScanJobResponse omitted JobToken (spec requires it for pull)",
+                extra={
+                    "target_url": target_url,
+                    "job_id": resolved_job_id,
+                    "create_message_id": create_message_id,
+                },
+            )
+            return {
+                "target_url": target_url,
+                **scanner_metadata,
+                "validate_http_status": str(validate_status),
+                "validate_message_id": validate_message_id,
+                "validate_status": validate_details.get("status"),
+                "valid_ticket": validate_details.get("valid_ticket"),
+                "destination_token": destination_token,
+                "scan_identifier": scan_identifier,
+                "fault_code": create_details.get("fault_code"),
+                "fault_subcode": create_details.get("fault_subcode"),
+                "fault_reason": create_details.get("fault_reason"),
+                "create_http_status": str(create_status),
+                "create_message_id": create_message_id,
+                "job_id": resolved_job_id,
+                "retrieve_http_status": None,
+                "retrieve_message_id": None,
+                "retrieve_status": None,
+                "retrieve_fault_code": None,
+                "retrieve_fault_subcode": None,
+                "retrieve_fault_reason": None,
+                "retrieve_elapsed_sec": None,
+                "saved_scan_path": None,
+                "saved_scan_bytes": None,
+            }
+    elif not create_job_token:
         log.info(
-            "RetrieveImage skipped: CreateScanJobResponse omitted JobToken (spec requires it for pull)",
+            "Push-only image delivery: CreateScanJob omitted JobToken; skipping pull RetrieveImage",
             extra={
                 "target_url": target_url,
                 "job_id": resolved_job_id,
                 "create_message_id": create_message_id,
+            },
+        )
+
+    create_completed_monotonic = time.monotonic()
+
+    if image_delivery_mode == "push_only":
+        idle_wait_result_push: str | None = None
+        begin_retrieve_idle_wait()
+        try:
+            if wait_scanner_idle_after_retrieve and scanner_idle_wait_sec > 0:
+                got_idle_push = await await_scanner_idle_after_retrieve(scanner_idle_wait_sec)
+                idle_wait_result_push = "success" if got_idle_push else "timeout"
+                if got_idle_push:
+                    log.info(
+                        "Scanner Idle after push-only job handoff (ScannerStatusSummaryEvent)",
+                        extra={
+                            "target_url": target_url,
+                            "job_id": resolved_job_id,
+                            "scanner_idle_wait_sec": scanner_idle_wait_sec,
+                        },
+                    )
+            elif wait_scanner_idle_after_retrieve:
+                idle_wait_result_push = "skipped"
+            else:
+                idle_wait_result_push = "skipped"
+        finally:
+            end_retrieve_idle_wait()
+        retrieve_elapsed_push = time.monotonic() - create_completed_monotonic
+        log.info(
+            "RetrieveImage skipped (push_only); expecting device HTTP upload to scan path",
+            extra={
+                "target_url": target_url,
+                "job_id": resolved_job_id,
+                "retrieve_elapsed_sec": round(retrieve_elapsed_push, 6),
+                "scanner_idle_wait_result": idle_wait_result_push,
             },
         )
         return {
@@ -1309,13 +1384,16 @@ async def run_scan_available_chain(
             "job_id": resolved_job_id,
             "retrieve_http_status": None,
             "retrieve_message_id": None,
-            "retrieve_status": None,
+            "retrieve_status": "SkippedPushOnly",
             "retrieve_fault_code": None,
             "retrieve_fault_subcode": None,
             "retrieve_fault_reason": None,
-            "retrieve_elapsed_sec": None,
+            "retrieve_elapsed_sec": f"{retrieve_elapsed_push:.6f}",
+            "scanner_idle_wait_result": idle_wait_result_push,
             "saved_scan_path": None,
             "saved_scan_bytes": None,
+            "pull_retrieve_skipped": "push_only",
+            "image_delivery_mode": image_delivery_mode,
         }
 
     poll_result = await poll_get_job_status_until_ready(
@@ -1575,4 +1653,5 @@ async def run_scan_available_chain(
         "scanner_idle_wait_result": idle_wait_result,
         "saved_scan_path": saved_scan_path_str,
         "saved_scan_bytes": str(saved_scan_bytes_val) if saved_scan_bytes_val is not None else None,
+        "image_delivery_mode": image_delivery_mode,
     }

@@ -84,6 +84,10 @@ Epson-specific scanner profiles (e.g. WF-3640) and any future **Epson-wide** def
 
 * **RetrieveImage read timeout:** the `generic` scanner profile uses a **5s** aiohttp timeout for the RetrieveImage response body (chunked MTOM); the **`epson_wf_3640`** profile uses **60s**. Set **`WSD_RETRIEVE_IMAGE_TIMEOUT_SEC`** to override both.
 
+### **5. Push-only image delivery (`push_only` profile)**
+
+Some devices negotiate the scan job over SOAP but deliver pixels only via HTTP POST to the host scan URL (not **RetrieveImage**). Use profile **`push_only`** or set **`WSD_IMAGE_DELIVERY_MODE=push_only`** so the daemon skips outbound **RetrieveImage** after a successful **CreateScanJob** while still running the validation/create handoff. Files land under **`WSD_OUTPUT_DIR`** when the device POSTs to **`WSD_SCAN_PATH`** (same storage as pull). **Why:** avoids redundant pull attempts that fault or stall on push-only firmware.
+
 ## Canon
 
 ### **1. Missing or Invalid Headers**

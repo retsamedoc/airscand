@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from app.config import Config
 from app.mtom import MtomPayloadIntegrityReport
+from app.scan_receiver import handle_scan
 from app.soap.namespaces import ACTION_VALIDATE_SCAN_TICKET_RESPONSE
 from app.soap.outbound_response_validation import check_outbound_soap_response_correlation
 from app.soap.transport import HttpBodyIntegrityReport
@@ -59,6 +61,11 @@ from app.ws_eventing_client import (
     run_scan_available_chain,
     unsubscribe_from_scanner,
 )
+from tests.test_scan_receiver import DummyRequest
+
+if TYPE_CHECKING:
+    from _pytest.logging import LogCaptureFixture
+    from _pytest.monkeypatch import MonkeyPatch
 
 _FAKE_GET_JOB_STATUS_COMPLETED_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
   xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
@@ -97,11 +104,6 @@ def _fake_retrieve_image_from_xml(
         return (status, raw, content_type, _retrieve_image_http_ok(raw))
 
     return fake_post_soap_retrieve_image
-
-
-if TYPE_CHECKING:
-    from _pytest.logging import LogCaptureFixture
-    from _pytest.monkeypatch import MonkeyPatch
 
 
 def test_build_subscribe_request_contains_notify_to_and_to_url() -> None:
@@ -2317,3 +2319,189 @@ async def test_run_scan_available_chain_destination_subdir_and_post_hooks(
     assert len(hook_paths) == 1
     assert hook_paths[0] == Path(result.get("saved_scan_path") or "")
     assert result.get("ticket_validation_ok") == "true"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_push_only_skips_retrieve(monkeypatch: MonkeyPatch) -> None:
+    """``image_delivery_mode=push_only`` must not invoke outbound RetrieveImage."""
+
+    async def boom_retrieve(
+        **kwargs: object,
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        raise AssertionError("RetrieveImage must not be called in push_only mode")
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket>
+      <sca:ScanTicket>
+        <sca:JobDescription><sca:JobName>DeviceTicketName</sca:JobName></sca:JobDescription>
+      </sca:ScanTicket>
+    </sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status><sca:DestinationToken>dest-42</sca:DestinationToken></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId><sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", boom_retrieve)
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        image_delivery_mode="push_only",
+    )
+    assert result.get("job_id") == "job-42"
+    assert result.get("retrieve_status") == "SkippedPushOnly"
+    assert result.get("pull_retrieve_skipped") == "push_only"
+    assert result.get("retrieve_http_status") is None
+    assert result.get("image_delivery_mode") == "push_only"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_push_only_without_job_token(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Push-only tolerates missing JobToken because pull RetrieveImage is not used."""
+
+    async def boom_retrieve(
+        **kwargs: object,
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        raise AssertionError("RetrieveImage must not be called")
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket>
+      <sca:ScanTicket>
+        <sca:JobDescription><sca:JobName>DeviceTicketName</sca:JobName></sca:JobDescription>
+      </sca:ScanTicket>
+    </sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-no-token</sca:JobId></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", boom_retrieve)
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        image_delivery_mode="push_only",
+    )
+    assert result.get("job_id") == "job-no-token"
+    assert result.get("retrieve_status") == "SkippedPushOnly"
+
+
+@pytest.mark.asyncio
+async def test_push_only_chain_then_http_upload_persists(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """After push-only chain, POST /scan to the same output directory persists the image.
+
+    Why: operators rely on ``WSD_SCAN_PATH`` for devices that never answer **RetrieveImage**;
+    the chain must not block on pull while uploads remain the single persistence path.
+    """
+
+    async def boom_retrieve(
+        **kwargs: object,
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        raise AssertionError("no pull in push_only flow")
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket>
+      <sca:ScanTicket>
+        <sca:JobDescription><sca:JobName>PushOnly</sca:JobName></sca:JobDescription>
+      </sca:ScanTicket>
+    </sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-push</sca:JobId><sca:JobToken>t</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", boom_retrieve)
+    monkeypatch.setattr("app.scan_storage.uuid.uuid4", lambda: "push-flow-id")
+
+    chain_result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        image_delivery_mode="push_only",
+        output_dir=tmp_path,
+    )
+    assert chain_result.get("retrieve_status") == "SkippedPushOnly"
+    assert chain_result.get("saved_scan_path") is None
+
+    config = Config.__new__(Config)
+    config.output_dir = str(tmp_path)
+    request = DummyRequest(
+        body=b"%PDF-1.7\nfrom-device",
+        app_data={"config": config},
+        content_type="application/pdf",
+    )
+    response = await handle_scan(request)
+    assert response.status == 201
+    saved = tmp_path / "scan_push-flow-id.pdf"
+    assert saved.exists()
+    assert saved.read_bytes() == b"%PDF-1.7\nfrom-device"

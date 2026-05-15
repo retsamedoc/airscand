@@ -3,12 +3,13 @@
 import asyncio
 import logging
 import uuid
+from typing import cast
 
 from aiohttp import web
 
 from app.inbound_eventing_registry import get_inbound_subscription_registry
 from app.inbound_subscription_end_delivery import dispatch_pending_inbound_subscription_ends
-from app.quirks import get_profile
+from app.quirks import ImageDeliveryMode, get_profile
 from app.scanner_status_coordination import notify_scanner_state
 from app.soap.addressing import extract_action, extract_message_id_optional, soap_action_short
 from app.soap.builders.faults import build_action_not_supported_fault_body, build_wse_fault_body
@@ -644,6 +645,12 @@ async def handle_wsd(request: web.Request) -> web.Response:
         scanner_profile = get_profile(
             str(getattr(config, "scanner_profile", "") or "").strip() or "epson_wf_3640"
         )
+        cfg_delivery = getattr(config, "image_delivery_mode", None)
+        lowered = cfg_delivery.strip().lower() if isinstance(cfg_delivery, str) else ""
+        if lowered in ("pull", "push_only"):
+            image_delivery_mode = cast(ImageDeliveryMode, lowered)
+        else:
+            image_delivery_mode = scanner_profile.image_delivery_mode
         cfg_retrieve_timeout = getattr(config, "retrieve_image_timeout_sec", None)
         retrieve_timeout = (
             float(cfg_retrieve_timeout)
@@ -672,6 +679,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 validate_outbound_soap_response=bool(
                     getattr(config, "validate_outbound_soap_response", False)
                 ),
+                image_delivery_mode=image_delivery_mode,
             )
         )
         task.add_done_callback(_log_chain_result)

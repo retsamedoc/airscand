@@ -15,7 +15,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **WS-Discovery** server + client probe; **Hello** / **Bye**; correlation patterns (see `docs/architecture.md`, `tests/test_discovery.py`).
 - **Outbound WS-Eventing**: **Subscribe**, **Unsubscribe** to stored manager EPR; **Renew** on a lease fraction timer; dual subscriptions (ScanAvailable + ScannerStatusSummary) with separate manager fields (`main.py`, `app/ws_eventing_client.py`, `tests/test_ws_eventing_client.py`, `tests/test_main_registration.py`).
 - **SubscribeResponse** parsing: identifier, expires, subscription manager address + reference parameters XML, destination token map (`app/soap/parsers/eventing.py`, ElementTree).
-- **Device-initiated scan chain**: **ScanAvailableEvent** SOAP ack, **ValidateScanTicket** → **CreateScanJob** → optional **GetJobStatus** → **RetrieveImage** / MTOM, coordination with **ScannerStatusSummaryEvent** (`app/ws_scan.py`, `app/ws_eventing_client.py`, audits).
+- **Device-initiated scan chain**: **ScanAvailableEvent** SOAP ack, **ValidateScanTicket** → **CreateScanJob** → optional **GetJobStatus** → optional **RetrieveImage** / MTOM (pull) or **push_only** handoff without **RetrieveImage**, coordination with **ScannerStatusSummaryEvent** (`app/ws_scan.py`, `app/ws_eventing_client.py`, `app/quirks/__init__.py`, `app/config.py`, audits).
+- **Pull vs push image delivery:** ``ScannerProfile.image_delivery_mode`` (`pull` default), profile **`push_only`**, env **`WSD_IMAGE_DELIVERY_MODE`** override; chain logs ``retrieve_status=SkippedPushOnly`` and does not call **RetrieveImage** when push-only; persistence remains **POST** ``WSD_SCAN_PATH`` + ``save_scan_file`` (`tests/test_ws_eventing_client.py`, `tests/test_quirks.py`, `tests/test_config.py`, `docs/configuration.md`, `docs/ws-scan_audit.md` §11). *Residual:* auto-detect from **ImageTransfer** in **ScannerCapabilities** XML not implemented.
 - **Push path** `/scan`: atomic save, empty body rejection (`app/scan_receiver.py`, `app/scan_storage.py`, tests).
 - **Inbound WS-Eventing subscription manager** (`app/ws_scan.py`, `app/inbound_eventing_registry.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/builders/faults.py`, `app/soap/envelope.py`): **Subscribe** allocates stable **Identifier** + granted **Expires**; **Renew** extends lease; **GetStatus** returns stored expiration without mutating lease; **Unsubscribe** removes state; unknown/expired ids and validation failures return **SOAP 1.2 faults** (`tests/test_ws_scan.py`).
 - **Unknown or missing `wsa:Action` on `/wsd`:** SOAP 1.2 fault responses (`wsa:ActionNotSupported` / `wse:InvalidMessage`) with `application/soap+xml`, structured logs (`soap_action`, `wsa_message_id`); no `text/plain` success for those POSTs (`tests/test_ws_scan.py`).
@@ -34,17 +35,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Backlog (incomplete) — by priority
 
-### 4. Pull vs push image delivery strategy (`docs/ws-scan_audit.md` Medium §11)
-
-**Gap:** **RetrieveImage** path always attempted for device-initiated flow; push-only devices may need different handling.
-
-**Done when:** Configuration or capability-driven path selection documented and implemented.
-
-**Verification:** With “push-only” fixture profile, chain skips pull retrieve and still persists scan when upload occurs (or documents that push-only is unsupported).
-
----
-
-### 5. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
+### 4. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
 **Gap:** Limited tests for **fault mapping**, **subscription lifecycle** edge cases, **Renew** failure leading to resubscribe, **inbound** manager behavior.
 
@@ -54,7 +45,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 6. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
+### 5. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
 
 **Gap:** Only `Content-Type: application/soap+xml; charset=utf-8` on some legs.
 
@@ -64,7 +55,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 7. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
+### 6. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
 
 **Gap:** `parse_soap_fault` does not surface **Detail** for diagnostics.
 
@@ -74,7 +65,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 8. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
+### 7. `handle_wsd` defensive **config** wiring (`docs/ws-scan_audit.md` Low §16)
 
 **Gap:** Assumes `app["config"]` present (`isinstance` guard unlike `handle_scan`).
 
@@ -84,7 +75,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 9. Developer and security posture (`docs/ROADMAP.md` Future)
+### 8. Developer and security posture (`docs/ROADMAP.md` Future)
 
 **Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
 
@@ -94,7 +85,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 10. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
+### 9. Explicit scan lifecycle state machine (`docs/ROADMAP.md` Far-term; `docs/wia_client_audit.md` §8)
 
 **Gap:** State spread across async tasks and flags.
 
@@ -104,7 +95,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 11. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
+### 10. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
 
 **Gap:** Not implemented per audits.
 
@@ -114,7 +105,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 12. Optional **`specs/`** entry point (documentation)
+### 11. Optional **`specs/`** entry point (documentation)
 
 **Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
 
@@ -126,8 +117,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Task 5** (compliance tests) after behavior stabilizes; remaining items per product need (bounded **RetrieveImage** retry, pull/push, far-term items).
+1. **Task 4** (compliance tests) after behavior stabilizes; remaining items per product need (bounded **RetrieveImage** retry, far-term items).
 
 ---
 
-*Last updated: namespace-aware ElementTree parsing for eventing / WS-A / faults (`tests/test_eventing_namespace_xml.py`); backlog renumbered 4–12.*
+*Last updated: pull vs push image delivery (`push_only` profile, `WSD_IMAGE_DELIVERY_MODE`, `tests/test_ws_eventing_client.py`); backlog renumbered 4–11.*

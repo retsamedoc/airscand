@@ -16,7 +16,7 @@ This report compares the current `airscand` implementation (primarily [`app/soap
 |----------|------:|--------|
 | Critical | 0 | _(none — see [Critical (resolved)](#critical-resolved))_ |
 | High     | 0 | _(none — see [High (resolved)](#high-resolved))_ |
-| Medium   | 1 | Pull vs push image delivery (#11) _(**#7**, **#9**, **#12**: [Medium (resolved)](#medium-7-9-12-resolved); former #8/#10: [Medium (resolved)](#medium-8-10-resolved))_ |
+| Medium   | 0 | _(#11 pull vs push: **addressed** — [Medium §11](#medium))_; historical: [Medium (resolved) §7/9/12](#medium-7-9-12-resolved), [§8/10](#medium-8-10-resolved). |
 | Low      | 5 | Parsing robustness, HTTP/SOAP headers, fault **Detail**, handler edge cases |
 
 ---
@@ -117,15 +117,11 @@ This report compares the current `airscand` implementation (primarily [`app/soap
 
 ## Medium
 
-### 11. Image delivery: **RetrieveImage** (pull) vs push upload to `/scan`
+### 11. Image delivery: **RetrieveImage** (pull) vs push upload to `/scan` — **Addressed** (configuration)
 
 **Reference:** Pull path is documented for **RetrieveImage**; push “scan to computer” may use separate HTTP upload conventions.
 
-**Code:** [`handle_scan`](../app/scan_receiver.py) accepts raw POST bodies with minimal content-type handling—no WS-Scan multipart / STAP handling.
-
-**Risk:** If the device only pushes and never serves **RetrieveImage**, the chain’s retrieve step is redundant or must be skipped based on **ScannerCapabilities** / job type.
-
-**Recommendation:** Detect or configure **pull vs push** per device and **ImageTransfer** semantics when that data is exposed.
+**Implementation:** `ScannerProfile.image_delivery_mode` (`pull` default), profile **`push_only`**, and optional **`WSD_IMAGE_DELIVERY_MODE`** override (`pull` / `push_only`). In **push_only**, `run_scan_available_chain` skips **RetrieveImage** after **CreateScanJob**; **JobToken** is not required. Persistence uses **`WSD_SCAN_PATH`** POSTs to **`WSD_OUTPUT_DIR`** (see `app/scan_receiver.py`, `tests/test_ws_eventing_client.py`). **Residual:** automatic detection from **ImageTransfer** in **ScannerCapabilities** XML is not implemented—operators choose profile or env.
 
 ---
 

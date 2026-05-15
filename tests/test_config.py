@@ -130,3 +130,12 @@ def test_config_validate_outbound_soap_response_env(monkeypatch: MonkeyPatch) ->
     from app.config import Config
 
     assert Config().validate_outbound_soap_response is True
+
+
+def test_config_image_delivery_mode_env(monkeypatch: MonkeyPatch) -> None:
+    """WSD_IMAGE_DELIVERY_MODE selects pull vs push_only when set to known values."""
+    monkeypatch.setenv("WSD_IMAGE_DELIVERY_MODE", "push_only")
+
+    from app.config import Config
+
+    assert Config().image_delivery_mode == "push_only"

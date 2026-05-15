@@ -69,6 +69,8 @@ class Config:
     retrieve_image_timeout_sec: float | None = None
     # ``app.quirks.get_profile`` key (e.g. generic, epson_wf_3640); skeleton until post–Phase 5.
     scanner_profile: str = "epson_wf_3640"
+    # When set to ``pull`` or ``push_only``, overrides ``ScannerProfile.image_delivery_mode``.
+    image_delivery_mode: str | None = None
     # Cap inbound WS-Eventing Subscribe/Renew granted lease (seconds); unset uses ``86400``.
     inbound_eventing_max_grant_sec: float | None = None
     # Outbound ``SoapHttpClient`` / aiohttp: TCP connect vs response read (``sock_read``) budgets.
@@ -162,6 +164,9 @@ class Config:
             self.retrieve_image_timeout_sec = float(raw_retrieve.strip())
         self.scanner_profile = os.getenv("WSD_SCANNER_PROFILE", self.scanner_profile).strip()
 
+        raw_img_delivery = os.getenv("WSD_IMAGE_DELIVERY_MODE", "").strip().lower()
+        if raw_img_delivery in ("pull", "push_only"):
+            self.image_delivery_mode = raw_img_delivery
         raw_frac = os.getenv("WSD_EVENTING_RENEW_AFTER_FRACTION")
         if raw_frac is not None and raw_frac.strip() != "":
             parsed = float(raw_frac.strip())

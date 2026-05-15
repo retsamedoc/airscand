@@ -11,15 +11,21 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 __all__ = [
+    "ImageDeliveryMode",
     "ScannerProfile",
     "PROFILE_GENERIC",
     "PROFILE_EPSON_WF_3640",
+    "PROFILE_PUSH_ONLY",
     "get_profile",
 ]
 
 log = logging.getLogger(__name__)
+
+
+ImageDeliveryMode = Literal["pull", "push_only"]
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,9 @@ class ScannerProfile:
     poll_get_job_status_before_retrieve: bool = True
     # aiohttp total timeout for RetrieveImage MTOM/chunked body read (seconds).
     retrieve_image_timeout_sec: float = 5.0
+    # ``pull`` (default): after CreateScanJob, call RetrieveImage. ``push_only``: image bytes arrive
+    # via HTTP POST to ``WSD_SCAN_PATH``; outbound RetrieveImage is skipped after a successful create.
+    image_delivery_mode: ImageDeliveryMode = "pull"
 
 
 PROFILE_GENERIC = ScannerProfile(
@@ -41,9 +50,18 @@ PROFILE_GENERIC = ScannerProfile(
 
 from .epson import PROFILE_EPSON_WF_3640
 
+PROFILE_PUSH_ONLY = ScannerProfile(
+    key="push_only",
+    description="Device pushes scan bytes to this host's scan URL; skip outbound RetrieveImage.",
+    poll_get_job_status_before_retrieve=False,
+    retrieve_image_timeout_sec=5.0,
+    image_delivery_mode="push_only",
+)
+
 _PROFILES: dict[str, ScannerProfile] = {
     PROFILE_GENERIC.key: PROFILE_GENERIC,
     PROFILE_EPSON_WF_3640.key: PROFILE_EPSON_WF_3640,
+    PROFILE_PUSH_ONLY.key: PROFILE_PUSH_ONLY,
     # Convenience alias
     "epson": PROFILE_EPSON_WF_3640,
 }

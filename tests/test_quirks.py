@@ -5,11 +5,19 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from app.quirks import PROFILE_EPSON_WF_3640, PROFILE_GENERIC, get_profile
+from app.quirks import PROFILE_EPSON_WF_3640, PROFILE_GENERIC, PROFILE_PUSH_ONLY, get_profile
 
 if TYPE_CHECKING:
     from _pytest.logging import LogCaptureFixture
     from _pytest.monkeypatch import MonkeyPatch
+
+
+def test_get_profile_push_only() -> None:
+    """Push-only profile skips pull RetrieveImage and disables GetJobStatus polling."""
+    p = get_profile("push_only")
+    assert p is PROFILE_PUSH_ONLY
+    assert p.image_delivery_mode == "push_only"
+    assert p.poll_get_job_status_before_retrieve is False
 
 
 def test_get_profile_known_keys() -> None:
@@ -18,6 +26,7 @@ def test_get_profile_known_keys() -> None:
     assert get_profile("epson_wf_3640") is PROFILE_EPSON_WF_3640
     assert get_profile("EPSON_WF_3640") is PROFILE_EPSON_WF_3640
     assert get_profile("epson") is PROFILE_EPSON_WF_3640
+    assert get_profile("push_only") is PROFILE_PUSH_ONLY
 
 
 def test_epson_wf3640_disables_get_job_status_poll() -> None:
