@@ -18,7 +18,10 @@ from app.inbound_eventing_registry import reset_inbound_subscription_registry
 from app.soap.fault import parse_soap_fault
 from app.soap.namespaces import NS_SOAP
 from app.soap.parsers.inbound_eventing import PUSH_DELIVERY_MODE_URI
-from app.ws_eventing_client import SCANNER_STATUS_SUMMARY_EVENT_ACTION
+from app.ws_eventing_client import (
+    SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+    get_subscription_status,
+)
 from app.ws_scan import ACTION_GET_STATUS, ACTION_RENEW, ACTION_UNSUBSCRIBE, handle_wsd
 from main import _eventing_registration_loop
 from tests.test_ws_scan import (
@@ -214,6 +217,92 @@ async def test_audit_ws_eventing_17_inbound_renew_after_expired_lease_unable_to_
     )
     fault = parse_soap_fault(response.text)
     assert fault.get("fault_subcode") == "wse:UnableToRenew"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_getstatus_after_expired_lease_unable_to_renew(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``docs/ws-eventing_audit.md`` §1 / §12 — expired lease on ``GetStatus`` → ``UnableToRenew``."""
+    t0 = 300_000.0
+    monkeypatch.setattr("app.inbound_eventing_registry.time.monotonic", lambda: t0)
+    sub_resp = await handle_wsd(
+        _request(_subscribe_push_envelope("urn:uuid:audit-gs-exp", expires_inner="PT1S"))
+    )
+    sub_id = _extract_subscribe_identifier(sub_resp.text)
+    monkeypatch.setattr("app.inbound_eventing_registry.time.monotonic", lambda: t0 + 30.0)
+    response = await handle_wsd(
+        _request(_management_envelope(ACTION_GET_STATUS, "urn:uuid:audit-gs-exp", sub_id))
+    )
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:UnableToRenew"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_getstatus_does_not_extend_lease(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``docs/ws-eventing_audit.md`` §12 — ``GetStatus`` returns stored ``Expires`` without ``Renew``."""
+    t0 = 400_000.0
+    monkeypatch.setattr("app.inbound_eventing_registry.time.monotonic", lambda: t0)
+    sub_resp = await handle_wsd(_request(_subscribe_push_envelope("urn:uuid:audit-gs-nomut")))
+    sub_id = _extract_subscribe_identifier(sub_resp.text)
+    monkeypatch.setattr("app.inbound_eventing_registry.time.monotonic", lambda: t0 + 10.0)
+    first = await handle_wsd(
+        _request(_management_envelope(ACTION_GET_STATUS, "urn:uuid:audit-gs-1", sub_id))
+    )
+    assert "GetStatusResponse" in first.text
+    assert "<wse:Expires>PT1H</wse:Expires>" in first.text
+    monkeypatch.setattr("app.inbound_eventing_registry.time.monotonic", lambda: t0 + 20.0)
+    second = await handle_wsd(
+        _request(_management_envelope(ACTION_GET_STATUS, "urn:uuid:audit-gs-2", sub_id))
+    )
+    assert "GetStatusResponse" in second.text
+    assert "<wse:Expires>PT1H</wse:Expires>" in second.text
+    renew = await handle_wsd(
+        _request(_management_envelope(ACTION_RENEW, "urn:uuid:audit-gs-r", sub_id))
+    )
+    assert "RenewResponse" in renew.text
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_outbound_get_status_reads_expires(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``docs/ws-eventing_audit.md`` §2 / §12 — outbound ``GetStatus`` client parses ``Expires``."""
+    captured: dict[str, str] = {}
+
+    async def fake_post_soap(
+        *,
+        url: str,
+        payload: str,
+        timeout_sec: float,
+    ) -> tuple[int, str]:
+        captured["url"] = url
+        captured["payload"] = payload
+        return (
+            200,
+            """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body>
+    <wse:GetStatusResponse xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing">
+      <wse:Expires>PT2H</wse:Expires>
+    </wse:GetStatusResponse>
+  </soap:Body>
+</soap:Envelope>""",
+        )
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    result = await get_subscription_status(
+        manager_url="http://192.168.1.60/WDP/SCAN/mgr",
+        subscription_id="urn:uuid:audit-out-gs",
+        from_address="urn:uuid:client-audit",
+    )
+    assert captured["url"] == "http://192.168.1.60/WDP/SCAN/mgr"
+    assert "GetStatus" in captured["payload"]
+    assert "urn:uuid:audit-out-gs" in captured["payload"]
+    assert result.get("status") == "200"
+    assert result.get("expires") == "PT2H"
 
 
 @pytest.mark.asyncio

@@ -43,6 +43,7 @@ ACTION_CANCEL_JOB_RESPONSE = namespaces.ACTION_CANCEL_JOB_RESPONSE
 ACTION_CREATE_SCAN_JOB = namespaces.ACTION_CREATE_SCAN_JOB
 ACTION_CREATE_SCAN_JOB_RESPONSE = namespaces.ACTION_CREATE_SCAN_JOB_RESPONSE
 ACTION_GET = namespaces.ACTION_GET
+ACTION_GET_STATUS = namespaces.ACTION_GET_STATUS
 ACTION_GET_JOB_STATUS = namespaces.ACTION_GET_JOB_STATUS
 ACTION_GET_JOB_STATUS_RESPONSE = namespaces.ACTION_GET_JOB_STATUS_RESPONSE
 ACTION_GET_SCANNER_ELEMENTS = namespaces.ACTION_GET_SCANNER_ELEMENTS
@@ -78,6 +79,7 @@ SCANNER_METADATA_ELEMENT_NAMES_NO_DEFAULT_TICKET = (
 DEFAULT_SCAN_DESTINATIONS = eventing_builders.DEFAULT_SCAN_DESTINATIONS
 SCAN_TICKET_TEMPLATE_XML = scan_parsers.SCAN_TICKET_TEMPLATE_XML
 
+build_get_status_request = eventing_builders.build_get_status_request
 build_renew_request = eventing_builders.build_renew_request
 build_subscribe_request = eventing_builders.build_subscribe_request
 build_unsubscribe_request = eventing_builders.build_unsubscribe_request
@@ -95,6 +97,7 @@ extract_subscribe_destination_token = eventing_parsers.extract_subscribe_destina
 extract_subscription_manager_epr = eventing_parsers.extract_subscription_manager_epr
 extract_subscription_manager_url = eventing_parsers.extract_subscription_manager_url
 parse_iso8601_duration_to_seconds = eventing_parsers.parse_iso8601_duration_to_seconds
+parse_get_status_response = eventing_parsers.parse_get_status_response
 parse_renew_response = eventing_parsers.parse_renew_response
 parse_subscribe_response = eventing_parsers.parse_subscribe_response
 parse_get_response = transfer_parsers.parse_get_response
@@ -830,6 +833,125 @@ async def renew_subscription(
     except ClientError as exc:
         log.warning(
             "Outbound WS-Eventing renew transport error",
+            extra={"subscription_manager_url": trimmed_url, "error": str(exc)},
+        )
+        raise
+
+
+async def get_subscription_status(
+    *,
+    manager_url: str,
+    subscription_id: str = "",
+    reference_parameters_xml: str | None = None,
+    from_address: str | None = None,
+    timeout_sec: float = 5.0,
+) -> dict[str, str | None]:
+    """Send WS-Eventing GetStatus to the subscription manager endpoint."""
+    trimmed_url = (manager_url or "").strip()
+    trimmed_id = (subscription_id or "").strip()
+    if not trimmed_url:
+        log.info(
+            "Skipping WS-Eventing get status (missing subscription manager URL)",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "subscription_id": trimmed_id,
+            },
+        )
+        return {
+            "status": "skipped",
+            "message_id": None,
+            "expires": None,
+            "fault_code": None,
+            "fault_subcode": None,
+            "fault_reason": None,
+        }
+    eff_id = _effective_subscription_identifier_for_unsubscribe(
+        trimmed_id,
+        reference_parameters_xml if reference_parameters_xml else None,
+    )
+    if not eff_id:
+        log.info(
+            "Skipping WS-Eventing get status (cannot resolve subscription identifier)",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "subscription_id": trimmed_id,
+            },
+        )
+        return {
+            "status": "skipped",
+            "message_id": None,
+            "expires": None,
+            "fault_code": None,
+            "fault_subcode": None,
+            "fault_reason": None,
+        }
+    message_id, payload = eventing_builders.build_get_status_request(
+        to_url=trimmed_url,
+        subscription_identifier=trimmed_id,
+        reference_parameters_xml=reference_parameters_xml if reference_parameters_xml else None,
+        from_address=from_address,
+    )
+    log.info(
+        "Outbound WS-Eventing get status sending",
+        extra={
+            "subscription_manager_url": trimmed_url,
+            "subscription_id": trimmed_id,
+            "message_id": message_id,
+            "timeout_sec": timeout_sec,
+        },
+    )
+    try:
+        status, response_text = await _post_soap(
+            url=trimmed_url,
+            payload=payload,
+            timeout_sec=timeout_sec,
+        )
+        parsed = eventing_parsers.parse_get_status_response(response_text)
+        details = parse_soap_fault(response_text)
+        details.update(parsed)
+        details.update({"status": str(status), "message_id": message_id})
+        if status < 200 or status >= 300:
+            log.warning(
+                "Outbound WS-Eventing get status returned non-success status",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "status": status,
+                    "fault_subcode": details.get("fault_subcode"),
+                    "fault_reason": details.get("fault_reason"),
+                },
+            )
+        elif details.get("fault_code"):
+            log.warning(
+                "Outbound WS-Eventing get status SOAP fault",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "fault_subcode": details.get("fault_subcode"),
+                    "fault_reason": details.get("fault_reason"),
+                },
+            )
+        else:
+            log.info(
+                "Outbound WS-Eventing get status completed",
+                extra={
+                    "subscription_manager_url": trimmed_url,
+                    "subscription_id": trimmed_id,
+                    "status": status,
+                    "expires": details.get("expires"),
+                },
+            )
+        return details
+    except asyncio.TimeoutError:
+        log.warning(
+            "Outbound WS-Eventing get status timed out",
+            extra={
+                "subscription_manager_url": trimmed_url,
+                "timeout_sec": timeout_sec,
+            },
+        )
+        raise
+    except ClientError as exc:
+        log.warning(
+            "Outbound WS-Eventing get status transport error",
             extra={"subscription_manager_url": trimmed_url, "error": str(exc)},
         )
         raise

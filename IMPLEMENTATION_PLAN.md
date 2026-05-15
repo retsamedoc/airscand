@@ -34,6 +34,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **`handle_wsd` defensive config wiring (`docs/ws-scan_audit.md` Low §16):** Missing or non-`Config` `app["config"]` returns HTTP **500** with plain text (aligned with `handle_scan`), logs an error, and does not touch `config` fields (`app/ws_scan.py`, `tests/test_ws_scan.py`). *Why tests matter:* a mis-wired aiohttp app previously raised `AttributeError` on the first subscription-manager leg.
 - **Fault Detail extraction (`docs/ws-scan_audit.md` Low §15):** `parse_soap_fault` surfaces `fault_detail` (serialised `Detail` children, truncated at 4 096 chars) and `soap_fault_log_fields` exposes it in `logging extra=` dicts; `SoapHttpClient.post_text` / `post_retrieve_image` log it on failure (`app/soap/fault.py`, `app/soap/transport.py`).
 - **CancelJob (WIA §7.5):** `cancel_scan_job` sends a WS-Scan **CancelJob** SOAP request on demand; `run_scan_available_chain` calls it automatically on **RetrieveImage** timeout or transport error when `cancel_job_on_retrieve_error=True` (default). Devices that ignore cancel are tolerated — failure is logged, not raised. Action constants `ACTION_CANCEL_JOB` / `ACTION_CANCEL_JOB_RESPONSE` added to `app/soap/namespaces.py`; builder `build_cancel_job_request` added to `app/soap/parsers/scan.py` (`tests/test_ws_eventing_client.py` — 6 new tests).
+- **Outbound WS-Eventing GetStatus:** `get_subscription_status`, `build_get_status_request`, `parse_get_status_response` (`app/soap/builders/eventing.py`, `app/soap/parsers/eventing.py`, `app/ws_eventing_client.py`, `tests/test_ws_eventing_client.py`, `tests/test_ws_eventing_audit_compliance.py`). *Why tests matter:* operators can verify device-reported lease without issuing **Renew**; audit §12 outbound residual closed.
 
 ---
 
@@ -46,11 +47,12 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **§1 lifecycle:** happy path Subscribe → Renew → GetStatus → Unsubscribe; **Renew** after monotonic lease expiry → **UnableToRenew** (registry clock only, no asyncio maintenance mocks).
 - **§4 / §11 faults:** parametrized **parse_soap_fault** peer subcode matrix; inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id, **Renew** `wsa:To` mismatch, unknown **Action** → **ActionNotSupported**.
 - **§5–§8 Subscribe validation:** **InvalidExpirationTime**, **DeliveryModeRequestedUnavailable** (non-Push), **FilteringNotSupported** (filter present).
-- **§2 outbound:** primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary; registration loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (patched `main.asyncio.sleep`, no wall-clock waits).
+- **§2 outbound:** primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary; registration loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (patched `main.asyncio.sleep`, no wall-clock waits); outbound **GetStatus** client (`get_subscription_status`, `build_get_status_request`, `parse_get_status_response`).
+- **§12 inbound:** expired lease on **GetStatus** → **UnableToRenew**; **GetStatus** does not extend lease (monotonic clock, no asyncio maintenance mocks).
 
-**Residual gap:** Outbound **GetStatus** client (not implemented); full registration/maintenance loop without patching `asyncio.sleep`; optional WS-Scan audit §11-style module (separate from eventing).
+**Residual gap:** Full registration/maintenance loop without patching `asyncio.sleep`; optional WS-Scan audit §11-style module (separate from eventing).
 
-**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix largely covered; outbound **GetStatus** remains explicit non-goal until required).
+**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix largely covered; outbound **GetStatus** implemented for diagnostics).
 
 **Verification:** CI runs compliance module; each `test_audit_ws_eventing_17_*` name maps to an audit § or fault bullet.
 
@@ -86,16 +88,6 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 9. **CancelJob** and abandoned-job cleanup (`docs/ROADMAP.md` Far-term)
-
-**Gap:** Not implemented per audits.
-
-**Done when:** Spec’d behavior for cancel from host side and device side; implementation + tests.
-
-**Verification:** Cancel during poll / retrieve yields defined terminal state and no resource leak (mock scanner).
-
----
-
 ### 10. Optional **`specs/`** entry point (documentation)
 
 **Gap:** Empty **`specs/`** while **`docs/protocol/`** holds specs.
@@ -112,4 +104,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: CancelJob (WIA §7.5) implemented — `cancel_scan_job`, `build_cancel_job_request`, auto-cancel on RetrieveImage error; fault Detail extraction confirmed complete; 6 new tests (250 total).*
+*Last updated: Outbound WS-Eventing **GetStatus** client + audit §12/§17 compliance tests (expired lease, non-mutating inbound GetStatus, outbound parse).*

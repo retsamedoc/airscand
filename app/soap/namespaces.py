@@ -24,6 +24,7 @@ SCANNER_STATUS_SUMMARY_EVENT_ACTION = f"{NS_SCA}/ScannerStatusSummaryEvent"
 
 ACTION_SUBSCRIBE = f"{NS_WSE}/Subscribe"
 ACTION_RENEW = f"{NS_WSE}/Renew"
+ACTION_GET_STATUS = f"{NS_WSE}/GetStatus"
 ACTION_UNSUBSCRIBE = f"{NS_WSE}/Unsubscribe"
 ACTION_SUBSCRIPTION_END = f"{NS_WSE}/SubscriptionEnd"
 ACTION_SUBSCRIPTION_END_RESPONSE = f"{NS_WSE}/SubscriptionEndResponse"

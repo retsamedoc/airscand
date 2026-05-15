@@ -60,6 +60,16 @@ def _renew_response_from_document(text: str) -> ET.Element | None:
     return _find_body_child(body, "RenewResponse")
 
 
+def _get_status_response_from_document(text: str) -> ET.Element | None:
+    env = parse_soap_envelope(text)
+    if env is None:
+        return None
+    body = soap_body(env)
+    if body is None:
+        return None
+    return _find_body_child(body, "GetStatusResponse")
+
+
 def _subscribe_response_direct_identifier(sub_resp: ET.Element) -> str | None:
     """First ``Identifier`` that is a direct child of ``SubscribeResponse`` only."""
     for ch in sub_resp:
@@ -301,6 +311,21 @@ def parse_renew_response(text: str) -> dict[str, Any]:
     expires: str | None = None
     if renew is not None:
         for ch in renew:
+            if local_name(ch.tag) == "Expires":
+                expires = _element_text_shallow(ch)
+                if expires:
+                    break
+    return {
+        "expires": expires,
+    }
+
+
+def parse_get_status_response(text: str) -> dict[str, Any]:
+    """Extract current expiration from a WS-Eventing GetStatusResponse body."""
+    status_resp = _get_status_response_from_document(text)
+    expires: str | None = None
+    if status_resp is not None:
+        for ch in status_resp:
             if local_name(ch.tag) == "Expires":
                 expires = _element_text_shallow(ch)
                 if expires:

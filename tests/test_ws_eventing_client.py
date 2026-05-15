@@ -21,6 +21,7 @@ from app.ws_eventing_client import (
     ACTION_GET,
     ACTION_GET_JOB_STATUS,
     ACTION_GET_SCANNER_ELEMENTS,
+    ACTION_GET_STATUS,
     ACTION_RENEW,
     ACTION_RETRIEVE_IMAGE,
     ACTION_VALIDATE_SCAN_TICKET,
@@ -33,6 +34,7 @@ from app.ws_eventing_client import (
     build_get_job_status_request,
     build_get_request,
     build_get_scanner_elements_request,
+    build_get_status_request,
     build_renew_request,
     build_retrieve_image_request,
     build_subscribe_request,
@@ -44,10 +46,12 @@ from app.ws_eventing_client import (
     extract_soap_envelope_message_id,
     extract_subscription_manager_url,
     get_scanner_elements_metadata,
+    get_subscription_status,
     parse_create_scan_job_response,
     parse_get_job_status_response,
     parse_get_response,
     parse_get_scanner_elements_response,
+    parse_get_status_response,
     parse_iso8601_duration_to_seconds,
     parse_renew_response,
     parse_retrieve_image_response,
@@ -460,6 +464,81 @@ def test_parse_renew_response_reads_expires() -> None:
   </soap:Body>
 </soap:Envelope>"""
     assert parse_renew_response(xml)["expires"] == "PT2H"
+
+
+def test_parse_get_status_response_reads_expires() -> None:
+    """GetStatusResponse carries current wse:Expires without mutating local lease state."""
+    xml = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing">
+  <soap:Body>
+    <wse:GetStatusResponse>
+      <wse:Expires>PT45M</wse:Expires>
+    </wse:GetStatusResponse>
+  </soap:Body>
+</soap:Envelope>"""
+    assert parse_get_status_response(xml)["expires"] == "PT45M"
+
+
+def test_build_get_status_request_includes_action_and_identifier_header() -> None:
+    """GetStatus uses subscription manager To URI, wse:Identifier header, and empty body."""
+    mid, body = build_get_status_request(
+        to_url="http://192.168.1.60:80/WDP/SCAN/submgr",
+        subscription_identifier="urn:uuid:sub-1",
+        from_address="urn:uuid:11111111-2222-3333-4444-555555555555",
+        message_id="urn:uuid:gs-1",
+    )
+    assert ACTION_GET_STATUS in body
+    assert mid == "urn:uuid:gs-1"
+    assert "<wse:GetStatus/>" in body
+    assert "<wse:Identifier>urn:uuid:sub-1</wse:Identifier>" in body
+    assert "<wsa:To>http://192.168.1.60:80/WDP/SCAN/submgr</wsa:To>" in body
+    assert f"<wsa:Address>{WSA_ANONYMOUS}</wsa:Address>" in body
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_status_parses_response(monkeypatch: MonkeyPatch) -> None:
+    """get_subscription_status POSTs GetStatus and merges Expires from GetStatusResponse."""
+
+    async def fake_post_soap(
+        *,
+        url: str,
+        payload: str,
+        timeout_sec: float,
+    ) -> tuple[int, str]:
+        assert url == "http://192.168.1.60:80/WDP/SCAN/submgr"
+        assert "GetStatus" in payload
+        assert "urn:uuid:sub-1" in payload
+        body = """<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body>
+    <wse:GetStatusResponse xmlns:wse="http://schemas.xmlsoap.org/ws/2004/08/eventing">
+      <wse:Expires>PT30M</wse:Expires>
+    </wse:GetStatusResponse>
+  </soap:Body>
+</soap:Envelope>"""
+        return 200, body
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    result = await get_subscription_status(
+        manager_url="http://192.168.1.60:80/WDP/SCAN/submgr",
+        subscription_id="urn:uuid:sub-1",
+        from_address="urn:uuid:client",
+    )
+    assert result.get("status") == "200"
+    assert result.get("expires") == "PT30M"
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_status_skips_when_missing_url_or_id() -> None:
+    """GetStatus is skipped when manager URL or subscription id is empty."""
+    result = await get_subscription_status(manager_url="", subscription_id="sub-1")
+    assert result.get("status") == "skipped"
+    result2 = await get_subscription_status(
+        manager_url="http://192.168.1.1/wdp",
+        subscription_id="",
+    )
+    assert result2.get("status") == "skipped"
 
 
 def test_build_renew_request_includes_renew_action_and_expires_body() -> None:
