@@ -47,6 +47,7 @@ from app.ws_eventing_client import (
     extract_subscription_manager_url,
     get_scanner_elements_metadata,
     get_subscription_status,
+    is_retrieve_image_transient_failure,
     parse_create_scan_job_response,
     parse_get_job_status_response,
     parse_get_response,
@@ -65,6 +66,7 @@ from app.ws_eventing_client import (
     resolve_scan_ticket_xml_for_chain,
     resolve_subscribe_destination_token_for_chain,
     resolve_wdp_scan_url,
+    retrieve_image_max_attempts,
     run_scan_available_chain,
     unsubscribe_from_scanner,
 )
@@ -2759,10 +2761,12 @@ async def test_run_scan_available_chain_calls_cancel_on_retrieve_timeout(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
         cancel_job_on_retrieve_error=True,
+        retrieve_image_max_retries=1,
     )
     assert len(cancel_calls) == 1
     assert "CancelJobRequest" in cancel_calls[0]
     assert result.get("retrieve_fault_subcode") == "airscand:RetrieveImageTransportError"
+    assert result.get("retrieve_attempt_count") == "2"
 
 
 @pytest.mark.asyncio
@@ -2805,5 +2809,192 @@ async def test_run_scan_available_chain_no_cancel_when_disabled(
         scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
         poll_get_job_status_before_retrieve=False,
         cancel_job_on_retrieve_error=False,
+        retrieve_image_max_retries=0,
     )
     assert cancel_calls == []
+
+
+def test_retrieve_image_max_attempts_helpers() -> None:
+    """Bounded retry helpers count attempts and classify transient faults."""
+    assert retrieve_image_max_attempts(0) == 1
+    assert retrieve_image_max_attempts(1) == 2
+    assert retrieve_image_max_attempts(3) == 4
+    assert is_retrieve_image_transient_failure("airscand:RetrieveImagePayloadIntegrity")
+    assert is_retrieve_image_transient_failure("airscand:RetrieveImageTransportError")
+    assert not is_retrieve_image_transient_failure("airscand:SoapResponseCorrelationMismatch")
+    assert not is_retrieve_image_transient_failure("wscn:ClientErrorNoImagesAvailable")
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_retries_retrieve_after_integrity_failure(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Transient MTOM integrity failure triggers one bounded RetrieveImage retry."""
+    from tests.test_mtom import _EPSON_SOAP, _JPEG_PREFIX, _build_mtom_http_body
+
+    boundary = "retry_boundary"
+    outer_ct = f'multipart/related; type="application/xop+xml"; boundary="{boundary}"'
+    good_body = _build_mtom_http_body(
+        boundary=boundary,
+        soap_xml=_EPSON_SOAP,
+        image_bytes=_JPEG_PREFIX + b"ok",
+        cid="9CAED324E3C0_417441432@epson",
+    )
+    bad_body = _build_mtom_http_body(
+        boundary=boundary,
+        soap_xml=_EPSON_SOAP,
+        image_bytes=b"not-a-jpeg",
+        cid="9CAED324E3C0_417441432@epson",
+    )
+    retrieve_calls = 0
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, "<soap:Envelope/>"
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>j-retry</sca:JobId><sca:JobToken>t-retry</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        nonlocal retrieve_calls
+        retrieve_calls += 1
+        body = bad_body if retrieve_calls == 1 else good_body
+        return (200, body, outer_ct, _retrieve_image_http_ok(body))
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        output_dir=tmp_path,
+        retrieve_image_max_retries=1,
+    )
+    assert retrieve_calls == 2
+    assert result.get("retrieve_attempt_count") == "2"
+    assert result.get("saved_scan_path") is not None
+    assert result.get("retrieve_fault_subcode") is None
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_retries_retrieve_after_transport_error(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """RetrieveImage transport errors retry once before surfacing failure."""
+    retrieve_calls = 0
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, "<soap:Envelope/>"
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>j-tr</sca:JobId><sca:JobToken>t-tr</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        nonlocal retrieve_calls
+        retrieve_calls += 1
+        if retrieve_calls == 1:
+            raise asyncio.TimeoutError
+        return await _fake_retrieve_image_from_xml(_DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML)(
+            url=url, payload=payload, timeout_sec=timeout_sec
+        )
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        retrieve_image_max_retries=1,
+    )
+    assert retrieve_calls == 2
+    assert result.get("retrieve_attempt_count") == "2"
+    assert result.get("retrieve_fault_subcode") is None
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_does_not_retry_non_transient_retrieve_fault(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Device SOAP faults (e.g. no images) are not retried automatically."""
+    retrieve_calls = 0
+    no_images_xml = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:RetrieveImageResponse>
+    <sca:Status>Failure</sca:Status>
+    <sca:Fault><sca:Code><sca:Subcode><sca:Value>wscn:ClientErrorNoImagesAvailable</sca:Value></sca:Subcode></sca:Code></sca:Fault>
+  </sca:RetrieveImageResponse></soap:Body>
+</soap:Envelope>"""
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, "<soap:Envelope/>"
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>j-ni</sca:JobId><sca:JobToken>t-ni</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        raise AssertionError("unexpected SOAP request")
+
+    async def counting_retrieve(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        nonlocal retrieve_calls
+        retrieve_calls += 1
+        return await _fake_retrieve_image_from_xml(no_images_xml)(
+            url=url, payload=payload, timeout_sec=timeout_sec
+        )
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", counting_retrieve)
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        retrieve_image_max_retries=2,
+    )
+    assert retrieve_calls == 1
+    assert (result.get("retrieve_status") or "").lower() == "failure"
+    assert result.get("saved_scan_path") is None

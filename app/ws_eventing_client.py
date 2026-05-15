@@ -1063,6 +1063,25 @@ async def get_scanner_elements_metadata(
     return details
 
 
+def retrieve_image_max_attempts(max_retries: int) -> int:
+    """Return total RetrieveImage POST attempts (initial try plus bounded retries)."""
+    return max(1, 1 + max(0, max_retries))
+
+
+def is_retrieve_image_transient_failure(fault_subcode: str | None) -> bool:
+    """Return True when a bounded RetrieveImage retry may recover (truncation / transport).
+
+    Device SOAP faults (e.g. no images, job timed out) and correlation mismatches are not retried
+    because repeating the same request usually yields the same outcome.
+    """
+    if not fault_subcode:
+        return False
+    return fault_subcode in (
+        "airscand:RetrieveImagePayloadIntegrity",
+        "airscand:RetrieveImageTransportError",
+    )
+
+
 async def run_scan_available_chain(
     *,
     scanner_xaddr: str,
@@ -1085,6 +1104,7 @@ async def run_scan_available_chain(
     validate_outbound_soap_response: bool = False,
     image_delivery_mode: ImageDeliveryMode = "pull",
     cancel_job_on_retrieve_error: bool = True,
+    retrieve_image_max_retries: int = 1,
 ) -> dict[str, str | None]:
     """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage.
 
@@ -1096,8 +1116,11 @@ async def run_scan_available_chain(
     (see ``WSD_SCAN_PATH``). **JobToken** is not required in that mode.
 
     When ``cancel_job_on_retrieve_error`` is True (default), a **CancelJob** SOAP request is sent to
-    the scanner on **RetrieveImage** timeout or transport error per WIA §7.5. Devices may silently
-    ignore CancelJob; the failure is logged and does not raise.
+    the scanner on **RetrieveImage** timeout or transport error per WIA §7.5 after retries are
+    exhausted. Devices may silently ignore CancelJob; the failure is logged and does not raise.
+
+    ``retrieve_image_max_retries`` bounds automatic **RetrieveImage** retries after payload
+    integrity failure or transport errors (default **1** retry). Set to **0** for a single attempt.
     """
     lifecycle = ScanLifecycle()
     lifecycle.mark_discovered()
@@ -1669,169 +1692,212 @@ async def run_scan_available_chain(
         )
 
     lifecycle.mark_retrieving()
-    retrieve_message_id, retrieve_payload = scan_parsers.build_retrieve_image_request(
-        to_url=target_url,
-        job_id=resolved_job_id,
-        job_token=create_job_token,
-        from_address=from_address,
-    )
     begin_retrieve_idle_wait()
     idle_wait_result: str | None = None
     saved_scan_path_str: str | None = None
     saved_scan_bytes_val: int | None = None
     retrieve_details: dict[str, str | None] = {}
     retrieve_status: int = 0
-    retrieve_ct: str | None = None
+    retrieve_message_id = ""
     retrieve_ok = False
+    retrieve_attempt_count = 0
+    max_retrieve_attempts = retrieve_image_max_attempts(retrieve_image_max_retries)
     try:
-        (
-            retrieve_status,
-            retrieve_body,
-            retrieve_ct,
-            http_integrity,
-        ) = await _post_soap_retrieve_image(
-            url=target_url,
-            payload=retrieve_payload,
-            timeout_sec=retrieve_image_timeout_sec,
-        )
-        soap_text, image_bytes, image_part_ct, mtom_integrity = parse_retrieve_image_mtom(
-            retrieve_body, retrieve_ct
-        )
-        if not http_integrity.ok or not mtom_integrity.ok:
-            reasons: list[str] = []
-            integ_extra: dict[str, object] = {
-                "http_body_len": http_integrity.body_len,
-                "http_content_length": http_integrity.content_length,
-                "http_integrity_ok": http_integrity.ok,
-                "mtom_integrity_ok": mtom_integrity.ok,
-            }
-            if not http_integrity.ok:
-                reasons.append(http_integrity.reason_code or "http_integrity")
-            if not mtom_integrity.ok:
-                reasons.append(mtom_integrity.reason_code or "mtom_integrity")
-                integ_extra.update(mtom_integrity.extra)
-            log.warning(
-                "RetrieveImage payload integrity check failed",
-                extra={
-                    "target_url": target_url,
-                    "job_id": resolved_job_id,
-                    "integrity_reason_codes": ",".join(reasons),
-                    **{k: v for k, v in integ_extra.items()},
-                },
-            )
-            image_bytes = None
-            if not retrieve_details:
-                retrieve_details = {
-                    "fault_code": "soap:Client",
-                    "fault_subcode": "airscand:RetrieveImagePayloadIntegrity",
-                    "fault_reason": "RetrieveImage response failed payload integrity checks: "
-                    + ", ".join(reasons),
-                    "status": None,
-                }
-        if validate_outbound_soap_response:
-            try:
-                check_outbound_soap_response_correlation(
-                    soap_text,
-                    request_message_id=retrieve_message_id,
-                    expected_success_action=ACTION_RETRIEVE_IMAGE_RESPONSE,
-                )
-            except OutboundSoapCorrelationError as exc:
-                log.warning(
-                    "RetrieveImage SOAP response correlation mismatch",
-                    extra={
-                        "target_url": target_url,
-                        "job_id": resolved_job_id,
-                        "reason_code": exc.reason_code,
-                        "request_message_id": exc.request_message_id,
-                    },
-                )
-                retrieve_details = {
-                    "fault_code": "soap:Client",
-                    "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
-                    "fault_reason": str(exc),
-                    "status": None,
-                }
-                image_bytes = None
-        if not retrieve_details:
-            retrieve_details = scan_parsers.parse_retrieve_image_response(soap_text)
-        fault = retrieve_details.get("fault_code")
-        status_val = (retrieve_details.get("status") or "").strip().lower()
-        explicit_fail = status_val in ("failure", "failed", "error")
-        image_ok = bool(image_bytes)
-        retrieve_ok = (
-            200 <= retrieve_status < 300
-            and not fault
-            and not explicit_fail
-            and (status_val == "success" or image_ok)
-        )
-        if retrieve_ok and output_dir is not None and image_bytes:
-            try:
-                out_subdir: str | None = None
-                if resolved_dest is not None and resolved_dest.config is not None:
-                    out_subdir = resolved_dest.config.output_subdir
-                path = save_scan_file(
-                    Path(output_dir),
-                    image_bytes,
-                    content_type=image_part_ct,
-                    subdir=out_subdir,
-                )
-                saved_scan_path_str = str(path)
-                saved_scan_bytes_val = len(image_bytes)
-                if resolved_dest is not None:
-                    for hook in resolved_dest.post_processing_hooks:
-                        hook(path)
-            except OSError:
-                log.exception(
-                    "Failed to persist RetrieveImage payload",
-                    extra={"target_url": target_url, "job_id": resolved_job_id},
-                )
-        elif retrieve_ok and image_bytes and output_dir is None:
-            log.info(
-                "RetrieveImage returned image bytes but output_dir omitted; skipping save",
-                extra={"bytes": len(image_bytes), "job_id": resolved_job_id},
-            )
-        if retrieve_ok and wait_scanner_idle_after_retrieve and scanner_idle_wait_sec > 0:
-            got_idle = await await_scanner_idle_after_retrieve(scanner_idle_wait_sec)
-            idle_wait_result = "success" if got_idle else "timeout"
-            if got_idle:
+        for attempt_index in range(max_retrieve_attempts):
+            retrieve_attempt_count = attempt_index + 1
+            if attempt_index > 0:
                 log.info(
-                    "Scanner Idle after RetrieveImage (ScannerStatusSummaryEvent)",
+                    "RetrieveImage retrying after transient failure",
                     extra={
                         "target_url": target_url,
                         "job_id": resolved_job_id,
-                        "scanner_idle_wait_sec": scanner_idle_wait_sec,
+                        "retrieve_attempt": retrieve_attempt_count,
+                        "retrieve_max_attempts": max_retrieve_attempts,
+                        "prior_fault_subcode": retrieve_details.get("fault_subcode"),
                     },
                 )
-        elif retrieve_ok:
-            idle_wait_result = "skipped"
-        else:
-            idle_wait_result = "not_applicable"
-    except (asyncio.TimeoutError, ClientError) as _retrieve_exc:
-        idle_wait_result = "not_applicable"
-        retrieve_details = {
-            "fault_code": "soap:Client",
-            "fault_subcode": "airscand:RetrieveImageTransportError",
-            "fault_reason": str(_retrieve_exc),
-            "status": None,
-        }
-        log.warning(
-            "RetrieveImage transport error; attempting CancelJob",
-            extra={
-                "target_url": target_url,
-                "job_id": resolved_job_id,
-                "error": str(_retrieve_exc),
-                "cancel_job_on_retrieve_error": cancel_job_on_retrieve_error,
-            },
-        )
-        if cancel_job_on_retrieve_error and resolved_job_id and create_job_token:
-            lifecycle.mark_cancelled()
-            await cancel_scan_job(
-                target_url=target_url,
+            retrieve_message_id, retrieve_payload = scan_parsers.build_retrieve_image_request(
+                to_url=target_url,
                 job_id=resolved_job_id,
                 job_token=create_job_token,
-                timeout_sec=timeout_sec,
                 from_address=from_address,
             )
+            retrieve_details = {}
+            try:
+                (
+                    retrieve_status,
+                    retrieve_body,
+                    retrieve_ct,
+                    http_integrity,
+                ) = await _post_soap_retrieve_image(
+                    url=target_url,
+                    payload=retrieve_payload,
+                    timeout_sec=retrieve_image_timeout_sec,
+                )
+                soap_text, image_bytes, image_part_ct, mtom_integrity = parse_retrieve_image_mtom(
+                    retrieve_body, retrieve_ct
+                )
+                if not http_integrity.ok or not mtom_integrity.ok:
+                    reasons: list[str] = []
+                    integ_extra: dict[str, object] = {
+                        "http_body_len": http_integrity.body_len,
+                        "http_content_length": http_integrity.content_length,
+                        "http_integrity_ok": http_integrity.ok,
+                        "mtom_integrity_ok": mtom_integrity.ok,
+                    }
+                    if not http_integrity.ok:
+                        reasons.append(http_integrity.reason_code or "http_integrity")
+                    if not mtom_integrity.ok:
+                        reasons.append(mtom_integrity.reason_code or "mtom_integrity")
+                        integ_extra.update(mtom_integrity.extra)
+                    log.warning(
+                        "RetrieveImage payload integrity check failed",
+                        extra={
+                            "target_url": target_url,
+                            "job_id": resolved_job_id,
+                            "integrity_reason_codes": ",".join(reasons),
+                            "retrieve_attempt": retrieve_attempt_count,
+                            **{k: v for k, v in integ_extra.items()},
+                        },
+                    )
+                    image_bytes = None
+                    retrieve_details = {
+                        "fault_code": "soap:Client",
+                        "fault_subcode": "airscand:RetrieveImagePayloadIntegrity",
+                        "fault_reason": "RetrieveImage response failed payload integrity checks: "
+                        + ", ".join(reasons),
+                        "status": None,
+                    }
+                if validate_outbound_soap_response and not retrieve_details:
+                    try:
+                        check_outbound_soap_response_correlation(
+                            soap_text,
+                            request_message_id=retrieve_message_id,
+                            expected_success_action=ACTION_RETRIEVE_IMAGE_RESPONSE,
+                        )
+                    except OutboundSoapCorrelationError as exc:
+                        log.warning(
+                            "RetrieveImage SOAP response correlation mismatch",
+                            extra={
+                                "target_url": target_url,
+                                "job_id": resolved_job_id,
+                                "reason_code": exc.reason_code,
+                                "request_message_id": exc.request_message_id,
+                            },
+                        )
+                        retrieve_details = {
+                            "fault_code": "soap:Client",
+                            "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
+                            "fault_reason": str(exc),
+                            "status": None,
+                        }
+                        image_bytes = None
+                if not retrieve_details:
+                    retrieve_details = scan_parsers.parse_retrieve_image_response(soap_text)
+                fault = retrieve_details.get("fault_code")
+                status_val = (retrieve_details.get("status") or "").strip().lower()
+                explicit_fail = status_val in ("failure", "failed", "error")
+                image_ok = bool(image_bytes)
+                retrieve_ok = (
+                    200 <= retrieve_status < 300
+                    and not fault
+                    and not explicit_fail
+                    and (status_val == "success" or image_ok)
+                )
+                if retrieve_ok and output_dir is not None and image_bytes:
+                    try:
+                        out_subdir: str | None = None
+                        if resolved_dest is not None and resolved_dest.config is not None:
+                            out_subdir = resolved_dest.config.output_subdir
+                        path = save_scan_file(
+                            Path(output_dir),
+                            image_bytes,
+                            content_type=image_part_ct,
+                            subdir=out_subdir,
+                        )
+                        saved_scan_path_str = str(path)
+                        saved_scan_bytes_val = len(image_bytes)
+                        if resolved_dest is not None:
+                            for hook in resolved_dest.post_processing_hooks:
+                                hook(path)
+                    except OSError:
+                        log.exception(
+                            "Failed to persist RetrieveImage payload",
+                            extra={"target_url": target_url, "job_id": resolved_job_id},
+                        )
+                elif retrieve_ok and image_bytes and output_dir is None:
+                    log.info(
+                        "RetrieveImage returned image bytes but output_dir omitted; skipping save",
+                        extra={"bytes": len(image_bytes), "job_id": resolved_job_id},
+                    )
+                if retrieve_ok and wait_scanner_idle_after_retrieve and scanner_idle_wait_sec > 0:
+                    got_idle = await await_scanner_idle_after_retrieve(scanner_idle_wait_sec)
+                    idle_wait_result = "success" if got_idle else "timeout"
+                    if got_idle:
+                        log.info(
+                            "Scanner Idle after RetrieveImage (ScannerStatusSummaryEvent)",
+                            extra={
+                                "target_url": target_url,
+                                "job_id": resolved_job_id,
+                                "scanner_idle_wait_sec": scanner_idle_wait_sec,
+                            },
+                        )
+                elif retrieve_ok:
+                    idle_wait_result = "skipped"
+                else:
+                    idle_wait_result = "not_applicable"
+            except (asyncio.TimeoutError, ClientError) as _retrieve_exc:
+                idle_wait_result = "not_applicable"
+                retrieve_details = {
+                    "fault_code": "soap:Client",
+                    "fault_subcode": "airscand:RetrieveImageTransportError",
+                    "fault_reason": str(_retrieve_exc),
+                    "status": None,
+                }
+                retrieve_ok = False
+                log.warning(
+                    "RetrieveImage transport error",
+                    extra={
+                        "target_url": target_url,
+                        "job_id": resolved_job_id,
+                        "error": str(_retrieve_exc),
+                        "retrieve_attempt": retrieve_attempt_count,
+                        "retrieve_max_attempts": max_retrieve_attempts,
+                    },
+                )
+
+            if retrieve_ok:
+                break
+            fault_subcode_attempt = retrieve_details.get("fault_subcode") or ""
+            if (
+                attempt_index + 1 < max_retrieve_attempts
+                and is_retrieve_image_transient_failure(fault_subcode_attempt)
+            ):
+                continue
+            if (
+                fault_subcode_attempt == "airscand:RetrieveImageTransportError"
+                and cancel_job_on_retrieve_error
+                and resolved_job_id
+                and create_job_token
+            ):
+                log.warning(
+                    "RetrieveImage transport error; attempting CancelJob",
+                    extra={
+                        "target_url": target_url,
+                        "job_id": resolved_job_id,
+                        "cancel_job_on_retrieve_error": cancel_job_on_retrieve_error,
+                        "retrieve_attempt": retrieve_attempt_count,
+                    },
+                )
+                lifecycle.mark_cancelled()
+                await cancel_scan_job(
+                    target_url=target_url,
+                    job_id=resolved_job_id,
+                    job_token=create_job_token,
+                    timeout_sec=timeout_sec,
+                    from_address=from_address,
+                )
+            break
     finally:
         end_retrieve_idle_wait()
     retrieve_elapsed_sec = time.monotonic() - create_completed_monotonic
@@ -1850,6 +1916,8 @@ async def run_scan_available_chain(
             "scanner_idle_wait_result": idle_wait_result,
             "saved_scan_path": saved_scan_path_str,
             "saved_scan_bytes": saved_scan_bytes_val,
+            "retrieve_attempt_count": retrieve_attempt_count,
+            "retrieve_max_attempts": max_retrieve_attempts,
         },
     )
     if retrieve_elapsed_sec > 60.0:
@@ -1916,4 +1984,6 @@ async def run_scan_available_chain(
         saved_scan_path=saved_scan_path_str,
         saved_scan_bytes=str(saved_scan_bytes_val) if saved_scan_bytes_val is not None else None,
         image_delivery_mode=image_delivery_mode,
+        retrieve_attempt_count=str(retrieve_attempt_count),
+        retrieve_max_attempts=str(max_retrieve_attempts),
     )

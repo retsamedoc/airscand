@@ -296,5 +296,6 @@ async def test_run_scan_available_chain_skips_save_on_mtom_integrity_failure(
     )
     assert result.get("retrieve_http_status") == "200"
     assert result.get("retrieve_fault_subcode") == "airscand:RetrieveImagePayloadIntegrity"
+    assert result.get("retrieve_attempt_count") == "2"
     assert result.get("saved_scan_path") is None
     assert list(tmp_path.iterdir()) == []

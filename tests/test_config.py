@@ -85,6 +85,20 @@ def test_config_retrieve_image_timeout_env_optional(monkeypatch: MonkeyPatch) ->
     assert cfg2.retrieve_image_timeout_sec == 90.0
 
 
+def test_config_retrieve_image_max_retries_env(monkeypatch: MonkeyPatch) -> None:
+    """WSD_RETRIEVE_IMAGE_MAX_RETRIES bounds automatic RetrieveImage retries."""
+    monkeypatch.delenv("WSD_RETRIEVE_IMAGE_MAX_RETRIES", raising=False)
+    from app.config import Config
+
+    assert Config().retrieve_image_max_retries == 1
+
+    monkeypatch.setenv("WSD_RETRIEVE_IMAGE_MAX_RETRIES", "0")
+    assert Config().retrieve_image_max_retries == 0
+
+    monkeypatch.setenv("WSD_RETRIEVE_IMAGE_MAX_RETRIES", "3")
+    assert Config().retrieve_image_max_retries == 3
+
+
 def test_config_soap_http_timeout_env(monkeypatch: MonkeyPatch) -> None:
     """WSD_SOAP_HTTP_* env vars set connect and optional global read timeout on Config."""
     monkeypatch.setenv("WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC", "4.5")

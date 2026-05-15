@@ -667,6 +667,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
             if cfg_retrieve_timeout is not None
             else float(scanner_profile.retrieve_image_timeout_sec)
         )
+        retrieve_max_retries = int(getattr(config, "retrieve_image_max_retries", 1))
         task = asyncio.create_task(
             run_scan_available_chain(
                 scanner_xaddr=scanner_xaddr,
@@ -690,6 +691,7 @@ async def handle_wsd(request: web.Request) -> web.Response:
                     getattr(config, "validate_outbound_soap_response", False)
                 ),
                 image_delivery_mode=image_delivery_mode,
+                retrieve_image_max_retries=retrieve_max_retries,
             )
         )
         task.add_done_callback(_log_chain_result)

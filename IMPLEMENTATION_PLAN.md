@@ -28,7 +28,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Multi-XAddr registration failover:** [`discover_scanner_xaddrs`](app/discovery.py) returns the full **ProbeMatches** list in order; [`main._eventing_registration_loop`](main.py) tries each candidate and advances on transport-layer failures classified by [`is_scanner_xaddr_transport_failover`](app/soap/transport.py) (`asyncio.TimeoutError`, `ClientConnectorError`, `ClientOSError`). Logs include `xaddr_attempt_index`, `xaddr_candidates_total`, and `scanner_xaddr` per attempt (`tests/test_discovery.py`, `tests/test_main_registration.py`, `tests/test_soap_transport.py`). *Residual:* per-scan outbound legs after registration still target `config.scanner_xaddr` only (no mid-chain rotation).
 
 - **Outbound SOAP response validation (RelatesTo / Action):** Optional strict checks for **Subscribe**, **ValidateScanTicket**, **CreateScanJob**, **GetJobStatus** (when polling), and **RetrieveImage** (SOAP envelope from MTOM) via ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` / ``Config.validate_outbound_soap_response`` (`app/soap/outbound_response_validation.py`, `app/ws_eventing_client.py`, `main.py`, `app/ws_scan.py`). Default **off** for interop with devices that omit headers (`docs/protocol/vendor_quirks.md`). *Why tests matter:* wrong correlation otherwise accepts mis-attributed HTTP replies as if they matched the in-flight SOAP leg.
-- **RetrieveImage payload integrity (pull / MTOM):** When HTTP provides ``Content-Length``, downloaded byte length must match. For ``multipart/related``, checks include closing boundary, optional per-part ``Content-Length``, **xop:Include** → binary part resolution, non-empty payload, and JPEG/PNG/TIFF/PDF magic vs declared MIME. Failures log structured ``integrity_reason_codes`` / lengths and return fault ``airscand:RetrieveImagePayloadIntegrity`` without persisting (`app/mtom.py`, `app/soap/transport.py`, `app/ws_eventing_client.py`, `tests/test_mtom.py`, `tests/test_soap_transport.py`). *Residual:* bounded automatic **RetrieveImage** retry after truncation is not implemented (operators see explicit failure).
+- **RetrieveImage payload integrity (pull / MTOM):** When HTTP provides ``Content-Length``, downloaded byte length must match. For ``multipart/related``, checks include closing boundary, optional per-part ``Content-Length``, **xop:Include** → binary part resolution, non-empty payload, and JPEG/PNG/TIFF/PDF magic vs declared MIME. Failures log structured ``integrity_reason_codes`` / lengths and return fault ``airscand:RetrieveImagePayloadIntegrity`` without persisting (`app/mtom.py`, `app/soap/transport.py`, `app/ws_eventing_client.py`, `tests/test_mtom.py`, `tests/test_soap_transport.py`).
+- **RetrieveImage bounded automatic retry (WIA §7.4 / §10.2):** After payload integrity failure or transport error, ``run_scan_available_chain`` retries **RetrieveImage** up to ``WSD_RETRIEVE_IMAGE_MAX_RETRIES`` (default **1** retry → two attempts) with a fresh ``wsa:MessageID``; device SOAP faults and correlation mismatches are not retried. **CancelJob** runs only after retries are exhausted. Chain results include ``retrieve_attempt_count`` / ``retrieve_max_attempts`` (`app/ws_eventing_client.py`, `app/config.py`, `app/ws_scan.py`, `docs/configuration.md`, `tests/test_ws_eventing_client.py`, `tests/test_mtom.py`, `tests/test_config.py`). *Why tests matter:* without them, a single truncated MTOM body permanently fails a scan that would succeed on replay.
 - **Namespace-aware SOAP on eventing / WS-A / fault hot paths:** ElementTree with explicit namespace URIs replaces regex for **SubscribeResponse** / **RenewResponse** parsing, subscription manager EPR, reference-parameter id resolution, WS-A **Action** / **MessageID** / **RelatesTo** / **To**, SOAP **Fault** code/subcode/reason, inbound management header id, outbound log correlation, and **ClientContext** / **DestinationToken** extraction (`app/soap/xmlutil.py`, `app/soap/parsers/eventing.py`, `app/soap/addressing.py`, `app/soap/fault.py`, `app/soap/parsers/discovery.py`, `app/soap/transport.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/parsers/scan.py`). *Why tests matter:* prefix permutations and nested duplicate **Identifier** elements otherwise yield wrong subscription correlation. Regression: `tests/test_eventing_namespace_xml.py`. *Residual:* some WS-Scan body parsers and WS-Discovery **XAddrs** extraction still use regex where audits did not require this increment.
 
 - **`handle_wsd` defensive config wiring (`docs/ws-scan_audit.md` Low §16):** Missing or non-`Config` `app["config"]` returns HTTP **500** with plain text (aligned with `handle_scan`), logs an error, and does not touch `config` fields (`app/ws_scan.py`, `tests/test_ws_scan.py`). *Why tests matter:* a mis-wired aiohttp app previously raised `AttributeError` on the first subscription-manager leg.
@@ -46,13 +47,15 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 5. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14)
+### 5. HTTP/SOAP header parity with reference traces (`docs/ws-scan_audit.md` Low §14) — **blocked**
 
-**Gap:** Only `Content-Type: application/soap+xml; charset=utf-8` on some legs.
+**Gap:** Only `Content-Type: application/soap+xml; charset=utf-8` on outbound legs; baseline asserted in `tests/test_ws_scan_audit_compliance.py` §14.
 
-**Done when:** Captured Win10 ↔ device trace compared; optional `action` MIME parameter or **SOAPAction** added **only** if interop proof demands it.
+**Blocked on:** Captured Win10 ↔ device golden trace (no fixture in repo yet). Do not add `SOAPAction` or `action=` MIME parameters without byte-level proof.
 
-**Verification:** Byte-level or header dict comparison test against golden file from real trace (redacted hostnames).
+**Done when:** Golden trace compared; optional headers added **only** if interop proof demands it.
+
+**Verification:** Byte-level or header dict comparison test against redacted golden file.
 
 ---
 
@@ -68,4 +71,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: Task 8 — `app/scan_lifecycle.py`, chain lifecycle fields, `tests/test_scan_lifecycle.py`.*
+*Last updated: RetrieveImage bounded retry — `WSD_RETRIEVE_IMAGE_MAX_RETRIES`, `tests/test_ws_eventing_client.py` (retry helpers + chain cases).*

@@ -67,6 +67,8 @@ class Config:
     scanner_idle_wait_sec: float = 60.0
     # When set, overrides ``ScannerProfile.retrieve_image_timeout_sec`` (see ``WSD_RETRIEVE_IMAGE_TIMEOUT_SEC``).
     retrieve_image_timeout_sec: float | None = None
+    # Bounded automatic **RetrieveImage** retries after integrity or transport failure (default 1 retry).
+    retrieve_image_max_retries: int = 1
     # ``app.quirks.get_profile`` key (e.g. generic, epson_wf_3640); skeleton until post–Phase 5.
     scanner_profile: str = "epson_wf_3640"
     # When set to ``pull`` or ``push_only``, overrides ``ScannerProfile.image_delivery_mode``.
@@ -162,6 +164,9 @@ class Config:
         raw_retrieve = os.getenv("WSD_RETRIEVE_IMAGE_TIMEOUT_SEC")
         if raw_retrieve is not None and raw_retrieve.strip() != "":
             self.retrieve_image_timeout_sec = float(raw_retrieve.strip())
+        raw_retrieve_retries = os.getenv("WSD_RETRIEVE_IMAGE_MAX_RETRIES")
+        if raw_retrieve_retries is not None and raw_retrieve_retries.strip() != "":
+            self.retrieve_image_max_retries = max(0, int(raw_retrieve_retries.strip()))
         self.scanner_profile = os.getenv("WSD_SCANNER_PROFILE", self.scanner_profile).strip()
 
         raw_img_delivery = os.getenv("WSD_IMAGE_DELIVERY_MODE", "").strip().lower()
