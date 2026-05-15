@@ -37,6 +37,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Outbound WS-Eventing GetStatus:** `get_subscription_status`, `build_get_status_request`, `parse_get_status_response` (`app/soap/builders/eventing.py`, `app/soap/parsers/eventing.py`, `app/ws_eventing_client.py`, `tests/test_ws_eventing_client.py`, `tests/test_ws_eventing_audit_compliance.py`). *Why tests matter:* operators can verify device-reported lease without issuing **Renew**; audit §12 outbound residual closed.
 - **Contract / compliance test suite (WS-Eventing §17 + WS-Scan audit):** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 themes for inbound manager and outbound subscriber (lifecycle, faults, Subscribe §5–§8 including `wsa:To` mismatch, omitted/missing `Delivery/@Mode`, default/capped **Expires**, invalid body, registration resubscribe); `tests/test_ws_scan_audit_compliance.py` for WS-Scan audit themes; `tests/test_inbound_eventing.py` covers `grant_expires_from_request` and parser edge cases. *Residual (product-driven only):* richer expiration types, filter dialect negotiation, supported-modes **Detail** on delivery faults.
 - **WS-Scan audit compliance module:** `tests/test_ws_scan_audit_compliance.py` — §6 retrieve timing/fault logs, §7 ack, §11 push_only, §13–§14 parsers/headers, §16 config guard, §17 Get URL.
+- **Developer and security posture (Task 6):** [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md) at repo root (trusted-LAN threat model, private vulnerability reporting, build/test commands); [`README.md`](README.md) links both; `tests/test_repo_policy.py` guards file presence and README linkage. *Why:* operators and contributors need one place for scope and reporting without duplicating `docs/development.md`.
 
 ---
 
@@ -51,16 +52,6 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 **Done when:** Captured Win10 ↔ device trace compared; optional `action` MIME parameter or **SOAPAction** added **only** if interop proof demands it.
 
 **Verification:** Byte-level or header dict comparison test against golden file from real trace (redacted hostnames).
-
----
-
-### 6. Developer and security posture (`docs/ROADMAP.md` Future)
-
-**Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
-
-**Done when:** Both files exist at repo root with project-specific content (reporting channel, scope, build/test commands).
-
-**Verification:** Maintainer review checklist; links from `README.md`.
 
 ---
 
@@ -82,8 +73,9 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ## Suggested execution order for MVP “hardening”
 
-1. **Task 5** (HTTP/SOAP header parity) when a golden Win10 trace is available; then **Task 6** (CONTRIBUTING/SECURITY) per release hygiene.
+1. **Task 5** (HTTP/SOAP header parity) when a golden Win10 trace is available.
+2. **Task 8** (scan lifecycle state machine) when refactoring orchestration for clearer failure handling.
 
 ---
 
-*Last updated: inbound Subscribe §5–§8 audit compliance tests + `grant_expires_from_request` unit tests (Task 4 closed for MVP).*
+*Last updated: Task 6 — CONTRIBUTING.md, SECURITY.md, README links, `tests/test_repo_policy.py`.*

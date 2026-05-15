@@ -20,3 +20,6 @@ WSD_HOST=0.0.0.0 uv run python main.py
 ### Development
 
 Tests, Ruff, CI behavior, and local MkDocs preview are documented in [`docs/development.md`](docs/development.md).
+
+- [**Contributing**](CONTRIBUTING.md) — setup, tests, lint, commits, and pull request expectations.
+- [**Security**](SECURITY.md) — threat model (trusted LAN), reporting vulnerabilities, and operational guidance.

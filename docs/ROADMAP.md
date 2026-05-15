@@ -43,12 +43,9 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 ### Future
 
 - **Security and metadata posture**:
-  - Document and/or implement stronger eventing subscription protections.
+  - Document and/or implement stronger eventing subscription protections (beyond trusted-LAN assumptions in [`SECURITY.md`](../SECURITY.md)).
   - Clarify metadata/WSDL strategy if full standards alignment becomes a goal.
   See `ws-eventing_audit` low items.
-- **Developer docs/policy**:
-  - Add CONTRIBUTING guidance.
-  - Add `SECURITY.md`.
 - **Logging architecture**: evaluate whether moving to [`structlog`](https://www.structlog.org/en/stable/index.html) materially improves operations.
 
 ## Done

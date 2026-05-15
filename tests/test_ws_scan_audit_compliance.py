@@ -306,7 +306,9 @@ async def test_audit_ws_scan_11_push_only_skips_retrieve_without_job_token(
             )
         raise AssertionError("unexpected SOAP leg")
 
-    async def fake_retrieve(**kwargs: object) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+    async def fake_retrieve(
+        **kwargs: object,
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
         nonlocal retrieve_called
         retrieve_called = True
         raise AssertionError("RetrieveImage must not run in push_only mode")
