@@ -11,6 +11,7 @@ from app.config import Config
 from app.discovery import discover_scanner_xaddr, start_discovery
 from app.http_server import start_http_server
 from app.logging import setup_logging
+from app.soap.transport import configure_soap_http_client_from_config
 from app.ws_eventing_client import (
     SCANNER_STATUS_SUMMARY_EVENT_ACTION,
     parse_iso8601_duration_to_seconds,
@@ -404,6 +405,7 @@ async def _shutdown_services(
 async def main() -> None:
     """Initialize configuration and run all long-lived service tasks."""
     config = Config()
+    configure_soap_http_client_from_config(config)
     setup_logging(config.log_level, log_json=config.log_json)
 
     loop = asyncio.get_running_loop()

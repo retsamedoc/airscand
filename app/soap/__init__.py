@@ -5,12 +5,17 @@ from __future__ import annotations
 from app.soap.addressing import new_message_id, soap_action_short
 from app.soap.envelope import build_inbound_response_envelope, build_outbound_client_envelope
 from app.soap.fault import parse_soap_fault
-from app.soap.transport import SoapHttpClient, default_soap_http_client
+from app.soap.transport import (
+    SoapHttpClient,
+    configure_soap_http_client_from_config,
+    default_soap_http_client,
+)
 
 __all__ = [
     "SoapHttpClient",
     "build_inbound_response_envelope",
     "build_outbound_client_envelope",
+    "configure_soap_http_client_from_config",
     "default_soap_http_client",
     "new_message_id",
     "parse_soap_fault",

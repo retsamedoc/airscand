@@ -85,6 +85,28 @@ def test_config_retrieve_image_timeout_env_optional(monkeypatch: MonkeyPatch) ->
     assert cfg2.retrieve_image_timeout_sec == 90.0
 
 
+def test_config_soap_http_timeout_env(monkeypatch: MonkeyPatch) -> None:
+    """WSD_SOAP_HTTP_* env vars set connect and optional global read timeout on Config."""
+    monkeypatch.setenv("WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC", "4.5")
+    monkeypatch.setenv("WSD_SOAP_HTTP_READ_TIMEOUT_SEC", "180")
+    from app.config import Config
+
+    cfg = Config()
+    assert cfg.soap_http_connect_timeout_sec == 4.5
+    assert cfg.soap_http_read_timeout_sec == 180.0
+
+
+def test_config_soap_http_timeout_defaults(monkeypatch: MonkeyPatch) -> None:
+    """Unset SOAP HTTP timeout env leaves defaults (read override None)."""
+    monkeypatch.delenv("WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("WSD_SOAP_HTTP_READ_TIMEOUT_SEC", raising=False)
+    from app.config import Config
+
+    cfg = Config()
+    assert cfg.soap_http_connect_timeout_sec == 10.0
+    assert cfg.soap_http_read_timeout_sec is None
+
+
 def test_config_discovery_env_overrides(monkeypatch: MonkeyPatch) -> None:
     """Discovery-specific environment variables are respected."""
     monkeypatch.setenv("WSD_HELLO_INTERVAL_SEC", "0")

@@ -49,6 +49,8 @@ If `WSD_ADVERTISE_ADDR` is unset or empty, the daemon uses `WSD_HOST` when it is
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC` | `10` | Outbound SOAP TCP **connect** ceiling (`aiohttp.ClientTimeout.sock_connect`) for `SoapHttpClient` POSTs. Fails fast when the scanner host is unreachable or black-holed. |
+| `WSD_SOAP_HTTP_READ_TIMEOUT_SEC` | *(unset)* | When set, overrides **every** outbound SOAP read budget (`sock_read`), including **RetrieveImage**—set higher than your largest scan/read if you use this. When unset, each operation keeps its own read timeout (e.g. per-leg `timeout_sec` in code, **RetrieveImage** from profile / `WSD_RETRIEVE_IMAGE_TIMEOUT_SEC`). |
 | `WSD_SCANNER_PROFILE` | `epson_wf_3640` | Quirks profile key (e.g. `generic` for protocol-default behavior, `epson_wf_3640` for tested WorkForce behavior). See `docs/protocol/vendor_quirks.md` in the repo. |
 | `WSD_RETRIEVE_IMAGE_TIMEOUT_SEC` | *(profile)* | Overrides the profile’s **RetrieveImage** read timeout (seconds). |
 | `WSD_CREATE_SCAN_JOB_RETRY_INVALID_DESTINATION_TOKEN` | `true` | When true, may retry **CreateScanJob** without a destination token after `ClientErrorInvalidDestinationToken`. |

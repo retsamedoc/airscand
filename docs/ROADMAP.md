@@ -11,8 +11,7 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
   - **Inbound (this host as subscription manager + sink):** MVP **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** with in-memory state and SOAP faults is implemented (`app/ws_scan.py`, `app/inbound_eventing_registry.py`). **Residual:** **SubscriptionEnd**; fuller **EndTo** / **NotifyTo** / **Expires** matrix (audit §5–§8, §13); **`GetStatus`** response semantics vs spec edge cases (audit §12); namespace-aware parsing (§11).
   - **Outbound (this host as subscriber to the scanner):** **SubscribeResponse** → persisted manager URL + reference parameters + **Expires**; **`_eventing_maintenance_loop`** → **`renew_subscription`**; shutdown / failed-renew **`_unsubscribe_eventing_best_effort`**. **Residual:** optional outbound **GetStatus**; regex-heavy parsing for manager EPR/bodies (§11, §7); **SubscriptionEnd** handling (§3); response **RelatesTo** / **Action** checks on critical operations (`wia_client_audit.md` §5, `IMPLEMENTATION_PLAN.md`).
 - **SOAP sink / unknown actions:** unsupported **`wsa:Action`** on `/wsd` returns SOAP faults (**resolved**; `ws-eventing_audit` §9).
-- **Transport timeout split**: add env/config-driven connect/read timeout controls in `SoapHttpClient` (current single timeout remains).  
-  See `wia_client_audit` §3 checklist.
+- **Transport timeout split**: **Shipped** — `SoapHttpClient` uses aiohttp `sock_connect` / `sock_read` from `WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC` and optional `WSD_SOAP_HTTP_READ_TIMEOUT_SEC` (see `docs/configuration.md`, `docs/wia_client_audit.md` §3). Optional: integration test with a server that stalls the body past the read bound.
 - **Roadmap/documentation hygiene**: keep implementation locations (`app/soap/*`, `ws_eventing_client.py`, `main.py`, `ws_scan.py`) reflected in architecture/design/status and audit cross-links.
 
 ### Mid-term
@@ -65,6 +64,7 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 - Phase 1-4 implementation milestones and Epson WF-3640 validation completed.
 - Outbound WS-Eventing lease management: persisted subscription manager URL and reference parameters, parsed `Expires`, `_eventing_maintenance_loop` with `renew_subscription`, and best-effort `unsubscribe_from_scanner` on shutdown / failed renew (`main.py`, `app/ws_eventing_client.py`, `app/config.py`, `app/soap/parsers/eventing.py`).
 - Inbound WS-Eventing subscription manager + sink SOAP faults for lifecycle, validation, and unknown `wsa:Action` (`app/ws_scan.py`, `app/inbound_eventing_registry.py`, `app/soap/builders/faults.py`).
+- Outbound SOAP HTTP **connect** vs **read** timeouts (`SoapHttpClient` / `aiohttp.ClientTimeout`, `WSD_SOAP_HTTP_*`, `main.configure_soap_http_client_from_config`).
 
 ### Historical completion details
 

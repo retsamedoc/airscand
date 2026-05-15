@@ -8,7 +8,7 @@ This report maps the [WIA client specification](protocol/wia_client_spec.md) to 
 
 ## Executive summary
 
-The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob**, **response RelatesTo validation**, **separate connect/read timeouts**, **multi-XAddr failover**, and **RetrieveImage document handling / integrity checks**. **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
+The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob**, **response RelatesTo validation**, **multi-XAddr failover**, and **RetrieveImage document handling / integrity checks**. **SOAP client timeouts** expose separate **connect** vs **read** (`sock_connect` / `sock_read`) via environment variables (§3). **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
 
 ---
 
@@ -32,8 +32,8 @@ The project implements a **device-initiated** path (WS-Eventing **ScanAvailableE
 |-------------|--------|--------|
 | HTTP/1.1, POST for SOAP | **Met** | [`aiohttp`](https://docs.aiohttp.org/) client POSTs with `application/soap+xml`. |
 | Chunked responses, keep-alive, premature close | **Partial** | Libraries handle chunked bodies; outbound SOAP uses a **process-wide shared** [`ClientSession`](../app/soap/transport.py) via [`SoapHttpClient`](../app/soap/transport.py) / [`default_soap_http_client`](../app/soap/transport.py) (connection reuse across legs is **used**; per-request sessions removed). |
-| Configurable timeouts | **Partial** | `timeout_sec` parameters exist; **no env-driven split** into connect vs read. |
-| Default connect ≤ 2s, read 2–10s | **Gap** | Defaults such as `timeout_sec=5.0` are a **single** deadline for the whole request, not connect/read split per §3.2. |
+| Configurable timeouts | **Met** | `SoapHttpClient` passes `aiohttp.ClientTimeout(sock_connect=…, sock_read=…)`; **`WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC`** (default **10**) vs per-operation read (each call's ``timeout_sec``) or optional global **`WSD_SOAP_HTTP_READ_TIMEOUT_SEC`** override (`app/soap/transport.py`, `app/config.py`, `main.py`). |
+| Default connect ≤ 2s, read 2–10s | **Partial** | Defaults target **LAN** operability (10s connect); per-leg read budgets remain operation-specific (e.g. **RetrieveImage** profile/`WSD_RETRIEVE_IMAGE_TIMEOUT_SEC`). |
 | Retry idempotent operations | **Partial** | Discovery repeats probes; **GetScannerElements** may retry with a reduced element set; no general idempotent-SOAP retry policy. |
 
 ---

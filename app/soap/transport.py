@@ -12,11 +12,14 @@ from app.soap.addressing import WSA_MESSAGE_ID_PATTERN, extract_wsa_action, soap
 from app.soap.fault import parse_soap_fault
 
 if TYPE_CHECKING:
-    pass
+    from app.config import Config
 
 log = logging.getLogger(__name__)
 
 _shared_session: ClientSession | None = None
+
+_default_client: SoapHttpClient | None = None
+_default_client_fingerprint: tuple[float, float | None] | None = None
 
 
 def _get_shared_session() -> ClientSession:
@@ -26,18 +29,75 @@ def _get_shared_session() -> ClientSession:
     return _shared_session
 
 
+def configure_soap_http_client_from_config(config: Config) -> None:
+    """Rebuild the process-wide default :class:`SoapHttpClient` when SOAP timeout settings change.
+
+    Call once per process after :class:`~app.config.Config` is constructed (e.g. from ``main``)
+    so outbound SOAP uses env-driven connect vs read budgets.
+
+    Args:
+        config: Loaded runtime configuration (``WSD_SOAP_HTTP_*`` timeout fields).
+    """
+    global _default_client, _default_client_fingerprint
+    fingerprint = (config.soap_http_connect_timeout_sec, config.soap_http_read_timeout_sec)
+    if _default_client is not None and _default_client_fingerprint == fingerprint:
+        return
+    _default_client_fingerprint = fingerprint
+    _default_client = SoapHttpClient(
+        connect_timeout_sec=config.soap_http_connect_timeout_sec,
+        read_timeout_override_sec=config.soap_http_read_timeout_sec,
+    )
+
+
+def reset_soap_http_client_singleton_for_tests() -> None:
+    """Clear the lazily created default client (pytest isolation)."""
+    global _default_client, _default_client_fingerprint
+    _default_client = None
+    _default_client_fingerprint = None
+
+
 class SoapHttpClient:
     """SOAP over HTTP with an optional injected ``ClientSession`` (else process-wide shared session)."""
 
-    __slots__ = ("_session", "_owns_session")
+    __slots__ = ("_session", "_owns_session", "_connect_timeout_sec", "_read_timeout_override_sec")
 
-    def __init__(self, session: ClientSession | None = None) -> None:
-        """Wrap requests; when ``session`` is None, use a lazily created shared session."""
+    def __init__(
+        self,
+        session: ClientSession | None = None,
+        *,
+        connect_timeout_sec: float = 10.0,
+        read_timeout_override_sec: float | None = None,
+    ) -> None:
+        """Wrap requests; when ``session`` is None, use a lazily created shared session.
+
+        Args:
+            session: Optional aiohttp session (tests may inject a mock).
+            connect_timeout_sec: ``sock_connect`` budget for establishing the TCP connection.
+            read_timeout_override_sec: When set, ``sock_read`` for every request uses this value
+                instead of each call's ``timeout_sec``. When unset, per-call ``timeout_sec`` is
+                used for ``sock_read`` (preserves prior single-timeout behavior on the read leg).
+        """
         self._session = session
         self._owns_session = session is None
+        self._connect_timeout_sec = float(connect_timeout_sec)
+        self._read_timeout_override_sec = (
+            float(read_timeout_override_sec) if read_timeout_override_sec is not None else None
+        )
 
     def _session_for_request(self) -> ClientSession:
         return self._session if self._session is not None else _get_shared_session()
+
+    def _client_timeout(self, read_sec: float) -> ClientTimeout:
+        """Build aiohttp timeout with separate connect vs read (``sock_read``) ceilings."""
+        read_budget = (
+            self._read_timeout_override_sec
+            if self._read_timeout_override_sec is not None
+            else float(read_sec)
+        )
+        return ClientTimeout(
+            sock_connect=self._connect_timeout_sec,
+            sock_read=read_budget,
+        )
 
     async def post_text(
         self,
@@ -52,6 +112,11 @@ class SoapHttpClient:
         req_action_short = soap_action_short(req_action)
         req_mid_m = WSA_MESSAGE_ID_PATTERN.search(payload)
         req_message_id = req_mid_m.group(1).strip() if req_mid_m else None
+        read_effective = (
+            self._read_timeout_override_sec
+            if self._read_timeout_override_sec is not None
+            else float(timeout_sec)
+        )
         log.info(
             f"{req_action_short or 'unknown'}",
             extra={
@@ -61,10 +126,12 @@ class SoapHttpClient:
                 "url": url,
                 "bytes": len(payload.encode("utf-8")),
                 "timeout_sec": timeout_sec,
+                "soap_connect_timeout_sec": self._connect_timeout_sec,
+                "soap_read_timeout_sec": read_effective,
             },
         )
         session = self._session_for_request()
-        timeout = ClientTimeout(total=timeout_sec)
+        timeout = self._client_timeout(timeout_sec)
         try:
             async with session.post(
                 url,
@@ -107,6 +174,8 @@ class SoapHttpClient:
                     "wsa_message_id": req_message_id,
                     "url": url,
                     "timeout_sec": timeout_sec,
+                    "soap_connect_timeout_sec": self._connect_timeout_sec,
+                    "soap_read_timeout_sec": read_effective,
                 },
             )
             raise
@@ -136,6 +205,11 @@ class SoapHttpClient:
         req_action_short = soap_action_short(req_action)
         req_mid_m = WSA_MESSAGE_ID_PATTERN.search(payload)
         req_message_id = req_mid_m.group(1).strip() if req_mid_m else None
+        read_effective = (
+            self._read_timeout_override_sec
+            if self._read_timeout_override_sec is not None
+            else float(timeout_sec)
+        )
         log.info(
             f"{req_action_short or 'unknown'}",
             extra={
@@ -145,10 +219,12 @@ class SoapHttpClient:
                 "url": url,
                 "bytes": len(payload.encode("utf-8")),
                 "timeout_sec": timeout_sec,
+                "soap_connect_timeout_sec": self._connect_timeout_sec,
+                "soap_read_timeout_sec": read_effective,
             },
         )
         session = self._session_for_request()
-        timeout = ClientTimeout(total=timeout_sec)
+        timeout = self._client_timeout(timeout_sec)
         try:
             async with session.post(
                 url,
@@ -195,6 +271,8 @@ class SoapHttpClient:
                     "wsa_message_id": req_message_id,
                     "url": url,
                     "timeout_sec": timeout_sec,
+                    "soap_connect_timeout_sec": self._connect_timeout_sec,
+                    "soap_read_timeout_sec": read_effective,
                 },
             )
             raise
@@ -210,9 +288,6 @@ class SoapHttpClient:
                 },
             )
             raise
-
-
-_default_client: SoapHttpClient | None = None
 
 
 def default_soap_http_client() -> SoapHttpClient:

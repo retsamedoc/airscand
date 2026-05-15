@@ -147,7 +147,7 @@ All settings are environment-driven; see `app/config.py` for the authoritative l
 ## Testing
 
 - Tests live under `tests/`, pytest with `pytest-asyncio` for async code.
-- Module tests align with components: `test_discovery`, `test_ws_scan`, `test_ws_eventing_client`, `test_scan_receiver`, `test_mtom`, `test_config`, `test_logging`, `test_quirks`, `test_scanner_status_coordination`, `test_main_registration`.
+- Module tests align with components: `test_discovery`, `test_ws_scan`, `test_ws_eventing_client`, `test_soap_transport`, `test_scan_receiver`, `test_mtom`, `test_config`, `test_logging`, `test_quirks`, `test_scanner_status_coordination`, `test_main_registration`.
 
 ## Technology stack
 

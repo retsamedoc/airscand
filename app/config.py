@@ -71,6 +71,10 @@ class Config:
     scanner_profile: str = "epson_wf_3640"
     # Cap inbound WS-Eventing Subscribe/Renew granted lease (seconds); unset uses ``86400``.
     inbound_eventing_max_grant_sec: float | None = None
+    # Outbound ``SoapHttpClient`` / aiohttp: TCP connect vs response read (``sock_read``) budgets.
+    # When ``soap_http_read_timeout_sec`` is unset, each call uses its own ``timeout_sec`` for read.
+    soap_http_connect_timeout_sec: float = 10.0
+    soap_http_read_timeout_sec: float | None = None
     # Per-destination scan settings and output routing (see ``app.destinations``).
     scan_destinations: tuple[ScanDestination, ...] = field(
         default_factory=lambda: DEFAULT_DESTINATIONS,
@@ -169,6 +173,12 @@ class Config:
         raw_inbound = os.getenv("WSD_INBOUND_EVENTING_MAX_GRANT_SEC")
         if raw_inbound is not None and raw_inbound.strip() != "":
             self.inbound_eventing_max_grant_sec = float(raw_inbound.strip())
+        raw_soap_conn = os.getenv("WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC")
+        if raw_soap_conn is not None and raw_soap_conn.strip() != "":
+            self.soap_http_connect_timeout_sec = float(raw_soap_conn.strip())
+        raw_soap_read = os.getenv("WSD_SOAP_HTTP_READ_TIMEOUT_SEC")
+        if raw_soap_read is not None and raw_soap_read.strip() != "":
+            self.soap_http_read_timeout_sec = float(raw_soap_read.strip())
 
 
 def _get_or_create_persistent_uuid() -> str:
