@@ -10,6 +10,7 @@ from app.destinations import ScanDestinationConfig
 from app.soap.envelope import build_outbound_client_envelope
 from app.soap.fault import parse_soap_fault
 from app.soap.namespaces import (
+    ACTION_CANCEL_JOB,
     ACTION_CREATE_SCAN_JOB,
     ACTION_GET_JOB_STATUS,
     ACTION_GET_SCANNER_ELEMENTS,
@@ -326,6 +327,42 @@ def build_get_job_status_request(
     return build_outbound_client_envelope(
         xmlns_extra={"sca": NS_SCA},
         action=ACTION_GET_JOB_STATUS,
+        to_url=to_url,
+        body_inner_xml=body_inner,
+        message_id=message_id,
+        from_address=from_address,
+        reply_to_anonymous=True,
+        between_to_and_message_id="",
+    )
+
+
+def build_cancel_job_request(
+    *,
+    to_url: str,
+    job_id: str,
+    job_token: str,
+    message_id: str | None = None,
+    from_address: str | None = None,
+) -> tuple[str, str]:
+    """Build WS-Scan CancelJob SOAP envelope (WIA §7.5).
+
+    Args:
+        to_url: Destination scanner endpoint URL.
+        job_id: JobId from CreateScanJobResponse.
+        job_token: JobToken from CreateScanJobResponse.
+        message_id: Optional WS-A MessageID override; generated if None.
+        from_address: Optional WS-A From address for the request.
+
+    Returns:
+        Tuple of (message_id, envelope_xml).
+    """
+    body_inner = f"""    <sca:CancelJobRequest>
+      <sca:JobId>{job_id}</sca:JobId>
+      <sca:JobToken>{job_token}</sca:JobToken>
+    </sca:CancelJobRequest>"""
+    return build_outbound_client_envelope(
+        xmlns_extra={"sca": NS_SCA},
+        action=ACTION_CANCEL_JOB,
         to_url=to_url,
         body_inner_xml=body_inner,
         message_id=message_id,

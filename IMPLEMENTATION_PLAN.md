@@ -32,6 +32,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **Namespace-aware SOAP on eventing / WS-A / fault hot paths:** ElementTree with explicit namespace URIs replaces regex for **SubscribeResponse** / **RenewResponse** parsing, subscription manager EPR, reference-parameter id resolution, WS-A **Action** / **MessageID** / **RelatesTo** / **To**, SOAP **Fault** code/subcode/reason, inbound management header id, outbound log correlation, and **ClientContext** / **DestinationToken** extraction (`app/soap/xmlutil.py`, `app/soap/parsers/eventing.py`, `app/soap/addressing.py`, `app/soap/fault.py`, `app/soap/parsers/discovery.py`, `app/soap/transport.py`, `app/soap/parsers/inbound_eventing.py`, `app/soap/parsers/scan.py`). *Why tests matter:* prefix permutations and nested duplicate **Identifier** elements otherwise yield wrong subscription correlation. Regression: `tests/test_eventing_namespace_xml.py`. *Residual:* some WS-Scan body parsers and WS-Discovery **XAddrs** extraction still use regex where audits did not require this increment.
 
 - **`handle_wsd` defensive config wiring (`docs/ws-scan_audit.md` Low §16):** Missing or non-`Config` `app["config"]` returns HTTP **500** with plain text (aligned with `handle_scan`), logs an error, and does not touch `config` fields (`app/ws_scan.py`, `tests/test_ws_scan.py`). *Why tests matter:* a mis-wired aiohttp app previously raised `AttributeError` on the first subscription-manager leg.
+- **Fault Detail extraction (`docs/ws-scan_audit.md` Low §15):** `parse_soap_fault` surfaces `fault_detail` (serialised `Detail` children, truncated at 4 096 chars) and `soap_fault_log_fields` exposes it in `logging extra=` dicts; `SoapHttpClient.post_text` / `post_retrieve_image` log it on failure (`app/soap/fault.py`, `app/soap/transport.py`).
+- **CancelJob (WIA §7.5):** `cancel_scan_job` sends a WS-Scan **CancelJob** SOAP request on demand; `run_scan_available_chain` calls it automatically on **RetrieveImage** timeout or transport error when `cancel_job_on_retrieve_error=True` (default). Devices that ignore cancel are tolerated — failure is logged, not raised. Action constants `ACTION_CANCEL_JOB` / `ACTION_CANCEL_JOB_RESPONSE` added to `app/soap/namespaces.py`; builder `build_cancel_job_request` added to `app/soap/parsers/scan.py` (`tests/test_ws_eventing_client.py` — 6 new tests).
 
 ---
 
@@ -64,17 +66,7 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-### 6. Fault **Detail** extraction (`docs/ws-scan_audit.md` Low §15)
-
-**Gap:** `parse_soap_fault` does not surface **Detail** for diagnostics.
-
-**Done when:** **Detail** (or subset) available in parsed dict / logs for **InvalidArgs** and similar.
-
-**Verification:** Fixture fault with **Detail** → structured log field or parser key populated.
-
----
-
-### 7. Developer and security posture (`docs/ROADMAP.md` Future)
+### 6. Developer and security posture (`docs/ROADMAP.md` Future)
 
 **Gap:** No **CONTRIBUTING.md**, no **SECURITY.md**; threat model for trusted LAN only in design non-goals.
 
@@ -120,4 +112,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: WS-Eventing audit §17 compliance tests — inbound fault matrix (§5–§8), lifecycle + expired lease, parse_soap_fault peer subcodes.*
+*Last updated: CancelJob (WIA §7.5) implemented — `cancel_scan_job`, `build_cancel_job_request`, auto-cancel on RetrieveImage error; fault Detail extraction confirmed complete; 6 new tests (250 total).*

@@ -38,6 +38,8 @@ ScannerCapabilities = scanner_capabilities.ScannerCapabilities
 from app.soap.transport import HttpBodyIntegrityReport, default_soap_http_client
 
 # Re-export namespace constants for tests and main (explicit aliases satisfy static analysis).
+ACTION_CANCEL_JOB = namespaces.ACTION_CANCEL_JOB
+ACTION_CANCEL_JOB_RESPONSE = namespaces.ACTION_CANCEL_JOB_RESPONSE
 ACTION_CREATE_SCAN_JOB = namespaces.ACTION_CREATE_SCAN_JOB
 ACTION_CREATE_SCAN_JOB_RESPONSE = namespaces.ACTION_CREATE_SCAN_JOB_RESPONSE
 ACTION_GET = namespaces.ACTION_GET
@@ -84,6 +86,7 @@ build_validate_scan_ticket_request = scan_parsers.build_validate_scan_ticket_req
 build_create_scan_job_request = scan_parsers.build_create_scan_job_request
 build_retrieve_image_request = scan_parsers.build_retrieve_image_request
 build_get_job_status_request = scan_parsers.build_get_job_status_request
+build_cancel_job_request = scan_parsers.build_cancel_job_request
 build_get_scanner_elements_request = scan_parsers.build_get_scanner_elements_request
 extract_subscribe_destination_tokens_by_client_context = (
     eventing_parsers.extract_subscribe_destination_tokens_by_client_context
@@ -332,6 +335,82 @@ async def poll_get_job_status_until_ready(
         "unsupported": False,
         "terminal_failure": False,
     }
+
+
+async def cancel_scan_job(
+    *,
+    target_url: str,
+    job_id: str,
+    job_token: str,
+    timeout_sec: float = 10.0,
+    from_address: str | None = None,
+) -> dict[str, str | None]:
+    """Send WS-Scan CancelJob to the scanner (WIA §7.5).
+
+    The client SHOULD attempt cancel on user abort, timeout, or error. Devices may
+    silently ignore cancel; callers must tolerate a failed response (logged, not raised).
+
+    Args:
+        target_url: Scanner SOAP endpoint URL.
+        job_id: JobId from CreateScanJobResponse.
+        job_token: JobToken from CreateScanJobResponse.
+        timeout_sec: SOAP request timeout (connect + read combined budget).
+        from_address: Optional WS-A From address.
+
+    Returns:
+        Dict with ``cancel_http_status``, ``cancel_message_id``, ``cancel_fault_code``,
+        ``cancel_fault_subcode``, ``cancel_fault_reason``, and ``cancel_ok`` (``"true"``/``"false"``).
+    """
+    cancel_message_id, cancel_payload = scan_parsers.build_cancel_job_request(
+        to_url=target_url,
+        job_id=job_id,
+        job_token=job_token,
+        from_address=from_address,
+    )
+    try:
+        cancel_status, cancel_text = await _post_soap(
+            url=target_url,
+            payload=cancel_payload,
+            timeout_sec=timeout_sec,
+        )
+        fault = parse_soap_fault(cancel_text)
+        cancel_ok = 200 <= cancel_status < 300 and not fault.get("fault_code")
+        log.info(
+            "CancelJob sent",
+            extra={
+                "target_url": target_url,
+                "job_id": job_id,
+                "http_status": cancel_status,
+                "cancel_ok": cancel_ok,
+                "cancel_message_id": cancel_message_id,
+                **{k: v for k, v in fault.items() if v},
+            },
+        )
+        return {
+            "cancel_http_status": str(cancel_status),
+            "cancel_message_id": cancel_message_id,
+            "cancel_fault_code": fault.get("fault_code"),
+            "cancel_fault_subcode": fault.get("fault_subcode"),
+            "cancel_fault_reason": fault.get("fault_reason"),
+            "cancel_ok": "true" if cancel_ok else "false",
+        }
+    except (asyncio.TimeoutError, ClientError) as exc:
+        log.warning(
+            "CancelJob failed (device may have ignored; scan chain continues)",
+            extra={
+                "target_url": target_url,
+                "job_id": job_id,
+                "error": str(exc),
+            },
+        )
+        return {
+            "cancel_http_status": None,
+            "cancel_message_id": cancel_message_id,
+            "cancel_fault_code": None,
+            "cancel_fault_subcode": None,
+            "cancel_fault_reason": None,
+            "cancel_ok": "false",
+        }
 
 
 async def preflight_get_scanner_capabilities(
@@ -882,6 +961,7 @@ async def run_scan_available_chain(
     scan_destinations: Sequence[ScanDestination] | None = None,
     validate_outbound_soap_response: bool = False,
     image_delivery_mode: ImageDeliveryMode = "pull",
+    cancel_job_on_retrieve_error: bool = True,
 ) -> dict[str, str | None]:
     """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage.
 
@@ -891,6 +971,10 @@ async def run_scan_available_chain(
     When ``image_delivery_mode`` is ``push_only``, outbound **RetrieveImage** is not invoked after a
     successful **CreateScanJob**; the device is expected to POST image bytes to this host's scan URL
     (see ``WSD_SCAN_PATH``). **JobToken** is not required in that mode.
+
+    When ``cancel_job_on_retrieve_error`` is True (default), a **CancelJob** SOAP request is sent to
+    the scanner on **RetrieveImage** timeout or transport error per WIA §7.5. Devices may silently
+    ignore CancelJob; the failure is logged and does not raise.
     """
     target_url = resolve_wdp_scan_url(scanner_xaddr)
     if scanner_profile is not None:
@@ -1452,6 +1536,8 @@ async def run_scan_available_chain(
     saved_scan_path_str: str | None = None
     saved_scan_bytes_val: int | None = None
     retrieve_details: dict[str, str | None] = {}
+    retrieve_status: int = 0
+    retrieve_ct: str | None = None
     try:
         (
             retrieve_status,
@@ -1575,6 +1661,31 @@ async def run_scan_available_chain(
             idle_wait_result = "skipped"
         else:
             idle_wait_result = "not_applicable"
+    except (asyncio.TimeoutError, ClientError) as _retrieve_exc:
+        idle_wait_result = "not_applicable"
+        retrieve_details = {
+            "fault_code": "soap:Client",
+            "fault_subcode": "airscand:RetrieveImageTransportError",
+            "fault_reason": str(_retrieve_exc),
+            "status": None,
+        }
+        log.warning(
+            "RetrieveImage transport error; attempting CancelJob",
+            extra={
+                "target_url": target_url,
+                "job_id": resolved_job_id,
+                "error": str(_retrieve_exc),
+                "cancel_job_on_retrieve_error": cancel_job_on_retrieve_error,
+            },
+        )
+        if cancel_job_on_retrieve_error and resolved_job_id and create_job_token:
+            await cancel_scan_job(
+                target_url=target_url,
+                job_id=resolved_job_id,
+                job_token=create_job_token,
+                timeout_sec=timeout_sec,
+                from_address=from_address,
+            )
     finally:
         end_retrieve_idle_wait()
     retrieve_elapsed_sec = time.monotonic() - create_completed_monotonic

@@ -44,6 +44,7 @@ ACTION_CREATE_SCAN_JOB = f"{NS_SCA}/CreateScanJob"
 ACTION_RETRIEVE_IMAGE = f"{NS_SCA}/RetrieveImage"
 ACTION_GET_SCANNER_ELEMENTS = f"{NS_SCA}/GetScannerElements"
 ACTION_GET_JOB_STATUS = f"{NS_SCA}/GetJobStatus"
+ACTION_CANCEL_JOB = f"{NS_SCA}/CancelJob"
 
 # SOAP response ``wsa:Action`` values for outbound client correlation checks (WIA §5).
 ACTION_SUBSCRIBE_RESPONSE = f"{NS_WSE}/SubscribeResponse"
@@ -55,6 +56,7 @@ ACTION_CREATE_SCAN_JOB_RESPONSE = f"{NS_SCA}/CreateScanJobResponse"
 ACTION_RETRIEVE_IMAGE_RESPONSE = f"{NS_SCA}/RetrieveImageResponse"
 ACTION_GET_SCANNER_ELEMENTS_RESPONSE = f"{NS_SCA}/GetScannerElementsResponse"
 ACTION_GET_JOB_STATUS_RESPONSE = f"{NS_SCA}/GetJobStatusResponse"
+ACTION_CANCEL_JOB_RESPONSE = f"{NS_SCA}/CancelJobResponse"
 # Synthetic ack actions (inbound server); listed for completeness if reused in tests.
 ACTION_SCAN_AVAILABLE_EVENT_RESPONSE = f"{NS_SCA}/ScanAvailableEventResponse"
 ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE = f"{NS_SCA}/ScannerStatusSummaryEventResponse"

@@ -16,6 +16,7 @@ from app.soap.namespaces import ACTION_VALIDATE_SCAN_TICKET_RESPONSE
 from app.soap.outbound_response_validation import check_outbound_soap_response_correlation
 from app.soap.transport import HttpBodyIntegrityReport
 from app.ws_eventing_client import (
+    ACTION_CANCEL_JOB,
     ACTION_CREATE_SCAN_JOB,
     ACTION_GET,
     ACTION_GET_JOB_STATUS,
@@ -27,6 +28,7 @@ from app.ws_eventing_client import (
     NS_WSA,
     SCAN_AVAILABLE_EVENT_ACTION,
     WSA_ANONYMOUS,
+    build_cancel_job_request,
     build_create_scan_job_request,
     build_get_job_status_request,
     build_get_request,
@@ -36,6 +38,7 @@ from app.ws_eventing_client import (
     build_subscribe_request,
     build_unsubscribe_request,
     build_validate_scan_ticket_request,
+    cancel_scan_job,
     extract_client_context,
     extract_event_subscription_identifier,
     extract_soap_envelope_message_id,
@@ -605,6 +608,40 @@ def test_parse_soap_fault_extracts_code_subcode_reason() -> None:
     assert parsed["fault_code"] == "soap:Sender"
     assert parsed["fault_subcode"] == "wsa:DestinationUnreachable"
     assert parsed["fault_reason"] == "No route can be determined."
+    assert parsed["fault_detail"] is None
+
+
+def test_parse_soap_fault_extracts_detail_for_invalid_args() -> None:
+    """``docs/ws-scan_audit.md`` §15 — ``Detail`` is available for diagnostics (e.g. format lists)."""
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wscn="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body>
+    <soap:Fault>
+      <soap:Code>
+        <soap:Value>soap:Sender</soap:Value>
+        <soap:Subcode><soap:Value>wscn:InvalidArgs</soap:Value></soap:Subcode>
+      </soap:Code>
+      <soap:Reason>
+        <soap:Text xml:lang="en">Unsupported document format.</soap:Text>
+      </soap:Reason>
+      <soap:Detail>
+        <wscn:SupportedFormats>
+          <wscn:Format>image/jpeg</wscn:Format>
+          <wscn:Format>application/pdf</wscn:Format>
+        </wscn:SupportedFormats>
+      </soap:Detail>
+    </soap:Fault>
+  </soap:Body>
+</soap:Envelope>
+"""
+    parsed = parse_soap_fault(xml)
+    assert parsed["fault_subcode"] == "wscn:InvalidArgs"
+    assert parsed["fault_reason"] == "Unsupported document format."
+    detail = parsed["fault_detail"] or ""
+    assert "SupportedFormats" in detail
+    assert "image/jpeg" in detail
+    assert "application/pdf" in detail
 
 
 def test_parse_get_response_finds_wdp_scan_url_first() -> None:
@@ -2505,3 +2542,187 @@ async def test_push_only_chain_then_http_upload_persists(
     saved = tmp_path / "scan_push-flow-id.pdf"
     assert saved.exists()
     assert saved.read_bytes() == b"%PDF-1.7\nfrom-device"
+
+
+# ---------------------------------------------------------------------------
+# CancelJob tests
+# ---------------------------------------------------------------------------
+
+_CANCEL_JOB_RESPONSE_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CancelJobResponse /></soap:Body>
+</soap:Envelope>"""
+
+_CANCEL_JOB_FAULT_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body>
+    <soap:Fault>
+      <soap:Code><soap:Value>soap:Sender</soap:Value>
+        <soap:Subcode><soap:Value>wscn:ClientErrorJobIdNotFound</soap:Value></soap:Subcode>
+      </soap:Code>
+      <soap:Reason><soap:Text xml:lang="en">Job not found</soap:Text></soap:Reason>
+    </soap:Fault>
+  </soap:Body>
+</soap:Envelope>"""
+
+
+def test_build_cancel_job_request_contains_required_fields() -> None:
+    """CancelJob SOAP envelope includes JobId, JobToken and correct wsa:Action."""
+    mid, xml = build_cancel_job_request(
+        to_url="http://192.168.1.60:80/WSD/DEVICE",
+        job_id="job-42",
+        job_token="tok-99",
+        message_id="urn:uuid:cancel-1",
+    )
+    assert mid == "urn:uuid:cancel-1"
+    assert ACTION_CANCEL_JOB in xml
+    assert "<sca:JobId>job-42</sca:JobId>" in xml
+    assert "<sca:JobToken>tok-99</sca:JobToken>" in xml
+    assert "CancelJobRequest" in xml
+
+
+@pytest.mark.asyncio
+async def test_cancel_scan_job_success(monkeypatch: MonkeyPatch) -> None:
+    """cancel_scan_job returns cancel_ok=true on HTTP 200 with no fault."""
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        assert ACTION_CANCEL_JOB in payload
+        assert "<sca:JobId>job-1</sca:JobId>" in payload
+        return (200, _CANCEL_JOB_RESPONSE_XML)
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+
+    result = await cancel_scan_job(
+        target_url="http://192.168.1.60:80/WSD/DEVICE",
+        job_id="job-1",
+        job_token="tok-1",
+    )
+    assert result["cancel_ok"] == "true"
+    assert result["cancel_fault_code"] is None
+    assert result["cancel_http_status"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_cancel_scan_job_returns_false_on_soap_fault(monkeypatch: MonkeyPatch) -> None:
+    """cancel_scan_job returns cancel_ok=false when the scanner responds with a SOAP fault."""
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        return (500, _CANCEL_JOB_FAULT_XML)
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+
+    result = await cancel_scan_job(
+        target_url="http://192.168.1.60:80/WSD/DEVICE",
+        job_id="job-99",
+        job_token="tok-99",
+    )
+    assert result["cancel_ok"] == "false"
+    assert result["cancel_fault_code"] == "soap:Sender"
+    assert "JobIdNotFound" in (result["cancel_fault_subcode"] or "")
+
+
+@pytest.mark.asyncio
+async def test_cancel_scan_job_tolerates_timeout(monkeypatch: MonkeyPatch) -> None:
+    """cancel_scan_job does not raise when the scanner times out (WIA §7.5)."""
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+
+    result = await cancel_scan_job(
+        target_url="http://192.168.1.60:80/WSD/DEVICE",
+        job_id="job-t",
+        job_token="tok-t",
+    )
+    assert result["cancel_ok"] == "false"
+    assert result["cancel_http_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_calls_cancel_on_retrieve_timeout(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """On RetrieveImage timeout, run_scan_available_chain sends CancelJob to the scanner."""
+    cancel_calls: list[str] = []
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                "<soap:Envelope><soap:Body><sca:GetScannerElementsResponse/></soap:Body></soap:Envelope>",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                "<soap:Envelope><soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body></soap:Envelope>",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                "<soap:Envelope><soap:Body><sca:CreateScanJobResponse><sca:JobId>jj</sca:JobId><sca:JobToken>tt</sca:JobToken></sca:CreateScanJobResponse></soap:Body></soap:Envelope>",
+            )
+        if ACTION_CANCEL_JOB in payload:
+            cancel_calls.append(payload)
+            return (200, _CANCEL_JOB_RESPONSE_XML)
+        raise AssertionError(f"unexpected SOAP action in payload: {payload[:200]}")
+
+    async def timeout_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, object]:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", timeout_retrieve_image)
+
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        cancel_job_on_retrieve_error=True,
+    )
+    assert len(cancel_calls) == 1
+    assert "CancelJobRequest" in cancel_calls[0]
+    assert result.get("retrieve_fault_subcode") == "airscand:RetrieveImageTransportError"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_no_cancel_when_disabled(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """When cancel_job_on_retrieve_error=False, CancelJob is not sent after RetrieveImage error."""
+    cancel_calls: list[str] = []
+
+    async def fake_post_soap(*, url: str, payload: str, timeout_sec: float) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                "<soap:Envelope><soap:Body><sca:GetScannerElementsResponse/></soap:Body></soap:Envelope>",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            return (
+                200,
+                "<soap:Envelope><soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status></sca:ValidateScanTicketResponse></soap:Body></soap:Envelope>",
+            )
+        if ACTION_CREATE_SCAN_JOB in payload:
+            return (
+                200,
+                "<soap:Envelope><soap:Body><sca:CreateScanJobResponse><sca:JobId>jj</sca:JobId><sca:JobToken>tt</sca:JobToken></sca:CreateScanJobResponse></soap:Body></soap:Envelope>",
+            )
+        if ACTION_CANCEL_JOB in payload:
+            cancel_calls.append(payload)
+            return (200, _CANCEL_JOB_RESPONSE_XML)
+        raise AssertionError(f"unexpected SOAP action in payload: {payload[:200]}")
+
+    async def timeout_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, object]:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr("app.ws_eventing_client._post_soap_retrieve_image", timeout_retrieve_image)
+
+    await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        cancel_job_on_retrieve_error=False,
+    )
+    assert cancel_calls == []

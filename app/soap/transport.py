@@ -11,7 +11,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout
 from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
 
 from app.soap.addressing import extract_wsa_action, soap_action_short
-from app.soap.fault import parse_soap_fault
+from app.soap.fault import parse_soap_fault, soap_fault_log_fields
 from app.soap.xmlutil import wsa_header_first_string
 
 if TYPE_CHECKING:
@@ -206,10 +206,7 @@ class SoapHttpClient:
                     "http_status": response.status,
                     "bytes": len(text.encode("utf-8")),
                 }
-                if fault.get("fault_subcode"):
-                    resp_extra["fault_subcode"] = fault["fault_subcode"]
-                if fault.get("fault_reason"):
-                    resp_extra["fault_reason"] = fault["fault_reason"]
+                resp_extra.update(soap_fault_log_fields(fault))
                 log.info(f"{resp_action_short or 'unknown'}", extra=resp_extra)
                 if response.status < 200 or response.status >= 300 or fault.get("fault_code"):
                     warn_extra = {**resp_extra, "fault_code": fault.get("fault_code")}
@@ -309,10 +306,7 @@ class SoapHttpClient:
                 }
                 if not http_integrity.ok:
                     resp_extra["http_body_integrity_reason"] = http_integrity.reason_code
-                if fault.get("fault_subcode"):
-                    resp_extra["fault_subcode"] = fault["fault_subcode"]
-                if fault.get("fault_reason"):
-                    resp_extra["fault_reason"] = fault["fault_reason"]
+                resp_extra.update(soap_fault_log_fields(fault))
                 log.info(f"{resp_action_short or 'unknown'}", extra=resp_extra)
                 if response.status < 200 or response.status >= 300 or fault.get("fault_code"):
                     warn_extra = {**resp_extra, "fault_code": fault.get("fault_code")}

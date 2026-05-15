@@ -26,6 +26,7 @@ LOG_INLINE_CONTEXT_KEYS: tuple[str, ...] = (
     "url",
     "fault_subcode",
     "fault_reason",
+    "fault_detail",
 )
 
 # Human console: max line width (visible characters); clamped in :func:`_human_wrap_width`.
