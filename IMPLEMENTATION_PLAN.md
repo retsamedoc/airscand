@@ -39,13 +39,18 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ### 4. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
-**Progress:** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 / §1 / §2 / §4 / §5 themes by name: inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id faults, **Renew** `wsa:To` mismatch; outbound primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary in order; outer **registration** loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (recorded via patched `main.asyncio.sleep`, no real wall-clock waits).
+**Progress:** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 themes by name for both inbound manager and outbound subscriber roles:
 
-**Residual gap:** More **parse_soap_fault** / peer fault matrix fixtures (e.g. **FilteringNotSupported**, **DeliveryModeRequestedUnavailable** on inbound); end-to-end lease timing without mocks; outbound **GetStatus** client (not implemented).
+- **§1 lifecycle:** happy path Subscribe → Renew → GetStatus → Unsubscribe; **Renew** after monotonic lease expiry → **UnableToRenew** (registry clock only, no asyncio maintenance mocks).
+- **§4 / §11 faults:** parametrized **parse_soap_fault** peer subcode matrix; inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id, **Renew** `wsa:To` mismatch, unknown **Action** → **ActionNotSupported**.
+- **§5–§8 Subscribe validation:** **InvalidExpirationTime**, **DeliveryModeRequestedUnavailable** (non-Push), **FilteringNotSupported** (filter present).
+- **§2 outbound:** primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary; registration loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (patched `main.asyncio.sleep`, no wall-clock waits).
 
-**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays.
+**Residual gap:** Outbound **GetStatus** client (not implemented); full registration/maintenance loop without patching `asyncio.sleep`; optional WS-Scan audit §11-style module (separate from eventing).
 
-**Verification:** CI runs new tests; each test name maps to a bullet in audit or WIA spec section.
+**Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays (eventing matrix largely covered; outbound **GetStatus** remains explicit non-goal until required).
+
+**Verification:** CI runs compliance module; each `test_audit_ws_eventing_17_*` name maps to an audit § or fault bullet.
 
 ---
 
@@ -115,4 +120,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: WS-Eventing audit §17 compliance tests — dual-subscription renew teardown order and registration resubscribe after maintenance.*
+*Last updated: WS-Eventing audit §17 compliance tests — inbound fault matrix (§5–§8), lifecycle + expired lease, parse_soap_fault peer subcodes.*

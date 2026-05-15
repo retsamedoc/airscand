@@ -16,10 +16,17 @@ import pytest
 import main
 from app.inbound_eventing_registry import reset_inbound_subscription_registry
 from app.soap.fault import parse_soap_fault
+from app.soap.namespaces import NS_SOAP
+from app.soap.parsers.inbound_eventing import PUSH_DELIVERY_MODE_URI
 from app.ws_eventing_client import SCANNER_STATUS_SUMMARY_EVENT_ACTION
 from app.ws_scan import ACTION_GET_STATUS, ACTION_RENEW, ACTION_UNSUBSCRIBE, handle_wsd
 from main import _eventing_registration_loop
-from tests.test_ws_scan import _management_envelope, _request, _subscribe_push_envelope
+from tests.test_ws_scan import (
+    _management_envelope,
+    _minimal_action_envelope,
+    _request,
+    _subscribe_push_envelope,
+)
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch
@@ -31,6 +38,52 @@ def _reset_inbound_eventing_registry() -> None:
     reset_inbound_subscription_registry()
     yield
     reset_inbound_subscription_registry()
+
+
+def _extract_subscribe_identifier(response_text: str) -> str:
+    """Return ``wsman:Identifier`` from a ``SubscribeResponse`` body."""
+    start = response_text.index("<wsman:Identifier>")
+    end = response_text.index("</wsman:Identifier>", start)
+    return response_text[start + len("<wsman:Identifier>") : end].strip()
+
+
+def _soap_fault_fixture(*, subcode: str, reason: str) -> str:
+    """Minimal SOAP 1.2 fault envelope for ``parse_soap_fault`` matrix tests."""
+    return f"""<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="{NS_SOAP}">
+  <soap:Body>
+    <soap:Fault>
+      <soap:Code>
+        <soap:Value>soap:Sender</soap:Value>
+        <soap:Subcode><soap:Value>{subcode}</soap:Value></soap:Subcode>
+      </soap:Code>
+      <soap:Reason><soap:Text xml:lang="en">{reason}</soap:Text></soap:Reason>
+    </soap:Fault>
+  </soap:Body>
+</soap:Envelope>"""
+
+
+@pytest.mark.parametrize(
+    ("subcode", "reason"),
+    [
+        ("wse:UnableToRenew", "Subscription expired"),
+        ("wse:UnableToDestroySubscription", "Unknown subscription"),
+        ("wse:DeliveryModeRequestedUnavailable", "Push only"),
+        ("wse:FilteringNotSupported", "No filter support"),
+        ("wse:InvalidMessage", "Bad message"),
+        ("wse:InvalidExpirationTime", "Bad expires"),
+        ("wsa:ActionNotSupported", "Unknown action"),
+    ],
+)
+def test_audit_ws_eventing_17_parse_soap_fault_peer_subcode_matrix(
+    subcode: str,
+    reason: str,
+) -> None:
+    """``docs/ws-eventing_audit.md`` §4 / §11 — ``parse_soap_fault`` maps peer WSE/WS-A subcodes."""
+    fault = parse_soap_fault(_soap_fault_fixture(subcode=subcode, reason=reason))
+    assert fault.get("fault_code") == "soap:Sender"
+    assert fault.get("fault_subcode") == subcode
+    assert fault.get("fault_reason") == reason
 
 
 @pytest.mark.asyncio
@@ -89,6 +142,88 @@ async def test_audit_ws_eventing_17_inbound_renew_wsa_to_mismatch_invalid_messag
     )
     fault = parse_soap_fault(response.text)
     assert fault.get("fault_subcode") == "wse:InvalidMessage"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_non_push_delivery_mode_unavailable() -> None:
+    """``docs/ws-eventing_audit.md`` §6 — non-Push ``Delivery/@Mode`` faults with WSE subcode."""
+    pull_uri = "http://schemas.xmlsoap.org/ws/2004/08/eventing/DeliveryModes/Pull"
+    assert pull_uri != PUSH_DELIVERY_MODE_URI
+    payload = _subscribe_push_envelope(delivery_mode=pull_uri)
+    response = await handle_wsd(_request(payload))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:DeliveryModeRequestedUnavailable"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_filter_filtering_not_supported() -> None:
+    """``docs/ws-eventing_audit.md`` §8 — inbound ``wse:Filter`` yields ``FilteringNotSupported``."""
+    response = await handle_wsd(_request(_subscribe_push_envelope(include_filter=True)))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:FilteringNotSupported"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_invalid_expires_invalid_expiration_time() -> (
+    None
+):
+    """``docs/ws-eventing_audit.md`` §5 — bad ``Expires`` text → ``InvalidExpirationTime``."""
+    response = await handle_wsd(_request(_subscribe_push_envelope(expires_inner="not-a-duration")))
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:InvalidExpirationTime"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_subscribe_lifecycle_happy_path() -> None:
+    """``docs/ws-eventing_audit.md`` §1 — Subscribe → Renew → GetStatus → Unsubscribe succeeds."""
+    sub_resp = await handle_wsd(_request(_subscribe_push_envelope("urn:uuid:audit-life")))
+    assert "SubscribeResponse" in sub_resp.text
+    sub_id = _extract_subscribe_identifier(sub_resp.text)
+
+    renew = await handle_wsd(
+        _request(_management_envelope(ACTION_RENEW, "urn:uuid:audit-r1", sub_id))
+    )
+    assert "RenewResponse" in renew.text
+
+    status = await handle_wsd(
+        _request(_management_envelope(ACTION_GET_STATUS, "urn:uuid:audit-g1", sub_id))
+    )
+    assert "GetStatusResponse" in status.text
+    assert "<wse:Expires>PT1H</wse:Expires>" in status.text
+
+    unsub = await handle_wsd(
+        _request(_management_envelope(ACTION_UNSUBSCRIBE, "urn:uuid:audit-u1", sub_id))
+    )
+    assert "UnsubscribeResponse" in unsub.text
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_renew_after_expired_lease_unable_to_renew(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """``docs/ws-eventing_audit.md`` §1 / §3 — expired lease on ``Renew`` → ``UnableToRenew`` (no asyncio mocks)."""
+    t0 = 200_000.0
+    monkeypatch.setattr("app.inbound_eventing_registry.time.monotonic", lambda: t0)
+    sub_resp = await handle_wsd(
+        _request(_subscribe_push_envelope("urn:uuid:audit-short", expires_inner="PT1S"))
+    )
+    sub_id = _extract_subscribe_identifier(sub_resp.text)
+    monkeypatch.setattr("app.inbound_eventing_registry.time.monotonic", lambda: t0 + 30.0)
+    response = await handle_wsd(
+        _request(_management_envelope(ACTION_RENEW, "urn:uuid:audit-r-exp", sub_id))
+    )
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wse:UnableToRenew"
+
+
+@pytest.mark.asyncio
+async def test_audit_ws_eventing_17_inbound_unknown_action_action_not_supported() -> None:
+    """``docs/ws-eventing_audit.md`` §9 — unknown ``wsa:Action`` → ``wsa:ActionNotSupported``."""
+    response = await handle_wsd(
+        _request(_minimal_action_envelope("urn:example:UnknownAuditAction"))
+    )
+    fault = parse_soap_fault(response.text)
+    assert fault.get("fault_subcode") == "wsa:ActionNotSupported"
 
 
 @pytest.mark.asyncio
