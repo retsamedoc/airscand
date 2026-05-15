@@ -39,9 +39,9 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ### 4. Contract / compliance test suite expansion (`docs/ws-eventing_audit.md` §17)
 
-**Progress:** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 / §1 / §2 / §4 / §5 themes by name: inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id faults, **Renew** `wsa:To` mismatch, outbound **Renew** SOAP fault → **Unsubscribe** best-effort (`main._eventing_maintenance_loop`).
+**Progress:** `tests/test_ws_eventing_audit_compliance.py` maps audit §17 / §1 / §2 / §4 / §5 themes by name: inbound **NotifyTo** empty, **GetStatus** / **Unsubscribe** unknown id faults, **Renew** `wsa:To` mismatch; outbound primary **Renew** SOAP fault → **Unsubscribe** best-effort; dual-subscription **Renew** failure unsubscribes **ScannerStatusSummary** then primary in order; outer **registration** loop backoff (`2s`) + second full **Subscribe** pair after maintenance exit (recorded via patched `main.asyncio.sleep`, no real wall-clock waits).
 
-**Residual gap:** Full outer **registration** loop proving backoff + second **Subscribe** after maintenance exit (without brittle global `asyncio.sleep` patches); outbound **Renew** failure with dual subscriptions (primary + ScannerStatusSummary); more **parse_soap_fault** / peer fault matrix fixtures.
+**Residual gap:** More **parse_soap_fault** / peer fault matrix fixtures (e.g. **FilteringNotSupported**, **DeliveryModeRequestedUnavailable** on inbound); end-to-end lease timing without mocks; outbound **GetStatus** client (not implemented).
 
 **Done when:** Pytest coverage maps to audit checklist §11-style scenarios for both **client** and **server** roles airscand plays.
 
@@ -115,4 +115,4 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 
 ---
 
-*Last updated: `handle_wsd` validates `app["config"]` (`Config`); backlog renumbered after closing ws-scan audit §16 item.*
+*Last updated: WS-Eventing audit §17 compliance tests — dual-subscription renew teardown order and registration resubscribe after maintenance.*
