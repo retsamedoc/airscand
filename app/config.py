@@ -75,6 +75,9 @@ class Config:
     # When ``soap_http_read_timeout_sec`` is unset, each call uses its own ``timeout_sec`` for read.
     soap_http_connect_timeout_sec: float = 10.0
     soap_http_read_timeout_sec: float | None = None
+    # When true, critical outbound scanner POSTs assert ``wsa:RelatesTo`` / ``wsa:Action`` (WIA §5).
+    # Default false: some devices omit or mis-set headers (see ``docs/protocol/vendor_quirks.md``).
+    validate_outbound_soap_response: bool = False
     # Per-destination scan settings and output routing (see ``app.destinations``).
     scan_destinations: tuple[ScanDestination, ...] = field(
         default_factory=lambda: DEFAULT_DESTINATIONS,
@@ -179,6 +182,10 @@ class Config:
         raw_soap_read = os.getenv("WSD_SOAP_HTTP_READ_TIMEOUT_SEC")
         if raw_soap_read is not None and raw_soap_read.strip() != "":
             self.soap_http_read_timeout_sec = float(raw_soap_read.strip())
+        self.validate_outbound_soap_response = _env_bool(
+            "WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE",
+            self.validate_outbound_soap_response,
+        )
 
 
 def _get_or_create_persistent_uuid() -> str:

@@ -45,6 +45,20 @@ ACTION_RETRIEVE_IMAGE = f"{NS_SCA}/RetrieveImage"
 ACTION_GET_SCANNER_ELEMENTS = f"{NS_SCA}/GetScannerElements"
 ACTION_GET_JOB_STATUS = f"{NS_SCA}/GetJobStatus"
 
+# SOAP response ``wsa:Action`` values for outbound client correlation checks (WIA §5).
+ACTION_SUBSCRIBE_RESPONSE = f"{NS_WSE}/SubscribeResponse"
+ACTION_RENEW_RESPONSE = f"{NS_WSE}/RenewResponse"
+ACTION_GET_STATUS_RESPONSE = f"{NS_WSE}/GetStatusResponse"
+ACTION_UNSUBSCRIBE_RESPONSE = f"{NS_WSE}/UnsubscribeResponse"
+ACTION_VALIDATE_SCAN_TICKET_RESPONSE = f"{NS_SCA}/ValidateScanTicketResponse"
+ACTION_CREATE_SCAN_JOB_RESPONSE = f"{NS_SCA}/CreateScanJobResponse"
+ACTION_RETRIEVE_IMAGE_RESPONSE = f"{NS_SCA}/RetrieveImageResponse"
+ACTION_GET_SCANNER_ELEMENTS_RESPONSE = f"{NS_SCA}/GetScannerElementsResponse"
+ACTION_GET_JOB_STATUS_RESPONSE = f"{NS_SCA}/GetJobStatusResponse"
+# Synthetic ack actions (inbound server); listed for completeness if reused in tests.
+ACTION_SCAN_AVAILABLE_EVENT_RESPONSE = f"{NS_SCA}/ScanAvailableEventResponse"
+ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE = f"{NS_SCA}/ScannerStatusSummaryEventResponse"
+
 ACTION_WSA_FAULT = f"{NS_WSA}/fault"
 
 ACTION_PROBE = "http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe"

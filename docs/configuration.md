@@ -54,6 +54,7 @@ If `WSD_ADVERTISE_ADDR` is unset or empty, the daemon uses `WSD_HOST` when it is
 | `WSD_SCANNER_PROFILE` | `epson_wf_3640` | Quirks profile key (e.g. `generic` for protocol-default behavior, `epson_wf_3640` for tested WorkForce behavior). See `docs/protocol/vendor_quirks.md` in the repo. |
 | `WSD_RETRIEVE_IMAGE_TIMEOUT_SEC` | *(profile)* | Overrides the profile’s **RetrieveImage** read timeout (seconds). |
 | `WSD_CREATE_SCAN_JOB_RETRY_INVALID_DESTINATION_TOKEN` | `true` | When true, may retry **CreateScanJob** without a destination token after `ClientErrorInvalidDestinationToken`. |
+| `WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE` | `false` | When true, critical outbound scanner responses must carry matching ``wsa:RelatesTo`` (to the request ``wsa:MessageID``) and expected ``wsa:Action`` (WIA §5). Default off because some devices omit or mis-set headers; see `docs/protocol/vendor_quirks.md`. |
 | `WSD_WAIT_SCANNER_IDLE_AFTER_RETRIEVE` | `true` | Wait for idle-related status after **RetrieveImage** when supported. |
 | `WSD_SCANNER_IDLE_WAIT_SEC` | `60` | Timeout (seconds) for that idle wait. |
 

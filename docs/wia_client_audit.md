@@ -8,7 +8,7 @@ This report maps the [WIA client specification](protocol/wia_client_spec.md) to 
 
 ## Executive summary
 
-The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob**, **response RelatesTo validation**, and **RetrieveImage document handling / integrity checks**. **Multi-XAddr** registration-time failover over ordered discovery candidates is implemented (see §4); outbound **WS-Scan** legs after a successful subscribe still use the selected ``scanner_xaddr`` only. **SOAP client timeouts** expose separate **connect** vs **read** (`sock_connect` / `sock_read`) via environment variables (§3). **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
+The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob** and **RetrieveImage document handling / integrity checks**. Optional **RelatesTo** / response **Action** enforcement exists behind ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` (§5). **Multi-XAddr** registration-time failover over ordered discovery candidates is implemented (see §4); outbound **WS-Scan** legs after a successful subscribe still use the selected ``scanner_xaddr`` only. **SOAP client timeouts** expose separate **connect** vs **read** (`sock_connect` / `sock_read`) via environment variables (§3). **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
 
 ---
 
@@ -56,8 +56,8 @@ The project implements a **device-initiated** path (WS-Eventing **ScanAvailableE
 | Envelope with Header (Action, MessageID, To) + Body | **Met** | Outbound builders use [`app/soap/envelope.py`](../app/soap/envelope.py) and [`app/soap/parsers/`](../app/soap/parsers/); orchestration in [`ws_eventing_client.py`](../app/ws_eventing_client.py). |
 | Unique MessageID per request | **Met** | [`new_message_id`](../app/soap/addressing.py) (`urn:uuid:…`). |
 | ReplyTo anonymous | **Met** | `WSA_ANONYMOUS` on outbound scan/eventing requests. |
-| Validate RelatesTo | **Gap** | Inbound discovery matches `relates_to == probe_mid`. Outbound **SOAP responses** from the scanner are **not** checked for `RelatesTo` equal to the outbound request `MessageID`; responses are parsed with regex for body/fault only. |
-| Validate Action | **Partial** | Response `Action` is logged via [`extract_wsa_action`](../app/soap/addressing.py) in transport; not enforced against expected operation. |
+| Validate RelatesTo | **Met (opt-in)** | When ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` is enabled, outbound responses for critical operations assert ``RelatesTo`` equals the request ``MessageID`` and ``Action`` matches the expected response URI (``app/soap/outbound_response_validation.py``, ``app/ws_eventing_client.py``). Default remains tolerant for devices that omit headers (``docs/protocol/vendor_quirks.md``). |
+| Validate Action | **Met (opt-in)** | Same gate as **RelatesTo**; faults may use ``wsa:Action`` ``…/fault``. |
 
 ---
 
@@ -150,7 +150,7 @@ The spec’s logical sequence is:
 | Extracts XAddrs | **Yes** | [`extract_xaddrs`](../app/discovery.py) |
 | Generates valid SOAP envelopes | **Yes** | [`app/soap/envelope.py`](../app/soap/envelope.py), parsers under [`app/soap/parsers/`](../app/soap/parsers/) |
 | Uses unique MessageIDs | **Yes** | [`new_message_id`](../app/soap/addressing.py) |
-| Validates RelatesTo | **No** | Outbound SOAP responses |
+| Validates RelatesTo | **Optional** | When ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` is set; default **off** for non-compliant devices (see §5). |
 | Calls GetScannerElements first | **Yes** | [`run_scan_available_chain`](../app/ws_eventing_client.py) |
 | Creates scan job correctly | **Yes** | With ValidateScanTicket + ticket resolution |
 | Polls status correctly | **Partial** | **GetJobStatus** when profile enables polling |
@@ -178,7 +178,7 @@ Use this as a prioritized backlog against [wia_client_spec.md](protocol/wia_clie
 
 ### High
 
-- [ ] **Outbound SOAP response validation**: optionally verify `wsa:RelatesTo` matches the request `wsa:MessageID` and expected `wsa:Action` (with tolerance flags per §5.3).
+- [x] **Outbound SOAP response validation**: optional verify `wsa:RelatesTo` matches the request `wsa:MessageID` and expected `wsa:Action` via ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` (`app/soap/outbound_response_validation.py`, `tests/test_outbound_response_validation.py`, `tests/test_ws_eventing_client.py`).
 - [ ] **Timeouts**: expose **connect** and **read** timeouts via config/env; align defaults with §3.2 (connect ≤ 2s, read 2–10s).
 - [x] **Multi-XAddr failover** (registration): ordered candidates from [`discover_scanner_xaddrs`](../app/discovery.py); [`main._eventing_registration_loop`](../main.py) advances on [`is_scanner_xaddr_transport_failover`](../app/soap/transport.py). Residual: scan-chain SOAP does not rotate **XAddr** mid-job.
 - [ ] **`RetrieveImage` body handling**: parse **Document** / base64 (or MTOM if needed), support large responses, **validate integrity** (e.g. magic bytes / length), **retry on truncation** per §7.4.

@@ -26,19 +26,11 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 - **`SubscriptionEnd` (WS-Eventing, inbound roles):** When a managed lease expires without **Renew**, or **Unsubscribe**/**Renew**/**GetStatus** hits an already-expired id, the manager queues **`SubscriptionEnd`** (SOAP **`SubscriptionEnd`** action, **Status** URI `SourceCancelling`) to the stored subscriber EPR; **`main._inbound_subscription_lease_sweep_loop`** also expires idle leases every 5s. The sink accepts inbound **`SubscriptionEnd`** notifications and returns **`SubscriptionEndResponse`** (`app/inbound_eventing_registry.py`, `app/inbound_subscription_end_delivery.py`, `app/soap/builders/eventing.py`, `app/soap/namespaces.py`, `app/soap/parsers/subscription_end.py`, `app/ws_scan.py`, `main.py`, `tests/test_subscription_end.py`, `tests/test_ws_scan.py`). *Why tests matter:* without them, lease teardown silently breaks peers that rely on **EndTo** correlation or expect SOAP (not bare HTTP) for teardown.
 - **Multi-XAddr registration failover:** [`discover_scanner_xaddrs`](app/discovery.py) returns the full **ProbeMatches** list in order; [`main._eventing_registration_loop`](main.py) tries each candidate and advances on transport-layer failures classified by [`is_scanner_xaddr_transport_failover`](app/soap/transport.py) (`asyncio.TimeoutError`, `ClientConnectorError`, `ClientOSError`). Logs include `xaddr_attempt_index`, `xaddr_candidates_total`, and `scanner_xaddr` per attempt (`tests/test_discovery.py`, `tests/test_main_registration.py`, `tests/test_soap_transport.py`). *Residual:* per-scan outbound legs after registration still target `config.scanner_xaddr` only (no mid-chain rotation).
 
+- **Outbound SOAP response validation (RelatesTo / Action):** Optional strict checks for **Subscribe**, **ValidateScanTicket**, **CreateScanJob**, **GetJobStatus** (when polling), and **RetrieveImage** (SOAP envelope from MTOM) via ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` / ``Config.validate_outbound_soap_response`` (`app/soap/outbound_response_validation.py`, `app/ws_eventing_client.py`, `main.py`, `app/ws_scan.py`). Default **off** for interop with devices that omit headers (`docs/protocol/vendor_quirks.md`). *Why tests matter:* wrong correlation otherwise accepts mis-attributed HTTP replies as if they matched the in-flight SOAP leg.
+
 ---
 
 ## Backlog (incomplete) — by priority
-
-### 3. Outbound SOAP response validation (**RelatesTo**, **Action**) (`app/ws_eventing_client.py`, `app/soap/transport.py`)
-
-**Gap:** Responses not asserted against outbound **MessageID** / expected action (`docs/wia_client_audit.md` §5).
-
-**Done when:** Critical operations (at minimum **CreateScanJob**, **RetrieveImage**, **ValidateScanTicket**, **Subscribe**) optionally enforce **RelatesTo** == sent **MessageID** and **Action** matches expected response action; failures surface as structured errors/logs and predictable chain abort.
-
-**Verification:** Fixture responses with wrong **RelatesTo** → handler raises or returns error dict that stops chain; correct fixture still passes.
-
----
 
 ### 4. **RetrieveImage** integrity / truncation handling (`docs/wia_client_audit.md` §7+)
 
@@ -153,8 +145,8 @@ This file is the **living backlog** for airscand. Items are **priority-ordered**
 ## Suggested execution order for MVP “hardening”
 
 1. **Tasks 7 + 5** (tests + parsing robustness) in parallel after behavior stabilizes.  
-2. Remaining items per product need (RelatesTo validation, pull/push, far-term items).
+2. Remaining items per product need (RetrieveImage integrity, pull/push, far-term items).
 
 ---
 
-*Last updated: multi-XAddr registration failover (`discover_scanner_xaddrs`, `main`, transport classifier); backlog 3–14.*
+*Last updated: outbound SOAP response correlation (opt-in `WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`); backlog 4–14.*

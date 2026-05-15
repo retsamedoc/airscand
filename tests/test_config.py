@@ -121,3 +121,12 @@ def test_config_discovery_env_overrides(monkeypatch: MonkeyPatch) -> None:
     assert cfg.metadata_version == 7
     assert cfg.app_sequence_instance_id == 99
     assert cfg.app_sequence_sequence_id == "urn:uuid:fixed-seq"
+
+
+def test_config_validate_outbound_soap_response_env(monkeypatch: MonkeyPatch) -> None:
+    """WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE enables strict outbound SOAP header checks."""
+    monkeypatch.setenv("WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE", "1")
+
+    from app.config import Config
+
+    assert Config().validate_outbound_soap_response is True

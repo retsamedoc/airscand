@@ -251,6 +251,9 @@ async def _eventing_registration_loop(config: Config) -> None:
                             notify_to=notify_to,
                             from_address=client_from_address,
                             subscription_identifier=subscription_identifier,
+                            validate_outbound_soap_response=getattr(
+                                config, "validate_outbound_soap_response", False
+                            ),
                         )
                     except asyncio.CancelledError:
                         raise
@@ -327,6 +330,9 @@ async def _eventing_registration_loop(config: Config) -> None:
                                 from_address=client_from_address,
                                 subscription_identifier=status_sub_identifier,
                                 filter_action=SCANNER_STATUS_SUMMARY_EVENT_ACTION,
+                                validate_outbound_soap_response=getattr(
+                                    config, "validate_outbound_soap_response", False
+                                ),
                             )
                             st2 = int(status_result.get("status") or "0")
                             if status_result.get("identifier") and (st2 == 0 or 200 <= st2 < 300):

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from app.soap.namespaces import ACTION_VALIDATE_SCAN_TICKET_RESPONSE
+from app.soap.outbound_response_validation import check_outbound_soap_response_correlation
 from app.ws_eventing_client import (
     ACTION_CREATE_SCAN_JOB,
     ACTION_GET,
@@ -1257,6 +1259,64 @@ async def test_run_scan_available_chain_success(monkeypatch: MonkeyPatch) -> Non
     assert result["retrieve_elapsed_sec"] is not None
     assert float(result["retrieve_elapsed_sec"] or "0") >= 0.0
     assert result.get("scanner_idle_wait_result") == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_run_scan_available_chain_correlation_mismatch_aborts_when_enabled(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """With ``validate_outbound_soap_response``, wrong ``RelatesTo`` stops the chain before Create."""
+    calls: list[str] = []
+
+    async def fake_post_soap(
+        *, url: str, payload: str, timeout_sec: float, **kwargs: object
+    ) -> tuple[int, str]:
+        calls.append(payload)
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return (
+                200,
+                """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket><sca:ScanTicket>
+      <sca:JobDescription><sca:JobName>DeviceTicketName</sca:JobName></sca:JobDescription>
+    </sca:ScanTicket></sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>""",
+            )
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            body = f"""<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:wsa="{NS_WSA}"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Header>
+    <wsa:Action>{ACTION_VALIDATE_SCAN_TICKET_RESPONSE}</wsa:Action>
+    <wsa:RelatesTo>urn:uuid:wrong-correlation</wsa:RelatesTo>
+  </soap:Header>
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status>
+    <sca:DestinationToken>dest-42</sca:DestinationToken>
+  </sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>"""
+            if kwargs.get("validate_correlation"):
+                check_outbound_soap_response_correlation(
+                    body,
+                    request_message_id=str(kwargs["request_message_id"]),
+                    expected_success_action=str(kwargs["expected_response_action"]),
+                )
+            return (200, body)
+        raise AssertionError("unexpected SOAP request")
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    result = await run_scan_available_chain(
+        scanner_xaddr="http://192.168.1.60:80/WSD/DEVICE",
+        poll_get_job_status_before_retrieve=False,
+        validate_outbound_soap_response=True,
+    )
+    assert len(calls) == 2
+    assert ACTION_GET_SCANNER_ELEMENTS in calls[0]
+    assert ACTION_VALIDATE_SCAN_TICKET in calls[1]
+    assert result["fault_subcode"] == "airscand:SoapResponseCorrelationMismatch"
+    assert result.get("job_id") is None
+    assert result.get("create_http_status") is None
 
 
 def test_parse_scanner_status_summary_event_extracts_scanner_state() -> None:

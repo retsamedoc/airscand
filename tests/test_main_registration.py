@@ -58,6 +58,7 @@ async def test_eventing_registration_loop_retries_then_succeeds(monkeypatch: Mon
         subscription_identifier: str | None = None,
         filter_action: str | None = None,
         scan_destinations: tuple[tuple[str, str], ...] | None = None,
+        **_kwargs: object,
     ) -> dict[str, str]:
         attempts["register"] += 1
         assert scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
@@ -205,6 +206,7 @@ async def test_eventing_registration_loop_uses_preflight_suggested_destination(
         subscription_identifier: str | None = None,
         filter_action: str | None = None,
         scan_destinations: tuple[tuple[str, str], ...] | None = None,
+        **_kwargs: object,
     ) -> dict[str, str | None]:
         calls.append(subscribe_to_url)
         n = len(calls)
@@ -317,6 +319,7 @@ async def test_eventing_registration_failover_second_xaddr_after_preflight_timeo
         subscription_identifier: str | None = None,
         filter_action: str | None = None,
         scan_destinations: tuple[tuple[str, str], ...] | None = None,
+        **_kwargs: object,
     ) -> dict[str, str]:
         register_calls.append(scanner_xaddr)
         assert scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"

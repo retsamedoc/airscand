@@ -14,8 +14,15 @@ from app.soap.addressing import extract_action, extract_message_id_optional, soa
 from app.soap.builders.faults import build_action_not_supported_fault_body, build_wse_fault_body
 from app.soap.envelope import build_inbound_fault_envelope, build_inbound_response_envelope
 from app.soap.namespaces import (
+    ACTION_CREATE_SCAN_JOB_RESPONSE,
+    ACTION_GET_STATUS_RESPONSE,
+    ACTION_RENEW_RESPONSE,
+    ACTION_SCAN_AVAILABLE_EVENT_RESPONSE,
+    ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE,
+    ACTION_SUBSCRIBE_RESPONSE,
     ACTION_SUBSCRIPTION_END,
     ACTION_SUBSCRIPTION_END_RESPONSE,
+    ACTION_UNSUBSCRIBE_RESPONSE,
     ACTION_WSA_FAULT,
     NS_SCA,
     NS_WSE,
@@ -45,14 +52,6 @@ ACTION_GET_STATUS = f"{NS_WSE}/GetStatus"
 ACTION_UNSUBSCRIBE = f"{NS_WSE}/Unsubscribe"
 ACTION_CREATE_SCAN_JOB = f"{NS_SCA}/CreateScanJob"
 ACTION_SCAN_AVAILABLE_EVENT = f"{NS_SCA}/ScanAvailableEvent"
-ACTION_SUBSCRIBE_RESPONSE = f"{NS_WSE}/SubscribeResponse"
-ACTION_RENEW_RESPONSE = f"{NS_WSE}/RenewResponse"
-ACTION_GET_STATUS_RESPONSE = f"{NS_WSE}/GetStatusResponse"
-ACTION_UNSUBSCRIBE_RESPONSE = f"{NS_WSE}/UnsubscribeResponse"
-ACTION_CREATE_SCAN_JOB_RESPONSE = f"{NS_SCA}/CreateScanJobResponse"
-# Not defined in Microsoft WS-Scan element docs; used only as wsa:Action for SOAP-shaped HTTP ack to the device.
-ACTION_SCAN_AVAILABLE_EVENT_RESPONSE = f"{NS_SCA}/ScanAvailableEventResponse"
-ACTION_SCANNER_STATUS_SUMMARY_EVENT_RESPONSE = f"{NS_SCA}/ScannerStatusSummaryEventResponse"
 
 
 def _log_chain_result(task: asyncio.Task[dict[str, str | None]]) -> None:
@@ -670,6 +669,9 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 scanner_profile=scanner_profile,
                 output_dir=getattr(config, "output_dir", None),
                 scan_destinations=getattr(config, "scan_destinations", None),
+                validate_outbound_soap_response=bool(
+                    getattr(config, "validate_outbound_soap_response", False)
+                ),
             )
         )
         task.add_done_callback(_log_chain_result)

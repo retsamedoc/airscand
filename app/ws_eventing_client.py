@@ -22,6 +22,10 @@ from app.scanner_status_coordination import (
 from app.soap import namespaces
 from app.soap.builders import eventing as eventing_builders
 from app.soap.fault import parse_soap_fault
+from app.soap.outbound_response_validation import (
+    OutboundSoapCorrelationError,
+    check_outbound_soap_response_correlation,
+)
 from app.soap.parsers import capabilities as scanner_capabilities
 from app.soap.parsers import eventing as eventing_parsers
 from app.soap.parsers import scan as scan_parsers
@@ -35,14 +39,19 @@ from app.soap.transport import default_soap_http_client
 
 # Re-export namespace constants for tests and main (explicit aliases satisfy static analysis).
 ACTION_CREATE_SCAN_JOB = namespaces.ACTION_CREATE_SCAN_JOB
+ACTION_CREATE_SCAN_JOB_RESPONSE = namespaces.ACTION_CREATE_SCAN_JOB_RESPONSE
 ACTION_GET = namespaces.ACTION_GET
 ACTION_GET_JOB_STATUS = namespaces.ACTION_GET_JOB_STATUS
+ACTION_GET_JOB_STATUS_RESPONSE = namespaces.ACTION_GET_JOB_STATUS_RESPONSE
 ACTION_GET_SCANNER_ELEMENTS = namespaces.ACTION_GET_SCANNER_ELEMENTS
 ACTION_RETRIEVE_IMAGE = namespaces.ACTION_RETRIEVE_IMAGE
+ACTION_RETRIEVE_IMAGE_RESPONSE = namespaces.ACTION_RETRIEVE_IMAGE_RESPONSE
 ACTION_RENEW = namespaces.ACTION_RENEW
 ACTION_SUBSCRIBE = namespaces.ACTION_SUBSCRIBE
+ACTION_SUBSCRIBE_RESPONSE = namespaces.ACTION_SUBSCRIBE_RESPONSE
 ACTION_UNSUBSCRIBE = namespaces.ACTION_UNSUBSCRIBE
 ACTION_VALIDATE_SCAN_TICKET = namespaces.ACTION_VALIDATE_SCAN_TICKET
+ACTION_VALIDATE_SCAN_TICKET_RESPONSE = namespaces.ACTION_VALIDATE_SCAN_TICKET_RESPONSE
 FILTER_DIALECT_DEVPROF_ACTION = namespaces.FILTER_DIALECT_DEVPROF_ACTION
 NS_SOAP = namespaces.NS_SOAP
 NS_SCA = namespaces.NS_SCA
@@ -120,11 +129,21 @@ async def _post_soap(
     url: str,
     payload: str,
     timeout_sec: float,
+    validate_correlation: bool = False,
+    request_message_id: str | None = None,
+    expected_response_action: str | None = None,
 ) -> tuple[int, str]:
     """POST SOAP payload and return status and response text."""
-    return await default_soap_http_client().post_text(
+    status, text = await default_soap_http_client().post_text(
         url=url, payload=payload, timeout_sec=timeout_sec
     )
+    if validate_correlation and request_message_id and expected_response_action:
+        check_outbound_soap_response_correlation(
+            text,
+            request_message_id=request_message_id,
+            expected_success_action=expected_response_action,
+        )
+    return status, text
 
 
 async def _post_soap_retrieve_image(
@@ -148,6 +167,7 @@ async def poll_get_job_status_until_ready(
     timeout_sec: float,
     max_wait_sec: float = GET_JOB_STATUS_MAX_WAIT_SEC,
     enabled: bool = True,
+    validate_outbound_soap_response: bool = False,
 ) -> dict[str, object]:
     """Poll GetJobStatus until the job is ready for RetrieveImage or timeout (WIA §7.3)."""
     if not enabled:
@@ -175,11 +195,40 @@ async def poll_get_job_status_until_ready(
             job_token=job_token,
             from_address=from_address,
         )
-        status, response_text = await _post_soap(
-            url=target_url,
-            payload=payload,
-            timeout_sec=timeout_sec,
-        )
+        soap_kwargs: dict[str, str | bool] = {}
+        if validate_outbound_soap_response:
+            soap_kwargs = {
+                "validate_correlation": True,
+                "request_message_id": _mid,
+                "expected_response_action": ACTION_GET_JOB_STATUS_RESPONSE,
+            }
+        try:
+            status, response_text = await _post_soap(
+                url=target_url,
+                payload=payload,
+                timeout_sec=timeout_sec,
+                **soap_kwargs,
+            )
+        except OutboundSoapCorrelationError as exc:
+            log.warning(
+                "GetJobStatus SOAP response correlation mismatch",
+                extra={
+                    "target_url": target_url,
+                    "poll": polls,
+                    "reason_code": exc.reason_code,
+                    "request_message_id": exc.request_message_id,
+                },
+            )
+            return {
+                "skipped": False,
+                "polls": polls,
+                "last_job_state": last_state,
+                "timed_out": False,
+                "unsupported": False,
+                "terminal_failure": True,
+                "soap_correlation_failure": True,
+                "correlation_fault_reason": str(exc),
+            }
         details = scan_parsers.parse_get_job_status_response(response_text)
         last_state = details.get("job_state")
         last_images = details.get("images_to_transfer")
@@ -365,6 +414,7 @@ async def register_with_scanner(
     subscription_identifier: str | None = None,
     filter_action: str = SCAN_AVAILABLE_EVENT_ACTION,
     scan_destinations: tuple[tuple[str, str], ...] = DEFAULT_SCAN_DESTINATIONS,
+    validate_outbound_soap_response: bool = False,
 ) -> dict[str, str | None]:
     """Send WS-Eventing Subscribe request to scanner endpoint."""
     to_url = subscribe_to_url or scanner_xaddr
@@ -388,11 +438,46 @@ async def register_with_scanner(
     )
 
     try:
-        status, response_text = await _post_soap(
-            url=to_url,
-            payload=payload,
-            timeout_sec=timeout_sec,
-        )
+        soap_kwargs: dict[str, str | bool] = {}
+        if validate_outbound_soap_response:
+            soap_kwargs = {
+                "validate_correlation": True,
+                "request_message_id": message_id,
+                "expected_response_action": ACTION_SUBSCRIBE_RESPONSE,
+            }
+        try:
+            status, response_text = await _post_soap(
+                url=to_url,
+                payload=payload,
+                timeout_sec=timeout_sec,
+                **soap_kwargs,
+            )
+        except OutboundSoapCorrelationError as exc:
+            log.warning(
+                "Outbound WS-Eventing subscribe SOAP response correlation mismatch",
+                extra={
+                    "scanner_xaddr": scanner_xaddr,
+                    "subscribe_to_url": to_url,
+                    "reason_code": exc.reason_code,
+                    "request_message_id": exc.request_message_id,
+                    "response_relates_to": exc.relates_to,
+                    "response_action": exc.response_action,
+                },
+            )
+            return {
+                "status": "0",
+                "message_id": message_id,
+                "identifier": None,
+                "expires": None,
+                "subscribe_destination_token": None,
+                "subscribe_destination_tokens": None,
+                "subscription_manager_url": None,
+                "subscription_manager_address": None,
+                "subscription_manager_reference_parameters_xml": None,
+                "fault_code": "soap:Client",
+                "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
+                "fault_reason": str(exc),
+            }
         details = eventing_parsers.parse_subscribe_response(response_text)
         details.update(parse_soap_fault(response_text))
         details.update({"status": str(status), "message_id": message_id})
@@ -795,6 +880,7 @@ async def run_scan_available_chain(
     scanner_profile: ScannerProfile | None = None,
     output_dir: str | Path | None = None,
     scan_destinations: Sequence[ScanDestination] | None = None,
+    validate_outbound_soap_response: bool = False,
 ) -> dict[str, str | None]:
     """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage.
 
@@ -886,11 +972,56 @@ async def run_scan_available_chain(
         from_address=from_address,
         scan_ticket_xml=scan_ticket_xml,
     )
-    validate_status, validate_response_text = await _post_soap(
-        url=target_url,
-        payload=validate_payload,
-        timeout_sec=timeout_sec,
-    )
+    validate_soap: dict[str, str | bool] = {}
+    if validate_outbound_soap_response:
+        validate_soap = {
+            "validate_correlation": True,
+            "request_message_id": validate_message_id,
+            "expected_response_action": ACTION_VALIDATE_SCAN_TICKET_RESPONSE,
+        }
+    validate_status: int | None = None
+    validate_response_text: str | None = None
+    try:
+        validate_status, validate_response_text = await _post_soap(
+            url=target_url,
+            payload=validate_payload,
+            timeout_sec=timeout_sec,
+            **validate_soap,
+        )
+    except OutboundSoapCorrelationError as exc:
+        log.warning(
+            "ValidateScanTicket SOAP response correlation mismatch",
+            extra={
+                "target_url": target_url,
+                "reason_code": exc.reason_code,
+                "request_message_id": exc.request_message_id,
+            },
+        )
+        return {
+            "target_url": target_url,
+            **scanner_metadata,
+            "validate_http_status": str(validate_status) if validate_status is not None else None,
+            "validate_message_id": validate_message_id,
+            "validate_status": None,
+            "valid_ticket": None,
+            "destination_token": None,
+            "scan_identifier": scan_parsers.extract_scan_identifier(event_payload),
+            "fault_code": "soap:Client",
+            "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
+            "fault_reason": str(exc),
+            "create_http_status": None,
+            "create_message_id": None,
+            "job_id": None,
+            "retrieve_http_status": None,
+            "retrieve_message_id": None,
+            "retrieve_status": None,
+            "retrieve_fault_code": None,
+            "retrieve_fault_subcode": None,
+            "retrieve_fault_reason": None,
+            "retrieve_elapsed_sec": None,
+            "saved_scan_path": None,
+            "saved_scan_bytes": None,
+        }
     validate_details = scan_parsers.parse_validate_scan_ticket_response(validate_response_text)
     validate_response_message_id = scan_parsers.extract_soap_envelope_message_id(
         validate_response_text
@@ -976,11 +1107,54 @@ async def run_scan_available_chain(
         from_address=from_address,
         scan_ticket_xml=scan_ticket_xml,
     )
-    create_status, create_response_text = await _post_soap(
-        url=target_url,
-        payload=create_payload,
-        timeout_sec=timeout_sec,
-    )
+    create_soap: dict[str, str | bool] = {}
+    if validate_outbound_soap_response:
+        create_soap = {
+            "validate_correlation": True,
+            "request_message_id": create_message_id,
+            "expected_response_action": ACTION_CREATE_SCAN_JOB_RESPONSE,
+        }
+    try:
+        create_status, create_response_text = await _post_soap(
+            url=target_url,
+            payload=create_payload,
+            timeout_sec=timeout_sec,
+            **create_soap,
+        )
+    except OutboundSoapCorrelationError as exc:
+        log.warning(
+            "CreateScanJob SOAP response correlation mismatch",
+            extra={
+                "target_url": target_url,
+                "reason_code": exc.reason_code,
+                "request_message_id": exc.request_message_id,
+            },
+        )
+        return {
+            "target_url": target_url,
+            **scanner_metadata,
+            "validate_http_status": str(validate_status),
+            "validate_message_id": validate_message_id,
+            "validate_status": validate_details.get("status"),
+            "valid_ticket": validate_details.get("valid_ticket"),
+            "destination_token": destination_token,
+            "scan_identifier": scan_identifier,
+            "fault_code": "soap:Client",
+            "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
+            "fault_reason": str(exc),
+            "create_http_status": str(create_status),
+            "create_message_id": create_message_id,
+            "job_id": None,
+            "retrieve_http_status": None,
+            "retrieve_message_id": None,
+            "retrieve_status": None,
+            "retrieve_fault_code": None,
+            "retrieve_fault_subcode": None,
+            "retrieve_fault_reason": None,
+            "retrieve_elapsed_sec": None,
+            "saved_scan_path": None,
+            "saved_scan_bytes": None,
+        }
     create_details = scan_parsers.parse_create_scan_job_response(create_response_text)
     create_used_token = destination_token
     create_used_scan_identifier = scan_identifier
@@ -1012,11 +1186,54 @@ async def run_scan_available_chain(
             from_address=from_address,
             scan_ticket_xml=scan_ticket_xml,
         )
-        create_status, create_response_text = await _post_soap(
-            url=target_url,
-            payload=create_payload,
-            timeout_sec=timeout_sec,
-        )
+        create_soap_retry: dict[str, str | bool] = {}
+        if validate_outbound_soap_response:
+            create_soap_retry = {
+                "validate_correlation": True,
+                "request_message_id": create_message_id,
+                "expected_response_action": ACTION_CREATE_SCAN_JOB_RESPONSE,
+            }
+        try:
+            create_status, create_response_text = await _post_soap(
+                url=target_url,
+                payload=create_payload,
+                timeout_sec=timeout_sec,
+                **create_soap_retry,
+            )
+        except OutboundSoapCorrelationError as exc:
+            log.warning(
+                "CreateScanJob SOAP response correlation mismatch (retry without DestinationToken)",
+                extra={
+                    "target_url": target_url,
+                    "reason_code": exc.reason_code,
+                    "request_message_id": exc.request_message_id,
+                },
+            )
+            return {
+                "target_url": target_url,
+                **scanner_metadata,
+                "validate_http_status": str(validate_status),
+                "validate_message_id": validate_message_id,
+                "validate_status": validate_details.get("status"),
+                "valid_ticket": validate_details.get("valid_ticket"),
+                "destination_token": destination_token,
+                "scan_identifier": scan_identifier,
+                "fault_code": "soap:Client",
+                "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
+                "fault_reason": str(exc),
+                "create_http_status": str(create_status),
+                "create_message_id": create_message_id,
+                "job_id": None,
+                "retrieve_http_status": None,
+                "retrieve_message_id": None,
+                "retrieve_status": None,
+                "retrieve_fault_code": None,
+                "retrieve_fault_subcode": None,
+                "retrieve_fault_reason": None,
+                "retrieve_elapsed_sec": None,
+                "saved_scan_path": None,
+                "saved_scan_bytes": None,
+            }
         create_details = scan_parsers.parse_create_scan_job_response(create_response_text)
         create_used_token = None
         create_used_scan_identifier = scan_identifier
@@ -1109,8 +1326,17 @@ async def run_scan_available_chain(
         timeout_sec=timeout_sec,
         max_wait_sec=get_job_status_max_wait_sec,
         enabled=poll_get_job_status_before_retrieve,
+        validate_outbound_soap_response=validate_outbound_soap_response,
     )
     if poll_result.get("terminal_failure"):
+        retrieve_sub = "wscn:JobTerminatedBeforeRetrieve"
+        retrieve_reason = "GetJobStatus reported a terminal job state before image transfer"
+        if poll_result.get("soap_correlation_failure"):
+            retrieve_sub = "airscand:SoapResponseCorrelationMismatch"
+            retrieve_reason = str(
+                poll_result.get("correlation_fault_reason")
+                or "SOAP response correlation mismatch on GetJobStatus"
+            )
         return {
             "target_url": target_url,
             **scanner_metadata,
@@ -1130,8 +1356,8 @@ async def run_scan_available_chain(
             "retrieve_message_id": None,
             "retrieve_status": None,
             "retrieve_fault_code": None,
-            "retrieve_fault_subcode": "wscn:JobTerminatedBeforeRetrieve",
-            "retrieve_fault_reason": "GetJobStatus reported a terminal job state before image transfer",
+            "retrieve_fault_subcode": retrieve_sub,
+            "retrieve_fault_reason": retrieve_reason,
             "retrieve_elapsed_sec": None,
             "saved_scan_path": None,
             "saved_scan_bytes": None,
@@ -1157,7 +1383,32 @@ async def run_scan_available_chain(
         soap_text, image_bytes, image_part_ct = parse_retrieve_image_mtom(
             retrieve_body, retrieve_ct
         )
-        retrieve_details = scan_parsers.parse_retrieve_image_response(soap_text)
+        if validate_outbound_soap_response:
+            try:
+                check_outbound_soap_response_correlation(
+                    soap_text,
+                    request_message_id=retrieve_message_id,
+                    expected_success_action=ACTION_RETRIEVE_IMAGE_RESPONSE,
+                )
+            except OutboundSoapCorrelationError as exc:
+                log.warning(
+                    "RetrieveImage SOAP response correlation mismatch",
+                    extra={
+                        "target_url": target_url,
+                        "job_id": resolved_job_id,
+                        "reason_code": exc.reason_code,
+                        "request_message_id": exc.request_message_id,
+                    },
+                )
+                retrieve_details = {
+                    "fault_code": "soap:Client",
+                    "fault_subcode": "airscand:SoapResponseCorrelationMismatch",
+                    "fault_reason": str(exc),
+                    "status": None,
+                }
+                image_bytes = None
+        if not retrieve_details:
+            retrieve_details = scan_parsers.parse_retrieve_image_response(soap_text)
         fault = retrieve_details.get("fault_code")
         status_val = (retrieve_details.get("status") or "").strip().lower()
         explicit_fail = status_val in ("failure", "failed", "error")
