@@ -2998,3 +2998,160 @@ async def test_run_scan_available_chain_does_not_retry_non_transient_retrieve_fa
     assert retrieve_calls == 1
     assert (result.get("retrieve_status") or "").lower() == "failure"
     assert result.get("saved_scan_path") is None
+
+
+_BAD_XADDR = "http://192.168.1.99:80/WSD/DEVICE"
+_GOOD_XADDR = "http://192.168.1.60:80/WSD/DEVICE"
+_BAD_SCAN_URL = "http://192.168.1.99:80/WDP/SCAN"
+_GOOD_SCAN_URL = "http://192.168.1.60:80/WDP/SCAN"
+
+_GSE_DEFAULT_TICKET_XML = """<soap:Envelope xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:GetScannerElementsResponse>
+    <sca:DefaultScanTicket>
+      <sca:ScanTicket>
+        <sca:JobDescription><sca:JobName>DeviceTicketName</sca:JobName></sca:JobDescription>
+      </sca:ScanTicket>
+    </sca:DefaultScanTicket>
+  </sca:GetScannerElementsResponse></soap:Body>
+</soap:Envelope>"""
+
+_VALIDATE_OK_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:ValidateScanTicketResponse><sca:Status>Success</sca:Status>
+    <sca:ValidTicket>true</sca:ValidTicket>
+    <sca:DestinationToken>dest-42</sca:DestinationToken>
+  </sca:ValidateScanTicketResponse></soap:Body>
+</soap:Envelope>"""
+
+_CREATE_OK_XML = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+  xmlns:sca="http://schemas.microsoft.com/windows/2006/08/wdp/scan">
+  <soap:Body><sca:CreateScanJobResponse><sca:JobId>job-42</sca:JobId>
+    <sca:JobToken>jtok-42</sca:JobToken></sca:CreateScanJobResponse></soap:Body>
+</soap:Envelope>"""
+
+
+@pytest.mark.asyncio
+async def test_chain_failover_second_xaddr_on_validate_timeout(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """ValidateScanTicket transport failure on the first XAddr retries on the second."""
+    validate_urls: list[str] = []
+
+    async def fake_post_soap(
+        *, url: str, payload: str, timeout_sec: float, **kwargs: object
+    ) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, _GSE_DEFAULT_TICKET_XML
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            validate_urls.append(url)
+            if url == _BAD_SCAN_URL:
+                raise asyncio.TimeoutError()
+            return 200, _VALIDATE_OK_XML
+        if ACTION_CREATE_SCAN_JOB in payload:
+            assert url == _GOOD_SCAN_URL
+            return 200, _CREATE_OK_XML
+        raise AssertionError(f"unexpected SOAP payload for url={url}")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        assert url == _GOOD_SCAN_URL
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
+
+    result = await run_scan_available_chain(
+        scanner_xaddr=_BAD_XADDR,
+        scanner_xaddr_candidates=[_BAD_XADDR, _GOOD_XADDR],
+        poll_get_job_status_before_retrieve=False,
+    )
+
+    assert validate_urls == [_BAD_SCAN_URL, _GOOD_SCAN_URL]
+    assert result["scanner_xaddr"] == _GOOD_XADDR
+    assert result["xaddr_failover_count"] == "1"
+    assert result["validate_http_status"] == "200"
+    assert result["create_http_status"] == "200"
+    assert result["job_id"] == "job-42"
+
+
+@pytest.mark.asyncio
+async def test_chain_no_failover_on_validate_soap_fault(monkeypatch: MonkeyPatch) -> None:
+    """SOAP faults on ValidateScanTicket do not rotate to another XAddr."""
+    validate_urls: list[str] = []
+    fault_xml = """<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body><soap:Fault><soap:Code><soap:Value>soap:Receiver</soap:Value></soap:Code>
+    <soap:Reason><soap:Text xml:lang="en">fail</soap:Text></soap:Reason>
+  </soap:Fault></soap:Body></soap:Envelope>"""
+
+    async def fake_post_soap(
+        *, url: str, payload: str, timeout_sec: float, **kwargs: object
+    ) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, _GSE_DEFAULT_TICKET_XML
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            validate_urls.append(url)
+            return 500, fault_xml
+        raise AssertionError("CreateScanJob should not run after validate SOAP fault")
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+
+    result = await run_scan_available_chain(
+        scanner_xaddr=_BAD_XADDR,
+        scanner_xaddr_candidates=[_BAD_XADDR, _GOOD_XADDR],
+        poll_get_job_status_before_retrieve=False,
+    )
+
+    assert validate_urls == [_BAD_SCAN_URL]
+    assert result.get("xaddr_failover_count") is None
+    assert result["validate_http_status"] == "500"
+    assert result.get("create_http_status") is None
+
+
+@pytest.mark.asyncio
+async def test_chain_failover_on_create_transport_restarts_pre_job(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """CreateScanJob transport failure restarts pre-job on the next XAddr."""
+    validate_urls: list[str] = []
+
+    async def fake_post_soap(
+        *, url: str, payload: str, timeout_sec: float, **kwargs: object
+    ) -> tuple[int, str]:
+        if ACTION_GET_SCANNER_ELEMENTS in payload:
+            return 200, _GSE_DEFAULT_TICKET_XML
+        if ACTION_VALIDATE_SCAN_TICKET in payload:
+            validate_urls.append(url)
+            return 200, _VALIDATE_OK_XML
+        if ACTION_CREATE_SCAN_JOB in payload:
+            if url == _BAD_SCAN_URL:
+                raise asyncio.TimeoutError()
+            assert url == _GOOD_SCAN_URL
+            return 200, _CREATE_OK_XML
+        raise AssertionError(f"unexpected SOAP payload for url={url}")
+
+    async def fake_post_soap_retrieve_image(
+        *, url: str, payload: str, timeout_sec: float
+    ) -> tuple[int, bytes, str | None, HttpBodyIntegrityReport]:
+        raw = _DEFAULT_RETRIEVE_IMAGE_SUCCESS_XML.encode("utf-8")
+        return (200, raw, "application/soap+xml; charset=utf-8", _retrieve_image_http_ok(raw))
+
+    monkeypatch.setattr("app.ws_eventing_client._post_soap", fake_post_soap)
+    monkeypatch.setattr(
+        "app.ws_eventing_client._post_soap_retrieve_image", fake_post_soap_retrieve_image
+    )
+
+    result = await run_scan_available_chain(
+        scanner_xaddr=_BAD_XADDR,
+        scanner_xaddr_candidates=[_BAD_XADDR, _GOOD_XADDR],
+        poll_get_job_status_before_retrieve=False,
+    )
+
+    assert validate_urls == [_BAD_SCAN_URL, _GOOD_SCAN_URL]
+    assert result["scanner_xaddr"] == _GOOD_XADDR
+    assert result["xaddr_failover_count"] == "1"
+    assert result["create_http_status"] == "200"
+    assert result["job_id"] == "job-42"

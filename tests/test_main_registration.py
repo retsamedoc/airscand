@@ -357,6 +357,10 @@ async def test_eventing_registration_failover_second_xaddr_after_preflight_timeo
             "http://192.168.1.60:80/WSD/DEVICE",
         ]
         assert cfg.scanner_xaddr == "http://192.168.1.60:80/WSD/DEVICE"
+        assert cfg.scanner_xaddrs == [
+            "http://192.168.1.99:80/WSD/DEVICE",
+            "http://192.168.1.60:80/WSD/DEVICE",
+        ]
         assert cfg.scanner_eventing_subscription_id == "sub-1"
         assert cfg.scanner_eventing_subscription_id_status == "sub-2"
         assert any(

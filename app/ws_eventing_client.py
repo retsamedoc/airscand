@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from aiohttp import ClientError
@@ -20,6 +20,7 @@ from app.scanner_status_coordination import (
     begin_retrieve_idle_wait,
     end_retrieve_idle_wait,
 )
+from app.scanner_xaddr_failover import ScannerXAddrRotator
 from app.soap import namespaces
 from app.soap.builders import eventing as eventing_builders
 from app.soap.fault import parse_soap_fault
@@ -175,6 +176,8 @@ async def poll_get_job_status_until_ready(
     max_wait_sec: float = GET_JOB_STATUS_MAX_WAIT_SEC,
     enabled: bool = True,
     validate_outbound_soap_response: bool = False,
+    rotator: ScannerXAddrRotator | None = None,
+    on_target_url_changed: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     """Poll GetJobStatus until the job is ready for RetrieveImage or timeout (WIA §7.3)."""
     if not enabled:
@@ -185,6 +188,7 @@ async def poll_get_job_status_until_ready(
             "timed_out": False,
             "unsupported": False,
             "terminal_failure": False,
+            "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
         }
 
     deadline = time.monotonic() + max_wait_sec
@@ -193,11 +197,13 @@ async def poll_get_job_status_until_ready(
     polls = 0
     last_state: str | None = None
     last_images: str | None = None
+    current_url = rotator.target_url if rotator is not None else target_url
 
     while time.monotonic() <= deadline:
         polls += 1
+        current_url = rotator.target_url if rotator is not None else target_url
         _mid, payload = scan_parsers.build_get_job_status_request(
-            to_url=target_url,
+            to_url=current_url,
             job_id=job_id,
             job_token=job_token,
             from_address=from_address,
@@ -211,11 +217,20 @@ async def poll_get_job_status_until_ready(
             }
         try:
             status, response_text = await _post_soap(
-                url=target_url,
+                url=current_url,
                 payload=payload,
                 timeout_sec=timeout_sec,
                 **soap_kwargs,
             )
+        except (asyncio.TimeoutError, ClientError) as exc:
+            if rotator is not None and rotator.advance(
+                exc, context="scan_chain", operation="GetJobStatus"
+            ):
+                current_url = rotator.target_url
+                if on_target_url_changed is not None:
+                    on_target_url_changed(current_url)
+                continue
+            raise
         except OutboundSoapCorrelationError as exc:
             log.warning(
                 "GetJobStatus SOAP response correlation mismatch",
@@ -235,6 +250,7 @@ async def poll_get_job_status_until_ready(
                 "terminal_failure": True,
                 "soap_correlation_failure": True,
                 "correlation_fault_reason": str(exc),
+                "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
             }
         details = scan_parsers.parse_get_job_status_response(response_text)
         last_state = details.get("job_state")
@@ -255,6 +271,7 @@ async def poll_get_job_status_until_ready(
                 "timed_out": False,
                 "unsupported": True,
                 "terminal_failure": False,
+                "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
             }
         if status < 200 or status >= 300:
             log.warning(
@@ -269,13 +286,14 @@ async def poll_get_job_status_until_ready(
                     "timed_out": False,
                     "unsupported": True,
                     "terminal_failure": False,
+                    "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
                 }
             break
         if details.get("fault_code") and not details.get("job_state"):
             log.warning(
                 "GetJobStatus SOAP fault without JobState",
                 extra={
-                    "target_url": target_url,
+                    "target_url": current_url,
                     "fault_subcode": details.get("fault_subcode"),
                 },
             )
@@ -287,12 +305,13 @@ async def poll_get_job_status_until_ready(
                     "timed_out": False,
                     "unsupported": False,
                     "terminal_failure": False,
+                    "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
                 }
             break
         if scan_parsers.job_status_terminal_failure(last_state):
             log.warning(
                 "GetJobStatus terminal job state",
-                extra={"target_url": target_url, "job_state": last_state},
+                extra={"target_url": current_url, "job_state": last_state},
             )
             return {
                 "skipped": False,
@@ -301,12 +320,13 @@ async def poll_get_job_status_until_ready(
                 "timed_out": False,
                 "unsupported": False,
                 "terminal_failure": True,
+                "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
             }
         if scan_parsers.job_ready_for_retrieve_from_status(last_state, last_images):
             log.info(
                 "GetJobStatus indicates job ready for RetrieveImage",
                 extra={
-                    "target_url": target_url,
+                    "target_url": current_url,
                     "polls": polls,
                     "job_state": last_state,
                     "images_to_transfer": last_images,
@@ -319,6 +339,7 @@ async def poll_get_job_status_until_ready(
                 "timed_out": False,
                 "unsupported": False,
                 "terminal_failure": False,
+                "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
             }
         await asyncio.sleep(interval)
         interval = min(interval * 1.5, GET_JOB_STATUS_MAX_INTERVAL_SEC)
@@ -338,6 +359,7 @@ async def poll_get_job_status_until_ready(
         "timed_out": True,
         "unsupported": False,
         "terminal_failure": False,
+        "xaddr_failover_during_poll": bool(rotator and rotator.failover_count > 0),
     }
 
 
@@ -348,6 +370,7 @@ async def cancel_scan_job(
     job_token: str,
     timeout_sec: float = 10.0,
     from_address: str | None = None,
+    rotator: ScannerXAddrRotator | None = None,
 ) -> dict[str, str | None]:
     """Send WS-Scan CancelJob to the scanner (WIA §7.5).
 
@@ -360,61 +383,68 @@ async def cancel_scan_job(
         job_token: JobToken from CreateScanJobResponse.
         timeout_sec: SOAP request timeout (connect + read combined budget).
         from_address: Optional WS-A From address.
+        rotator: Optional XAddr rotator to try further candidates on transport failure.
 
     Returns:
         Dict with ``cancel_http_status``, ``cancel_message_id``, ``cancel_fault_code``,
         ``cancel_fault_subcode``, ``cancel_fault_reason``, and ``cancel_ok`` (``"true"``/``"false"``).
     """
-    cancel_message_id, cancel_payload = scan_parsers.build_cancel_job_request(
-        to_url=target_url,
-        job_id=job_id,
-        job_token=job_token,
-        from_address=from_address,
-    )
-    try:
-        cancel_status, cancel_text = await _post_soap(
-            url=target_url,
-            payload=cancel_payload,
-            timeout_sec=timeout_sec,
+    while True:
+        current_url = rotator.target_url if rotator is not None else target_url
+        cancel_message_id, cancel_payload = scan_parsers.build_cancel_job_request(
+            to_url=current_url,
+            job_id=job_id,
+            job_token=job_token,
+            from_address=from_address,
         )
-        fault = parse_soap_fault(cancel_text)
-        cancel_ok = 200 <= cancel_status < 300 and not fault.get("fault_code")
-        log.info(
-            "CancelJob sent",
-            extra={
-                "target_url": target_url,
-                "job_id": job_id,
-                "http_status": cancel_status,
-                "cancel_ok": cancel_ok,
+        try:
+            cancel_status, cancel_text = await _post_soap(
+                url=current_url,
+                payload=cancel_payload,
+                timeout_sec=timeout_sec,
+            )
+            fault = parse_soap_fault(cancel_text)
+            cancel_ok = 200 <= cancel_status < 300 and not fault.get("fault_code")
+            log.info(
+                "CancelJob sent",
+                extra={
+                    "target_url": current_url,
+                    "job_id": job_id,
+                    "http_status": cancel_status,
+                    "cancel_ok": cancel_ok,
+                    "cancel_message_id": cancel_message_id,
+                    **{k: v for k, v in fault.items() if v},
+                },
+            )
+            return {
+                "cancel_http_status": str(cancel_status),
                 "cancel_message_id": cancel_message_id,
-                **{k: v for k, v in fault.items() if v},
-            },
-        )
-        return {
-            "cancel_http_status": str(cancel_status),
-            "cancel_message_id": cancel_message_id,
-            "cancel_fault_code": fault.get("fault_code"),
-            "cancel_fault_subcode": fault.get("fault_subcode"),
-            "cancel_fault_reason": fault.get("fault_reason"),
-            "cancel_ok": "true" if cancel_ok else "false",
-        }
-    except (asyncio.TimeoutError, ClientError) as exc:
-        log.warning(
-            "CancelJob failed (device may have ignored; scan chain continues)",
-            extra={
-                "target_url": target_url,
-                "job_id": job_id,
-                "error": str(exc),
-            },
-        )
-        return {
-            "cancel_http_status": None,
-            "cancel_message_id": cancel_message_id,
-            "cancel_fault_code": None,
-            "cancel_fault_subcode": None,
-            "cancel_fault_reason": None,
-            "cancel_ok": "false",
-        }
+                "cancel_fault_code": fault.get("fault_code"),
+                "cancel_fault_subcode": fault.get("fault_subcode"),
+                "cancel_fault_reason": fault.get("fault_reason"),
+                "cancel_ok": "true" if cancel_ok else "false",
+            }
+        except (asyncio.TimeoutError, ClientError) as exc:
+            if rotator is not None and rotator.advance(
+                exc, context="scan_chain", operation="CancelJob"
+            ):
+                continue
+            log.warning(
+                "CancelJob failed (device may have ignored; scan chain continues)",
+                extra={
+                    "target_url": current_url,
+                    "job_id": job_id,
+                    "error": str(exc),
+                },
+            )
+            return {
+                "cancel_http_status": None,
+                "cancel_message_id": cancel_message_id,
+                "cancel_fault_code": None,
+                "cancel_fault_subcode": None,
+                "cancel_fault_reason": None,
+                "cancel_ok": "false",
+            }
 
 
 async def preflight_get_scanner_capabilities(
@@ -1105,6 +1135,8 @@ async def run_scan_available_chain(
     image_delivery_mode: ImageDeliveryMode = "pull",
     cancel_job_on_retrieve_error: bool = True,
     retrieve_image_max_retries: int = 1,
+    scanner_xaddr_candidates: Sequence[str] | None = None,
+    on_scanner_xaddr_selected: Callable[[str], None] | None = None,
 ) -> dict[str, str | None]:
     """Execute ValidateScanTicket, CreateScanJob, optional GetJobStatus polling, then RetrieveImage.
 
@@ -1125,10 +1157,28 @@ async def run_scan_available_chain(
     lifecycle = ScanLifecycle()
     lifecycle.mark_discovered()
 
-    def _out(**fields: str | None) -> dict[str, str | None]:
-        return lifecycle.enrich_result(fields)
+    rotator = ScannerXAddrRotator.from_scanner_xaddr(scanner_xaddr, scanner_xaddr_candidates)
 
-    target_url = resolve_wdp_scan_url(scanner_xaddr)
+    def _select_xaddr() -> None:
+        if on_scanner_xaddr_selected is not None:
+            on_scanner_xaddr_selected(rotator.scanner_xaddr)
+
+    target_url = rotator.target_url
+    active_scanner_xaddr = rotator.scanner_xaddr
+
+    def _out(**fields: str | None) -> dict[str, str | None]:
+        base = lifecycle.enrich_result(fields)
+        base["scanner_xaddr"] = rotator.scanner_xaddr
+        if rotator.failover_count:
+            base["xaddr_failover_count"] = str(rotator.failover_count)
+        return base
+
+    def _sync_target_from_rotator() -> None:
+        nonlocal target_url, active_scanner_xaddr
+        target_url = rotator.target_url
+        active_scanner_xaddr = rotator.scanner_xaddr
+        _select_xaddr()
+
     if scanner_profile is not None:
         log.info(
             "Scan chain starting",
@@ -1152,290 +1202,263 @@ async def run_scan_available_chain(
         "ticket_validation_ok": None,
         "ticket_validation_issues": None,
     }
-    try:
-        metadata_details = await get_scanner_elements_metadata(
-            scanner_xaddr=scanner_xaddr,
-            get_to_url=target_url,
-            timeout_sec=timeout_sec,
-            from_address=from_address,
-        )
-        scanner_metadata.update(
-            {
-                "probe_http_status": metadata_details.get("status"),
-                "probe_message_id": metadata_details.get("message_id"),
-                "probe_fault_code": metadata_details.get("fault_code"),
-                "probe_fault_subcode": metadata_details.get("fault_subcode"),
-                "probe_fault_reason": metadata_details.get("fault_reason"),
-                "scanner_description": metadata_details.get("scanner_description"),
-                "default_scan_ticket": metadata_details.get("default_scan_ticket"),
-                "scanner_configuration": metadata_details.get("scanner_configuration"),
-                "scanner_status": metadata_details.get("scanner_status"),
-            }
-        )
-    except (asyncio.TimeoutError, ClientError) as exc:
-        log.warning(
-            "Scanner metadata probe failed; continuing scan chain",
-            extra={"target_url": target_url, "error": str(exc)},
-        )
-
-    lifecycle.mark_capabilities_loaded()
 
     event_payload = scan_available_payload or ""
     event_client_context = scan_parsers.extract_client_context(event_payload)
-    parsed_caps = parse_scanner_capabilities(scanner_metadata.get("scanner_configuration"))
     dest_seq = scan_destinations if scan_destinations is not None else DEFAULT_DESTINATIONS
     resolved_dest = lookup_destination(event_client_context, dest_seq)
 
-    if resolved_dest is not None and resolved_dest.config is not None:
-        scan_ticket_xml = scan_parsers.build_scan_ticket_from_destination_config(
-            resolved_dest.config,
+    validate_status: int = 0
+    validate_response_text: str = ""
+    validate_details: dict[str, str | None] = {}
+    validate_message_id: str = ""
+    scan_identifier: str | None = None
+    destination_token: str | None = None
+    scan_ticket_xml: str = ""
+    create_status: int = 0
+    create_response_text: str = ""
+    create_details: dict[str, str | None] = {}
+    create_message_id: str = ""
+    create_used_token: str | None = None
+    create_used_scan_identifier: str | None = None
+    resolved_job_id: str | None = None
+
+    while True:
+        target_url = rotator.target_url
+        active_scanner_xaddr = rotator.scanner_xaddr
+        rotator.log_try(context="scan_chain", operation="pre_job")
+
+        try:
+            metadata_details = await get_scanner_elements_metadata(
+                scanner_xaddr=active_scanner_xaddr,
+                get_to_url=target_url,
+                timeout_sec=timeout_sec,
+                from_address=from_address,
+            )
+            scanner_metadata.update(
+                {
+                    "probe_http_status": metadata_details.get("status"),
+                    "probe_message_id": metadata_details.get("message_id"),
+                    "probe_fault_code": metadata_details.get("fault_code"),
+                    "probe_fault_subcode": metadata_details.get("fault_subcode"),
+                    "probe_fault_reason": metadata_details.get("fault_reason"),
+                    "scanner_description": metadata_details.get("scanner_description"),
+                    "default_scan_ticket": metadata_details.get("default_scan_ticket"),
+                    "scanner_configuration": metadata_details.get("scanner_configuration"),
+                    "scanner_status": metadata_details.get("scanner_status"),
+                }
+            )
+        except (asyncio.TimeoutError, ClientError) as exc:
+            if rotator.advance(exc, context="scan_chain", operation="GetScannerElements"):
+                _sync_target_from_rotator()
+                continue
+            log.warning(
+                "Scanner metadata probe failed; continuing scan chain",
+                extra={"target_url": target_url, "error": str(exc)},
+            )
+
+        lifecycle.mark_capabilities_loaded()
+
+        parsed_caps = parse_scanner_capabilities(scanner_metadata.get("scanner_configuration"))
+
+        if resolved_dest is not None and resolved_dest.config is not None:
+            scan_ticket_xml = scan_parsers.build_scan_ticket_from_destination_config(
+                resolved_dest.config,
+                parsed_caps,
+            )
+            scan_ticket_xml = scan_parsers.apply_scanner_configuration_to_scan_ticket_xml(
+                scan_ticket_xml,
+                scanner_metadata.get("scanner_configuration"),
+            )
+        else:
+            scan_ticket_xml = scan_parsers.resolve_scan_ticket_xml_for_chain(
+                scanner_metadata.get("default_scan_ticket"),
+                scanner_metadata.get("scanner_configuration"),
+            )
+
+        ticket_validation = scan_parsers.validate_scan_ticket_against_capabilities(
+            scan_ticket_xml,
             parsed_caps,
         )
-        scan_ticket_xml = scan_parsers.apply_scanner_configuration_to_scan_ticket_xml(
-            scan_ticket_xml,
-            scanner_metadata.get("scanner_configuration"),
+        issues_list = ticket_validation.get("issues") or []
+        scanner_metadata["ticket_validation_ok"] = (
+            "true" if ticket_validation.get("ok") else "false"
         )
-    else:
-        scan_ticket_xml = scan_parsers.resolve_scan_ticket_xml_for_chain(
-            scanner_metadata.get("default_scan_ticket"),
-            scanner_metadata.get("scanner_configuration"),
+        scanner_metadata["ticket_validation_issues"] = (
+            ",".join(str(x) for x in issues_list) if issues_list else None
         )
 
-    ticket_validation = scan_parsers.validate_scan_ticket_against_capabilities(
-        scan_ticket_xml,
-        parsed_caps,
-    )
-    issues_list = ticket_validation.get("issues") or []
-    scanner_metadata["ticket_validation_ok"] = "true" if ticket_validation.get("ok") else "false"
-    scanner_metadata["ticket_validation_issues"] = (
-        ",".join(str(x) for x in issues_list) if issues_list else None
-    )
-
-    validate_message_id, validate_payload = scan_parsers.build_validate_scan_ticket_request(
-        to_url=target_url,
-        from_address=from_address,
-        scan_ticket_xml=scan_ticket_xml,
-    )
-    validate_soap: dict[str, str | bool] = {}
-    if validate_outbound_soap_response:
-        validate_soap = {
-            "validate_correlation": True,
-            "request_message_id": validate_message_id,
-            "expected_response_action": ACTION_VALIDATE_SCAN_TICKET_RESPONSE,
-        }
-    validate_status: int | None = None
-    validate_response_text: str | None = None
-    try:
-        validate_status, validate_response_text = await _post_soap(
-            url=target_url,
-            payload=validate_payload,
-            timeout_sec=timeout_sec,
-            **validate_soap,
+        validate_message_id, validate_payload = scan_parsers.build_validate_scan_ticket_request(
+            to_url=target_url,
+            from_address=from_address,
+            scan_ticket_xml=scan_ticket_xml,
         )
-    except OutboundSoapCorrelationError as exc:
-        log.warning(
-            "ValidateScanTicket SOAP response correlation mismatch",
-            extra={
-                "target_url": target_url,
-                "reason_code": exc.reason_code,
-                "request_message_id": exc.request_message_id,
-            },
+        validate_soap: dict[str, str | bool] = {}
+        if validate_outbound_soap_response:
+            validate_soap = {
+                "validate_correlation": True,
+                "request_message_id": validate_message_id,
+                "expected_response_action": ACTION_VALIDATE_SCAN_TICKET_RESPONSE,
+            }
+        try:
+            validate_status, validate_response_text = await _post_soap(
+                url=target_url,
+                payload=validate_payload,
+                timeout_sec=timeout_sec,
+                **validate_soap,
+            )
+        except OutboundSoapCorrelationError as exc:
+            log.warning(
+                "ValidateScanTicket SOAP response correlation mismatch",
+                extra={
+                    "target_url": target_url,
+                    "reason_code": exc.reason_code,
+                    "request_message_id": exc.request_message_id,
+                },
+            )
+            lifecycle.mark_error()
+            return _out(
+                target_url=target_url,
+                **scanner_metadata,
+                validate_http_status=None,
+                validate_message_id=validate_message_id,
+                validate_status=None,
+                valid_ticket=None,
+                destination_token=None,
+                scan_identifier=scan_parsers.extract_scan_identifier(event_payload),
+                fault_code="soap:Client",
+                fault_subcode="airscand:SoapResponseCorrelationMismatch",
+                fault_reason=str(exc),
+                create_http_status=None,
+                create_message_id=None,
+                job_id=None,
+                retrieve_http_status=None,
+                retrieve_message_id=None,
+                retrieve_status=None,
+                retrieve_fault_code=None,
+                retrieve_fault_subcode=None,
+                retrieve_fault_reason=None,
+                retrieve_elapsed_sec=None,
+                saved_scan_path=None,
+                saved_scan_bytes=None,
+            )
+        except (asyncio.TimeoutError, ClientError) as exc:
+            if rotator.advance(exc, context="scan_chain", operation="ValidateScanTicket"):
+                _select_xaddr()
+                continue
+            lifecycle.mark_error()
+            return _out(
+                target_url=target_url,
+                **scanner_metadata,
+                validate_http_status=None,
+                validate_message_id=validate_message_id,
+                validate_status=None,
+                valid_ticket=None,
+                destination_token=None,
+                scan_identifier=scan_parsers.extract_scan_identifier(event_payload),
+                fault_code="soap:Client",
+                fault_subcode="airscand:ValidateScanTicketTransportError",
+                fault_reason=str(exc),
+                create_http_status=None,
+                create_message_id=None,
+                job_id=None,
+                retrieve_http_status=None,
+                retrieve_message_id=None,
+                retrieve_status=None,
+                retrieve_fault_code=None,
+                retrieve_fault_subcode=None,
+                retrieve_fault_reason=None,
+                retrieve_elapsed_sec=None,
+                saved_scan_path=None,
+                saved_scan_bytes=None,
+            )
+        validate_details = scan_parsers.parse_validate_scan_ticket_response(validate_response_text)
+        validate_response_message_id = scan_parsers.extract_soap_envelope_message_id(
+            validate_response_text
         )
-        lifecycle.mark_error()
-        return _out(
-            target_url=target_url,
-            **scanner_metadata,
-            validate_http_status=str(validate_status) if validate_status is not None else None,
-            validate_message_id=validate_message_id,
-            validate_status=None,
-            valid_ticket=None,
-            destination_token=None,
-            scan_identifier=scan_parsers.extract_scan_identifier(event_payload),
-            fault_code="soap:Client",
-            fault_subcode="airscand:SoapResponseCorrelationMismatch",
-            fault_reason=str(exc),
-            create_http_status=None,
-            create_message_id=None,
-            job_id=None,
-            retrieve_http_status=None,
-            retrieve_message_id=None,
-            retrieve_status=None,
-            retrieve_fault_code=None,
-            retrieve_fault_subcode=None,
-            retrieve_fault_reason=None,
-            retrieve_elapsed_sec=None,
-            saved_scan_path=None,
-            saved_scan_bytes=None,
+        scan_identifier = scan_parsers.extract_scan_identifier(event_payload)
+        subscription_token = (eventing_subscription_identifier or "").strip() or None
+        event_subscription_identifier = scan_parsers.extract_event_subscription_identifier(
+            event_payload
         )
-    validate_details = scan_parsers.parse_validate_scan_ticket_response(validate_response_text)
-    validate_response_message_id = scan_parsers.extract_soap_envelope_message_id(
-        validate_response_text
-    )
-    scan_identifier = scan_parsers.extract_scan_identifier(event_payload)
-    subscription_token = (eventing_subscription_identifier or "").strip() or None
-    event_subscription_identifier = scan_parsers.extract_event_subscription_identifier(
-        event_payload
-    )
-    sub_dest = scan_parsers.resolve_subscribe_destination_token_for_chain(
-        event_payload=event_payload,
-        subscribe_destination_tokens=subscribe_destination_tokens,
-        subscribe_destination_token=subscribe_destination_token,
-        use_env_subscribe_destination_token_only=use_env_subscribe_destination_token_only,
-    )
-    # Precedence: SubscribeResponse tokens (per ClientContext when map present), then event hints,
-    # then validate response (MessageID heuristic and body token), then persisted WS-Eventing id.
-    destination_token = (
-        sub_dest
-        or scan_parsers.extract_destination_token(event_payload)
-        or event_subscription_identifier
-        or validate_response_message_id
-        or validate_details.get("destination_token")
-        or subscription_token
-    )
-    validate_details["http_status"] = str(validate_status)
-    validate_details["message_id"] = validate_message_id
-    log.info(
-        "ValidateScanTicket completed",
-        extra={
-            "target_url": target_url,
-            "http_status": validate_status,
-            "message_id": validate_message_id,
-            "status": validate_details.get("status"),
-            "valid_ticket": validate_details.get("valid_ticket"),
-            "destination_token": destination_token,
-            "subscribe_destination_token": sub_dest,
-            "event_client_context": event_client_context,
-            "validate_response_message_id": validate_response_message_id,
-            "event_subscription_identifier": event_subscription_identifier,
-            "subscription_fallback_token": subscription_token,
-            "scan_identifier": scan_identifier,
-            "fault_subcode": validate_details.get("fault_subcode"),
-        },
-    )
-    valid_ticket = validate_details.get("valid_ticket")
-    if (
-        validate_status < 200
-        or validate_status >= 300
-        or validate_details.get("fault_code")
-        or (valid_ticket is not None and valid_ticket != "true")
-    ):
-        lifecycle.mark_error()
-        return _out(
-            target_url=target_url,
-            **scanner_metadata,
-            validate_http_status=str(validate_status),
-            validate_message_id=validate_message_id,
-            validate_status=validate_details.get("status"),
-            valid_ticket=validate_details.get("valid_ticket"),
-            destination_token=destination_token,
-            scan_identifier=scan_identifier,
-            fault_code=validate_details.get("fault_code"),
-            fault_subcode=validate_details.get("fault_subcode"),
-            fault_reason=validate_details.get("fault_reason"),
-            create_http_status=None,
-            create_message_id=None,
-            job_id=None,
-            retrieve_http_status=None,
-            retrieve_message_id=None,
-            retrieve_status=None,
-            retrieve_fault_code=None,
-            retrieve_fault_subcode=None,
-            retrieve_fault_reason=None,
-            retrieve_elapsed_sec=None,
-            saved_scan_path=None,
-            saved_scan_bytes=None,
+        sub_dest = scan_parsers.resolve_subscribe_destination_token_for_chain(
+            event_payload=event_payload,
+            subscribe_destination_tokens=subscribe_destination_tokens,
+            subscribe_destination_token=subscribe_destination_token,
+            use_env_subscribe_destination_token_only=use_env_subscribe_destination_token_only,
         )
-
-    create_message_id, create_payload = scan_parsers.build_create_scan_job_request(
-        to_url=target_url,
-        destination_token=destination_token,
-        scan_identifier=scan_identifier,
-        from_address=from_address,
-        scan_ticket_xml=scan_ticket_xml,
-    )
-    create_soap: dict[str, str | bool] = {}
-    if validate_outbound_soap_response:
-        create_soap = {
-            "validate_correlation": True,
-            "request_message_id": create_message_id,
-            "expected_response_action": ACTION_CREATE_SCAN_JOB_RESPONSE,
-        }
-    try:
-        create_status, create_response_text = await _post_soap(
-            url=target_url,
-            payload=create_payload,
-            timeout_sec=timeout_sec,
-            **create_soap,
+        destination_token = (
+            sub_dest
+            or scan_parsers.extract_destination_token(event_payload)
+            or event_subscription_identifier
+            or validate_response_message_id
+            or validate_details.get("destination_token")
+            or subscription_token
         )
-    except OutboundSoapCorrelationError as exc:
-        log.warning(
-            "CreateScanJob SOAP response correlation mismatch",
-            extra={
-                "target_url": target_url,
-                "reason_code": exc.reason_code,
-                "request_message_id": exc.request_message_id,
-            },
-        )
-        lifecycle.mark_error()
-        return _out(
-            target_url=target_url,
-            **scanner_metadata,
-            validate_http_status=str(validate_status),
-            validate_message_id=validate_message_id,
-            validate_status=validate_details.get("status"),
-            valid_ticket=validate_details.get("valid_ticket"),
-            destination_token=destination_token,
-            scan_identifier=scan_identifier,
-            fault_code="soap:Client",
-            fault_subcode="airscand:SoapResponseCorrelationMismatch",
-            fault_reason=str(exc),
-            create_http_status=str(create_status),
-            create_message_id=create_message_id,
-            job_id=None,
-            retrieve_http_status=None,
-            retrieve_message_id=None,
-            retrieve_status=None,
-            retrieve_fault_code=None,
-            retrieve_fault_subcode=None,
-            retrieve_fault_reason=None,
-            retrieve_elapsed_sec=None,
-            saved_scan_path=None,
-            saved_scan_bytes=None,
-        )
-    create_details = scan_parsers.parse_create_scan_job_response(create_response_text)
-    create_used_token = destination_token
-    create_used_scan_identifier = scan_identifier
-    create_fault_subcode = create_details.get("fault_subcode") or ""
-    if (
-        retry_create_without_destination_token_on_invalid_token
-        and create_status >= 400
-        and destination_token
-        and create_fault_subcode.endswith(INVALID_DESTINATION_TOKEN_FAULT)
-    ):
-        # Some firmwares reject DestinationToken (e.g. wrong subscription id shape) but
-        # still require ScanIdentifier from ScanAvailableEvent on device-initiated jobs.
-        # Retry with DestinationToken omitted only — dropping ScanIdentifier produced requests
-        # with only ScanTicket and repeated ClientErrorInvalidDestinationToken in field testing.
-        # Gated by config (WSD_CREATE_SCAN_JOB_RETRY_INVALID_DESTINATION_TOKEN).
+        validate_details["http_status"] = str(validate_status)
+        validate_details["message_id"] = validate_message_id
         log.info(
-            "CreateScanJob retrying without DestinationToken after invalid destination token fault",
+            "ValidateScanTicket completed",
             extra={
                 "target_url": target_url,
-                "fault_subcode": create_fault_subcode,
-                "original_message_id": create_message_id,
-                "preserve_scan_identifier": bool(scan_identifier),
+                "http_status": validate_status,
+                "message_id": validate_message_id,
+                "status": validate_details.get("status"),
+                "valid_ticket": validate_details.get("valid_ticket"),
+                "destination_token": destination_token,
+                "subscribe_destination_token": sub_dest,
+                "event_client_context": event_client_context,
+                "validate_response_message_id": validate_response_message_id,
+                "event_subscription_identifier": event_subscription_identifier,
+                "subscription_fallback_token": subscription_token,
+                "scan_identifier": scan_identifier,
+                "fault_subcode": validate_details.get("fault_subcode"),
             },
         )
+        valid_ticket = validate_details.get("valid_ticket")
+        if (
+            validate_status < 200
+            or validate_status >= 300
+            or validate_details.get("fault_code")
+            or (valid_ticket is not None and valid_ticket != "true")
+        ):
+            lifecycle.mark_error()
+            return _out(
+                target_url=target_url,
+                **scanner_metadata,
+                validate_http_status=str(validate_status),
+                validate_message_id=validate_message_id,
+                validate_status=validate_details.get("status"),
+                valid_ticket=validate_details.get("valid_ticket"),
+                destination_token=destination_token,
+                scan_identifier=scan_identifier,
+                fault_code=validate_details.get("fault_code"),
+                fault_subcode=validate_details.get("fault_subcode"),
+                fault_reason=validate_details.get("fault_reason"),
+                create_http_status=None,
+                create_message_id=None,
+                job_id=None,
+                retrieve_http_status=None,
+                retrieve_message_id=None,
+                retrieve_status=None,
+                retrieve_fault_code=None,
+                retrieve_fault_subcode=None,
+                retrieve_fault_reason=None,
+                retrieve_elapsed_sec=None,
+                saved_scan_path=None,
+                saved_scan_bytes=None,
+            )
+
         create_message_id, create_payload = scan_parsers.build_create_scan_job_request(
             to_url=target_url,
-            destination_token=None,
+            destination_token=destination_token,
             scan_identifier=scan_identifier,
             from_address=from_address,
             scan_ticket_xml=scan_ticket_xml,
         )
-        create_soap_retry: dict[str, str | bool] = {}
+        create_soap: dict[str, str | bool] = {}
         if validate_outbound_soap_response:
-            create_soap_retry = {
+            create_soap = {
                 "validate_correlation": True,
                 "request_message_id": create_message_id,
                 "expected_response_action": ACTION_CREATE_SCAN_JOB_RESPONSE,
@@ -1445,11 +1468,11 @@ async def run_scan_available_chain(
                 url=target_url,
                 payload=create_payload,
                 timeout_sec=timeout_sec,
-                **create_soap_retry,
+                **create_soap,
             )
         except OutboundSoapCorrelationError as exc:
             log.warning(
-                "CreateScanJob SOAP response correlation mismatch (retry without DestinationToken)",
+                "CreateScanJob SOAP response correlation mismatch",
                 extra={
                     "target_url": target_url,
                     "reason_code": exc.reason_code,
@@ -1469,7 +1492,37 @@ async def run_scan_available_chain(
                 fault_code="soap:Client",
                 fault_subcode="airscand:SoapResponseCorrelationMismatch",
                 fault_reason=str(exc),
-                create_http_status=str(create_status),
+                create_http_status=str(create_status) if create_status else None,
+                create_message_id=create_message_id,
+                job_id=None,
+                retrieve_http_status=None,
+                retrieve_message_id=None,
+                retrieve_status=None,
+                retrieve_fault_code=None,
+                retrieve_fault_subcode=None,
+                retrieve_fault_reason=None,
+                retrieve_elapsed_sec=None,
+                saved_scan_path=None,
+                saved_scan_bytes=None,
+            )
+        except (asyncio.TimeoutError, ClientError) as exc:
+            if rotator.advance(exc, context="scan_chain", operation="CreateScanJob"):
+                _select_xaddr()
+                continue
+            lifecycle.mark_error()
+            return _out(
+                target_url=target_url,
+                **scanner_metadata,
+                validate_http_status=str(validate_status),
+                validate_message_id=validate_message_id,
+                validate_status=validate_details.get("status"),
+                valid_ticket=validate_details.get("valid_ticket"),
+                destination_token=destination_token,
+                scan_identifier=scan_identifier,
+                fault_code="soap:Client",
+                fault_subcode="airscand:CreateScanJobTransportError",
+                fault_reason=str(exc),
+                create_http_status=None,
                 create_message_id=create_message_id,
                 job_id=None,
                 retrieve_http_status=None,
@@ -1483,54 +1536,131 @@ async def run_scan_available_chain(
                 saved_scan_bytes=None,
             )
         create_details = scan_parsers.parse_create_scan_job_response(create_response_text)
-        create_used_token = None
+        create_used_token = destination_token
         create_used_scan_identifier = scan_identifier
+        create_fault_subcode = create_details.get("fault_subcode") or ""
+        if (
+            retry_create_without_destination_token_on_invalid_token
+            and create_status >= 400
+            and destination_token
+            and create_fault_subcode.endswith(INVALID_DESTINATION_TOKEN_FAULT)
+        ):
+            log.info(
+                "CreateScanJob retrying without DestinationToken after invalid destination token fault",
+                extra={
+                    "target_url": target_url,
+                    "fault_subcode": create_fault_subcode,
+                    "original_message_id": create_message_id,
+                    "preserve_scan_identifier": bool(scan_identifier),
+                },
+            )
+            create_message_id, create_payload = scan_parsers.build_create_scan_job_request(
+                to_url=target_url,
+                destination_token=None,
+                scan_identifier=scan_identifier,
+                from_address=from_address,
+                scan_ticket_xml=scan_ticket_xml,
+            )
+            create_soap_retry: dict[str, str | bool] = {}
+            if validate_outbound_soap_response:
+                create_soap_retry = {
+                    "validate_correlation": True,
+                    "request_message_id": create_message_id,
+                    "expected_response_action": ACTION_CREATE_SCAN_JOB_RESPONSE,
+                }
+            try:
+                create_status, create_response_text = await _post_soap(
+                    url=target_url,
+                    payload=create_payload,
+                    timeout_sec=timeout_sec,
+                    **create_soap_retry,
+                )
+            except OutboundSoapCorrelationError as exc:
+                log.warning(
+                    "CreateScanJob SOAP response correlation mismatch (retry without DestinationToken)",
+                    extra={
+                        "target_url": target_url,
+                        "reason_code": exc.reason_code,
+                        "request_message_id": exc.request_message_id,
+                    },
+                )
+                lifecycle.mark_error()
+                return _out(
+                    target_url=target_url,
+                    **scanner_metadata,
+                    validate_http_status=str(validate_status),
+                    validate_message_id=validate_message_id,
+                    validate_status=validate_details.get("status"),
+                    valid_ticket=validate_details.get("valid_ticket"),
+                    destination_token=destination_token,
+                    scan_identifier=scan_identifier,
+                    fault_code="soap:Client",
+                    fault_subcode="airscand:SoapResponseCorrelationMismatch",
+                    fault_reason=str(exc),
+                    create_http_status=str(create_status) if create_status else None,
+                    create_message_id=create_message_id,
+                    job_id=None,
+                    retrieve_http_status=None,
+                    retrieve_message_id=None,
+                    retrieve_status=None,
+                    retrieve_fault_code=None,
+                    retrieve_fault_subcode=None,
+                    retrieve_fault_reason=None,
+                    retrieve_elapsed_sec=None,
+                    saved_scan_path=None,
+                    saved_scan_bytes=None,
+                )
+            create_details = scan_parsers.parse_create_scan_job_response(create_response_text)
+            create_used_token = None
+            create_used_scan_identifier = scan_identifier
 
-    log.info(
-        "CreateScanJob completed",
-        extra={
-            "target_url": target_url,
-            "http_status": create_status,
-            "message_id": create_message_id,
-            "job_id": create_details.get("job_id"),
-            "destination_token": create_used_token,
-            "scan_identifier": create_used_scan_identifier,
-            "fault_subcode": create_details.get("fault_subcode"),
-        },
-    )
-    create_failed = (
-        create_status < 200 or create_status >= 300 or bool(create_details.get("fault_code"))
-    )
-    resolved_job_id = create_details.get("job_id")
-    if create_failed or not resolved_job_id:
-        lifecycle.mark_error()
-        return _out(
-            target_url=target_url,
-            **scanner_metadata,
-            validate_http_status=str(validate_status),
-            validate_message_id=validate_message_id,
-            validate_status=validate_details.get("status"),
-            valid_ticket=validate_details.get("valid_ticket"),
-            destination_token=destination_token,
-            scan_identifier=scan_identifier,
-            fault_code=create_details.get("fault_code"),
-            fault_subcode=create_details.get("fault_subcode"),
-            fault_reason=create_details.get("fault_reason"),
-            create_http_status=str(create_status),
-            create_message_id=create_message_id,
-            job_id=resolved_job_id,
-            retrieve_http_status=None,
-            retrieve_message_id=None,
-            retrieve_status=None,
-            retrieve_fault_code=None,
-            retrieve_fault_subcode=None,
-            retrieve_fault_reason=None,
-            retrieve_elapsed_sec=None,
-            saved_scan_path=None,
-            saved_scan_bytes=None,
+        log.info(
+            "CreateScanJob completed",
+            extra={
+                "target_url": target_url,
+                "http_status": create_status,
+                "message_id": create_message_id,
+                "job_id": create_details.get("job_id"),
+                "destination_token": create_used_token,
+                "scan_identifier": create_used_scan_identifier,
+                "fault_subcode": create_details.get("fault_subcode"),
+            },
         )
+        create_failed = (
+            create_status < 200 or create_status >= 300 or bool(create_details.get("fault_code"))
+        )
+        resolved_job_id = create_details.get("job_id")
+        if create_failed or not resolved_job_id:
+            lifecycle.mark_error()
+            return _out(
+                target_url=target_url,
+                **scanner_metadata,
+                validate_http_status=str(validate_status),
+                validate_message_id=validate_message_id,
+                validate_status=validate_details.get("status"),
+                valid_ticket=validate_details.get("valid_ticket"),
+                destination_token=destination_token,
+                scan_identifier=scan_identifier,
+                fault_code=create_details.get("fault_code"),
+                fault_subcode=create_details.get("fault_subcode"),
+                fault_reason=create_details.get("fault_reason"),
+                create_http_status=str(create_status),
+                create_message_id=create_message_id,
+                job_id=resolved_job_id,
+                retrieve_http_status=None,
+                retrieve_message_id=None,
+                retrieve_status=None,
+                retrieve_fault_code=None,
+                retrieve_fault_subcode=None,
+                retrieve_fault_reason=None,
+                retrieve_elapsed_sec=None,
+                saved_scan_path=None,
+                saved_scan_bytes=None,
+            )
 
-    lifecycle.mark_job_created(resolved_job_id)
+        lifecycle.mark_job_created(resolved_job_id)
+        _select_xaddr()
+        break
 
     create_job_token = create_details.get("job_token")
     if image_delivery_mode != "push_only":
@@ -1654,6 +1784,8 @@ async def run_scan_available_chain(
         max_wait_sec=get_job_status_max_wait_sec,
         enabled=poll_get_job_status_before_retrieve,
         validate_outbound_soap_response=validate_outbound_soap_response,
+        rotator=rotator,
+        on_target_url_changed=lambda _url: _sync_target_from_rotator(),
     )
     if poll_result.get("terminal_failure"):
         retrieve_sub = "wscn:JobTerminatedBeforeRetrieve"
@@ -1716,24 +1848,53 @@ async def run_scan_available_chain(
                         "prior_fault_subcode": retrieve_details.get("fault_subcode"),
                     },
                 )
-            retrieve_message_id, retrieve_payload = scan_parsers.build_retrieve_image_request(
-                to_url=target_url,
-                job_id=resolved_job_id,
-                job_token=create_job_token,
-                from_address=from_address,
-            )
             retrieve_details = {}
-            try:
-                (
-                    retrieve_status,
-                    retrieve_body,
-                    retrieve_ct,
-                    http_integrity,
-                ) = await _post_soap_retrieve_image(
-                    url=target_url,
-                    payload=retrieve_payload,
-                    timeout_sec=retrieve_image_timeout_sec,
+            retrieve_post_done = False
+            while not retrieve_post_done:
+                retrieve_message_id, retrieve_payload = scan_parsers.build_retrieve_image_request(
+                    to_url=target_url,
+                    job_id=resolved_job_id,
+                    job_token=create_job_token,
+                    from_address=from_address,
                 )
+                try:
+                    (
+                        retrieve_status,
+                        retrieve_body,
+                        retrieve_ct,
+                        http_integrity,
+                    ) = await _post_soap_retrieve_image(
+                        url=target_url,
+                        payload=retrieve_payload,
+                        timeout_sec=retrieve_image_timeout_sec,
+                    )
+                    retrieve_post_done = True
+                except (asyncio.TimeoutError, ClientError) as _retrieve_exc:
+                    if rotator.advance(
+                        _retrieve_exc, context="scan_chain", operation="RetrieveImage"
+                    ):
+                        _sync_target_from_rotator()
+                        continue
+                    idle_wait_result = "not_applicable"
+                    retrieve_details = {
+                        "fault_code": "soap:Client",
+                        "fault_subcode": "airscand:RetrieveImageTransportError",
+                        "fault_reason": str(_retrieve_exc),
+                        "status": None,
+                    }
+                    retrieve_ok = False
+                    log.warning(
+                        "RetrieveImage transport error",
+                        extra={
+                            "target_url": target_url,
+                            "job_id": resolved_job_id,
+                            "error": str(_retrieve_exc),
+                            "retrieve_attempt": retrieve_attempt_count,
+                            "retrieve_max_attempts": max_retrieve_attempts,
+                        },
+                    )
+                    retrieve_post_done = True
+            if retrieve_details.get("fault_subcode") != "airscand:RetrieveImageTransportError":
                 soap_text, image_bytes, image_part_ct, mtom_integrity = parse_retrieve_image_mtom(
                     retrieve_body, retrieve_ct
                 )
@@ -1846,32 +2007,12 @@ async def run_scan_available_chain(
                     idle_wait_result = "skipped"
                 else:
                     idle_wait_result = "not_applicable"
-            except (asyncio.TimeoutError, ClientError) as _retrieve_exc:
-                idle_wait_result = "not_applicable"
-                retrieve_details = {
-                    "fault_code": "soap:Client",
-                    "fault_subcode": "airscand:RetrieveImageTransportError",
-                    "fault_reason": str(_retrieve_exc),
-                    "status": None,
-                }
-                retrieve_ok = False
-                log.warning(
-                    "RetrieveImage transport error",
-                    extra={
-                        "target_url": target_url,
-                        "job_id": resolved_job_id,
-                        "error": str(_retrieve_exc),
-                        "retrieve_attempt": retrieve_attempt_count,
-                        "retrieve_max_attempts": max_retrieve_attempts,
-                    },
-                )
 
             if retrieve_ok:
                 break
             fault_subcode_attempt = retrieve_details.get("fault_subcode") or ""
-            if (
-                attempt_index + 1 < max_retrieve_attempts
-                and is_retrieve_image_transient_failure(fault_subcode_attempt)
+            if attempt_index + 1 < max_retrieve_attempts and is_retrieve_image_transient_failure(
+                fault_subcode_attempt
             ):
                 continue
             if (
@@ -1896,6 +2037,7 @@ async def run_scan_available_chain(
                     job_token=create_job_token,
                     timeout_sec=timeout_sec,
                     from_address=from_address,
+                    rotator=rotator,
                 )
             break
     finally:

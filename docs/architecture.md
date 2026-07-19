@@ -77,6 +77,7 @@ flowchart TB
 | `app/scan_storage.py` | Magic-byte and MIME-based extension selection, atomic write, shared by push and pull saves. |
 | `app/mtom.py` | Multipart/related parsing and **xop:Include** CID resolution for **RetrieveImage** responses. |
 | `app/scanner_status_coordination.py` | Single in-process `asyncio.Event` bridge: after pull **RetrieveImage** or after **CreateScanJob** in **push_only** mode, wait for global **Idle** from **ScannerStatusSummaryEvent** when configured. |
+| `app/scanner_xaddr_failover.py` | **`ScannerXAddrRotator`**: ordered **ProbeMatches** XAddr list, shared transport-failure classifier with registration, mid-chain advance on connect/timeout errors. |
 | `app/quirks/` | `ScannerProfile` registry (`get_profile`): vendor defaults (e.g. Epson WF-3640 timeouts and **GetJobStatus** disable). |
 
 Shared SOAP helpers live under **`app/soap/`**; `discovery.py` and `ws_eventing_client.py` call into them rather than duplicating envelope/header patterns.
@@ -112,6 +113,8 @@ Implements the flow described in [design.md §6.2](design.md) (metadata probe, v
 4. **GetJobStatus** polling until ready or terminal failure (skipped for some profiles, e.g. Epson WF-3640; skipped entirely when **push_only** delivery is selected because there is no pull retrieve).
 5. **RetrieveImage** (pull delivery only) via `_post_soap_retrieve_image` (long timeout); raw bytes checked against HTTP ``Content-Length`` when present, then parsed with `parse_retrieve_image_mtom` (MTOM closing delimiter, part ``Content-Length``, resolved **xop** part, JPEG/PNG/TIFF/PDF magic vs declared MIME). Failing checks surface ``airscand:RetrieveImagePayloadIntegrity`` and skip `save_scan_file` even when the SOAP envelope claims success.
 6. Optional **Idle** wait: `begin_retrieve_idle_wait` / `await_scanner_idle_after_retrieve` / `end_retrieve_idle_wait` coordinated with inbound **ScannerStatusSummaryEvent** in `ws_scan`.
+
+**Mid-chain XAddr failover**: `run_scan_available_chain` builds a **`ScannerXAddrRotator`** from the active `scanner_xaddr` and `Config.scanner_xaddrs` (ProbeMatches order from registration). On transport-layer failures during **GetScannerElements**, **ValidateScanTicket**, **CreateScanJob**, **GetJobStatus**, or **RetrieveImage**, it advances to the next candidate via the same `is_scanner_xaddr_transport_failover` classifier used at registration; structured logs use `xaddr_failover_context=scan_chain`.
 
 ### WS-Eventing registration (`main.py` + `app/ws_eventing_client.py`)
 

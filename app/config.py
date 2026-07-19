@@ -27,6 +27,8 @@ class Config:
     app_sequence_instance_id: int = 1
     app_sequence_sequence_id: str = ""
     scanner_xaddr: str = ""
+    # Ordered ProbeMatches XAddrs from last discovery (runtime; not an env var). Used for mid-chain failover.
+    scanner_xaddrs: list[str] = field(default_factory=list)
     # SubscribeResponse Identifier (wsman:Identifier); optional CreateScanJob DestinationToken fallback.
     scanner_eventing_subscription_id: str = ""
     # DestinationToken from SubscribeResponse DestinationResponses (spec-primary for device-initiated scans).

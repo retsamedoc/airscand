@@ -668,6 +668,9 @@ async def handle_wsd(request: web.Request) -> web.Response:
             else float(scanner_profile.retrieve_image_timeout_sec)
         )
         retrieve_max_retries = int(getattr(config, "retrieve_image_max_retries", 1))
+        candidates = list(getattr(config, "scanner_xaddrs", None) or [])
+        if not candidates and scanner_xaddr:
+            candidates = [scanner_xaddr]
         task = asyncio.create_task(
             run_scan_available_chain(
                 scanner_xaddr=scanner_xaddr,
@@ -677,6 +680,8 @@ async def handle_wsd(request: web.Request) -> web.Response:
                 eventing_subscription_identifier=subscription_id or None,
                 subscribe_destination_token=subscribe_dest or None,
                 subscribe_destination_tokens=dest_tokens_map or None,
+                scanner_xaddr_candidates=candidates,
+                on_scanner_xaddr_selected=lambda x: setattr(config, "scanner_xaddr", x),
                 use_env_subscribe_destination_token_only=use_env_dest_only,
                 retry_create_without_destination_token_on_invalid_token=retry_invalid_dest,
                 poll_get_job_status_before_retrieve=(

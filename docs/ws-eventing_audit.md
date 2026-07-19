@@ -22,7 +22,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 |----------|------:|--------|
 | Critical | 0 | _(none; prior **``SubscriptionEnd``** gap closed — see §3.)_ |
 | High | 1 | Inbound **Subscribe** contract **residual** (EndTo, fuller §5–§8 matrix); residual **regex** on non-eventing SOAP bodies |
-| Medium | 2 | **GetStatus** semantics (#12); **EndTo** / **Filter** (#13) _(notification ack for `ScanAvailableEvent`: [resolved §10](#10-scanavailableevent-notification-ack--resolved); unsupported `/wsd` SOAP actions: [resolved §9](#9-unsupported-soap-actions-resolved))_ |
+| Medium | 1 | **EndTo** / **Filter** (#13) _(inbound/outbound **GetStatus**: [resolved §12](#12-getstatus-resolved); notification ack for `ScanAvailableEvent`: [resolved §10](#10-scanavailableevent-notification-ack--resolved); unsupported `/wsd` SOAP actions: [resolved §9](#9-unsupported-soap-actions-resolved))_ |
 | Low | 4 | Security SHOULDs; **WSDL/metadata**; test coverage gaps; **SOAP 1.1** vs **1.2** only |
 
 ---
@@ -35,7 +35,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Code (current):** [`handle_wsd`](../app/ws_scan.py) stores subscriptions in [`app/inbound_eventing_registry.py`](../app/inbound_eventing_registry.py), validates **Push** `Delivery/@Mode`, rejects unsupported **Filter**, requires **NotifyTo**/`wsa:Address`, grants **Expires** (capped by `Config.inbound_eventing_max_grant_sec` / default), and returns SOAP faults (`wse:UnableToRenew`, `wse:UnableToDestroySubscription`, `wse:DeliveryModeRequestedUnavailable`, `wse:FilteringNotSupported`, `wse:InvalidMessage`) on validation and unknown/expired identifier paths. **GetStatus** reads stored granted expiration without calling **Renew**.
 
-**Residual:** **SubscriptionEnd** is implemented for inbound manager lease teardown and sink receive (see §3). Inbound **Subscribe** does not yet enforce the full **EndTo** / **Expires** negotiation matrix from §5–§8 (see backlog). Management **Identifier** in the SOAP header is parsed with ElementTree ([`extract_wse_identifier_from_soap_header`](../app/soap/xmlutil.py)).
+**Residual:** Inbound **Subscribe** does not yet enforce the full **EndTo** / **Expires** negotiation matrix from §5–§8 (see backlog). **SubscriptionEnd** manager emission and sink receive are implemented (see §3). Management **Identifier** in the SOAP header is parsed with ElementTree ([`extract_wse_identifier_from_soap_header`](../app/soap/xmlutil.py)).
 
 ---
 
@@ -64,7 +64,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Outbound (this host as subscriber to the scanner):** The scanner may send **`SubscriptionEnd`** to our **EndTo**; that path is the same sink handler above. airscand does **not** emit **`SubscriptionEnd`** toward the device’s subscription manager when we **Unsubscribe** or shutdown (that remains **Unsubscribe** SOAP).
 
-**Risk:** Closed for “no local **SubscriptionEnd** handling” on `/wsd`; optional future work is outbound **GetStatus** and stricter correlation checks (see `IMPLEMENTATION_PLAN.md`).
+**Risk:** Closed for “no local **SubscriptionEnd** handling” on `/wsd`; optional future work is stricter outbound correlation checks (`WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`).
 
 ---
 
@@ -160,15 +160,15 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 ---
 
-### 12. `GetStatus` response — **resolved for inbound manager** {#12-getstatus-resolved-inbound}
+### 12. `GetStatus` — **resolved** (inbound manager + outbound client) {#12-getstatus-resolved-inbound}
 
 **Spec:** MUST return **current** expiration without mutating state.
 
-**Implementation:** For inbound subscriptions, [`handle_wsd`](../app/ws_scan.py) returns the stored granted **Expires** string from [`InboundSubscriptionRegistry.get_status`](../app/inbound_eventing_registry.py) without extending the lease.
+**Implementation (inbound):** For inbound subscriptions, [`handle_wsd`](../app/ws_scan.py) returns the stored granted **Expires** string from [`InboundSubscriptionRegistry.get_status`](../app/inbound_eventing_registry.py) without extending the lease.
 
-**Residual:** Outbound client **GetStatus** is still not implemented.
+**Implementation (outbound):** [`get_subscription_status`](../app/ws_eventing_client.py) POSTs **GetStatus** to the stored subscription manager EPR (with reference parameters when required) and parses expiration via [`parse_get_status_response`](../app/soap/parsers/eventing.py). *Why:* operators can verify device-reported lease without issuing **Renew**.
 
----
+**Verification:** `tests/test_ws_eventing_client.py`, `tests/test_ws_eventing_audit_compliance.py`.
 
 ### 13. `EndTo` duplicates sink address with `NotifyTo`; ReferenceParameters on both (spec nuance / interop)
 
@@ -178,9 +178,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 
 **Risk:** Generally works for Win10-shaped traces (see [`docs/protocol/ws-scan-tcp.md`](../docs/protocol/ws-scan-tcp.md)) but is not the minimal normative shape; some devices may treat `EndTo` strictly.
 
-**Recommendation:** Validate against target devices; optionally omit or specialize `EndTo` per profile. Inbound manager currently **requires** matching **EndTo**/**NotifyTo** until **SubscriptionEnd** is implemented (see §5).
-
----
+**Recommendation:** Validate against target devices; optionally omit or specialize outbound **EndTo** per profile (Win10 traces often duplicate **NotifyTo**). Inbound manager accepts **EndTo** distinct from **NotifyTo** and delivers **`SubscriptionEnd`** to the stored **EndTo** EPR (or **NotifyTo** when omitted) — see §3 and §5.
 
 ## Low
 
@@ -242,7 +240,7 @@ This report compares the current **airscand** WS-Eventing-related code to the no
 ## Suggested remediation order
 
 1. Subscription registry + identifier validation + SOAP faults on server ([`app/ws_scan.py`](../app/ws_scan.py)).
-2. `SubscriptionEnd` emission path when local subscription ends unexpectedly; optional outbound `GetStatus` if needed for a deployment profile.
+2. ~~Optional outbound `GetStatus` for deployment diagnostics.~~ **Done:** [`get_subscription_status`](../app/ws_eventing_client.py).
 3. ~~Replace regex with namespace-aware XML for eventing parse paths (including manager EPR extraction).~~ **Done:** ElementTree paths in [`app/soap/parsers/eventing.py`](../app/soap/parsers/eventing.py), [`app/soap/xmlutil.py`](../app/soap/xmlutil.py), and related modules; see [§11](#11-xml-parsing-eventing).
 4. Expand pytest coverage to match §11 checklist (renew scheduling, unsubscribe on shutdown, fault paths) — partial: [`tests/test_eventing_namespace_xml.py`](../tests/test_eventing_namespace_xml.py) covers prefix permutations and nested **Identifier** separation.
 

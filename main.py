@@ -211,6 +211,8 @@ async def _eventing_registration_loop(config: Config) -> None:
             if not scanner_xaddr_candidates:
                 log.info("Scanner endpoint not yet discovered; retrying registration")
             else:
+                # Persist full ProbeMatches order for mid-chain WS-Scan failover after registration.
+                config.scanner_xaddrs = list(scanner_xaddr_candidates)
                 registration_finished = False
                 for attempt_index, scanner_xaddr in enumerate(scanner_xaddr_candidates):
                     log.info(

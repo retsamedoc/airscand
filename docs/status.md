@@ -15,7 +15,7 @@
   - Optional second subscription for **ScannerStatusSummaryEvent** uses parallel `*_status` config fields and the same renew/unsubscribe pattern.
   - Win10-aligned WDP scan subscribe target (`/WDP/SCAN`) is supported by default
   - Daemon registration succeeds against target scanners and host is selectable as a scan destination
-  - Outbound **GetStatus** for subscriptions is not implemented; manager EPR and bodies are still parsed primarily via regex helpers (see `docs/ws-eventing_audit.md` §2 residual, §11)
+  - Outbound **GetStatus** for subscriptions is implemented (`get_subscription_status` in `app/ws_eventing_client.py`) so operators can read device-reported lease without issuing **Renew**; some non-eventing SOAP bodies still use regex helpers (see `docs/ws-eventing_audit.md` §11)
   - Completion date: **2026-03-26**
   - Tested device models: **Epson WF-3760**, **Epson WF-3640**
 
@@ -42,8 +42,8 @@
 - **Phase 5 (compliance / interop hardening) — in progress:**
   - **Why this phase:** strict peers need SOAP-shaped responses, predictable subscription semantics, and operable timeouts/diagnostics—not only “happy path” Epson validation.
   - **Already shipped (inbound, `app/ws_scan.py`):** in-memory **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** with SOAP faults for validation and unknown/expired ids (**GetStatus** does not extend the lease); unknown or missing **`wsa:Action`** returns **`application/soap+xml`** faults (`wsa:ActionNotSupported` / `wse:InvalidMessage`) per `docs/ws-eventing_audit.md` §1, §4, §9.
-  - **Inbound residual (audits / `IMPLEMENTATION_PLAN.md`):** **SubscriptionEnd**; namespace-aware parsing where regex remains risky (`docs/ws-eventing_audit.md` §5, §11). Inbound **Subscribe** enforces matching **EndTo**/**NotifyTo** and valid **Expires** when present.
-  - **Outbound residual (same audits / plan):** optional outbound **GetStatus** client; assert **RelatesTo** / response **Action** on critical outbound calls; regex-heavy manager/body parsing; **SubscriptionEnd** emission policy. Core path remains: persisted manager EPR + **Renew** + shutdown **Unsubscribe** (Phase 2 above). Outbound SOAP uses separate **connect** vs **read** aiohttp timeouts (see `WSD_SOAP_HTTP_*`, `docs/configuration.md`).
+  - **Inbound residual (audits / `IMPLEMENTATION_PLAN.md`):** namespace-aware parsing where regex remains risky (`docs/ws-eventing_audit.md` §5, §11). Inbound **Subscribe** accepts optional **EndTo** distinct from **NotifyTo** (for **SubscriptionEnd** delivery) and faults invalid **Expires** when present.
+  - **Outbound residual (same audits / plan):** optional assert **RelatesTo** / response **Action** on critical outbound calls (`WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`); regex-heavy parsing on some WS-Scan bodies. Core path remains: persisted manager EPR + **Renew** + shutdown **Unsubscribe** (Phase 2 above). Outbound SOAP uses separate **connect** vs **read** aiohttp timeouts (see `WSD_SOAP_HTTP_*`, `docs/configuration.md`). Mid-scan **XAddr** rotation after registration is not wired (registration failover only).
   - **SOAP mini-library** (`app/soap/`): shared builders/parsers/transport; orchestration stays in `ws_eventing_client.py` with `main.py` owning registration and lease timing.
   - **Parsing and tests:** contract tests for fault mapping, renew edge cases, and subscription-end semantics (`docs/ROADMAP.md`, `docs/ws-eventing_audit.md` §17).
 

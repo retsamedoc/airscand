@@ -17,7 +17,7 @@ This report compares the current `airscand` implementation (primarily [`app/soap
 | Critical | 0 | _(none — see [Critical (resolved)](#critical-resolved))_ |
 | High     | 0 | _(none — see [High (resolved)](#high-resolved))_ |
 | Medium   | 0 | _(#11 pull vs push: **addressed** — [Medium §11](#medium))_; historical: [Medium (resolved) §7/9/12](#medium-7-9-12-resolved), [§8/10](#medium-8-10-resolved). |
-| Low      | 4 | Parsing robustness, HTTP/SOAP headers, fault **Detail**, handler edge cases (§16 resolved) |
+| Low      | 3 | Parsing robustness, HTTP/SOAP headers, handler edge cases (§15–§16 resolved) |
 
 ---
 
@@ -147,11 +147,11 @@ This report compares the current `airscand` implementation (primarily [`app/soap
 
 ---
 
-### 15. Fault **Detail** and vendor extensions
+### 15. Fault **Detail** and vendor extensions — **Resolved**
 
-**Code:** `parse_soap_fault` extracts Code / Subcode / Reason only—not **Detail** (e.g. supported format lists).
+**Implementation:** [`parse_soap_fault`](../app/soap/fault.py) serialises SOAP **`Detail`** children into `fault_detail` (truncated at 4 096 chars for logs); [`soap_fault_log_fields`](../app/soap/fault.py) exposes it in structured logging on outbound failures (`app/soap/transport.py`). *Why:* vendor extensions (e.g. supported format lists on `InvalidArgs`) are visible without parsing full fault bodies by hand.
 
-**Risk:** Harder diagnostics for `InvalidArgs` and format-not-supported cases.
+**Verification:** `tests/test_ws_eventing_client.py` (fault_detail parsing), `tests/test_soap_transport.py` (failure log fields).
 
 ---
 

@@ -8,8 +8,8 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 ### Near-term
 
 - **WS-Eventing — split by role (see `ws-eventing_audit.md`):**
-  - **Inbound (this host as subscription manager + sink):** MVP **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** with in-memory state and SOAP faults is implemented (`app/ws_scan.py`, `app/inbound_eventing_registry.py`). **Subscribe:** optional **EndTo** must mirror **NotifyTo**; invalid **Expires** faults; **Residual:** **SubscriptionEnd**; **`GetStatus`** response semantics vs spec edge cases (audit §12); namespace-aware parsing (§11).
-  - **Outbound (this host as subscriber to the scanner):** **SubscribeResponse** → persisted manager URL + reference parameters + **Expires**; **`_eventing_maintenance_loop`** → **`renew_subscription`**; shutdown / failed-renew **`_unsubscribe_eventing_best_effort`**. **Residual:** optional outbound **GetStatus**; regex-heavy parsing for manager EPR/bodies (§11, §7); **SubscriptionEnd** handling (§3); response **RelatesTo** / **Action** checks on critical operations (`wia_client_audit.md` §5, `IMPLEMENTATION_PLAN.md`).
+  - **Inbound (this host as subscription manager + sink):** MVP **Subscribe** / **Renew** / **GetStatus** / **Unsubscribe** with in-memory state and SOAP faults is implemented (`app/ws_scan.py`, `app/inbound_eventing_registry.py`). **Subscribe:** optional **EndTo** may differ from **NotifyTo**; invalid **Expires** faults; inbound **`SubscriptionEnd`** emission on lease lapse and sink receive (§3). **Residual:** fuller **EndTo** / **Expires** negotiation matrix (§5–§8); namespace-aware parsing on non-eventing bodies (§11).
+  - **Outbound (this host as subscriber to the scanner):** **SubscribeResponse** → persisted manager URL + reference parameters + **Expires**; **`_eventing_maintenance_loop`** → **`renew_subscription`**; shutdown / failed-renew **`_unsubscribe_eventing_best_effort`**; diagnostic **`get_subscription_status`**. **Residual:** optional response **RelatesTo** / **Action** checks (`WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`); regex on some WS-Scan bodies (§11).
 - **SOAP sink / unknown actions:** unsupported **`wsa:Action`** on `/wsd` returns SOAP faults (**resolved**; `ws-eventing_audit` §9).
 - **Transport timeout split**: **Shipped** — `SoapHttpClient` uses aiohttp `sock_connect` / `sock_read` from `WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC` and optional `WSD_SOAP_HTTP_READ_TIMEOUT_SEC` (see `docs/configuration.md`, `docs/wia_client_audit.md` §3). Optional: integration test with a server that stalls the body past the read bound.
 - **Roadmap/documentation hygiene**: keep implementation locations (`app/soap/*`, `ws_eventing_client.py`, `main.py`, `ws_scan.py`) reflected in architecture/design/status and audit cross-links.
@@ -17,9 +17,8 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 ### Mid-term
 
 - **WIA operation hardening**:
-  - Multi-XAddr failover for **eventing registration** is implemented (`discover_scanner_xaddrs`, `main._eventing_registration_loop`); extending the same policy to mid-scan SOAP is still open.
-  - Retrieve-image integrity and truncation handling / retry policy.
-  - Explicit idempotent retry policy for SOAP operations.
+  - Multi-XAddr failover for **eventing registration** is implemented (`discover_scanner_xaddrs`, `main._eventing_registration_loop`); mid-scan SOAP rotation (`scanner_xaddr_failover.py` + `config.scanner_xaddrs`) is still open.
+  - Explicit idempotent retry policy for SOAP operations (RetrieveImage bounded retry is **done** — `WSD_RETRIEVE_IMAGE_MAX_RETRIES`).
   See `wia_client_audit` high/medium checklist.
 - **WS-Scan follow-through**:
   - Confirm/adjust Probe `Types` interop choice where needed.
@@ -27,16 +26,14 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
   See `wia_client_audit` low/clarify items and `ws-scan_audit` remaining medium/low issues.
 - **Eventing parsing robustness**: expand namespace-aware XML handling on critical eventing paths beyond regex parsing.
   See `ws-eventing_audit` medium item (§11).
-- **Compliance-oriented tests**: add contract coverage for eventing lifecycle, fault mapping, renewal/status behavior, and subscription-end semantics.
+- **Compliance-oriented tests**: expand contract coverage beyond shipped modules (`tests/test_ws_eventing_audit_compliance.py`, `tests/test_ws_scan_audit_compliance.py`) for remaining fault/lifecycle matrix edge cases.
   See `ws-eventing_audit` low item (§17).
 - **WS-Scan handler hardening details**: add missing guardrails noted in audit deltas (e.g., handler assumptions) and document intentional deviations.
   See `ws-scan_audit` remaining low items.
 
 ### Far-term
 
-- **Explicit client state machine** for scan lifecycle (`Idle -> CapabilitiesLoaded -> JobCreated -> Polling -> Retrieving -> terminal`) with transition guards and clearer failure handling.
-  See `wia_client_audit` §8.
-- **CancelJob and abandoned-job cleanup** (still out of scope for the mini-library refactor but tracked as product work).  
+- **CancelJob on shutdown / user abort** (RetrieveImage failure path is **done** — `cancel_scan_job` after exhausted retries when `cancel_job_on_retrieve_error=True`).
   See `wia_client_audit` §7.5 / §8.
 - **Vendor profile growth**: extend `app/quirks` and `docs/protocol/vendor_quirks.md` as more hardware is validated.
 
@@ -62,6 +59,11 @@ This roadmap tracks **remaining** work by timeline and references detailed conte
 - Outbound WS-Eventing lease management: persisted subscription manager URL and reference parameters, parsed `Expires`, `_eventing_maintenance_loop` with `renew_subscription`, and best-effort `unsubscribe_from_scanner` on shutdown / failed renew (`main.py`, `app/ws_eventing_client.py`, `app/config.py`, `app/soap/parsers/eventing.py`).
 - Inbound WS-Eventing subscription manager + sink SOAP faults for lifecycle, validation, and unknown `wsa:Action` (`app/ws_scan.py`, `app/inbound_eventing_registry.py`, `app/soap/builders/faults.py`).
 - Outbound SOAP HTTP **connect** vs **read** timeouts (`SoapHttpClient` / `aiohttp.ClientTimeout`, `WSD_SOAP_HTTP_*`, `main.configure_soap_http_client_from_config`).
+- Explicit scan lifecycle state machine (`app/scan_lifecycle.py`) with guarded transitions and chain result fields (`lifecycle_state`, `lifecycle_path`, …) in `run_scan_available_chain`.
+- Outbound WS-Eventing **GetStatus** client (`get_subscription_status`) for lease diagnostics without **Renew**.
+- **CancelJob** after exhausted **RetrieveImage** retries on timeout/transport failure; **RetrieveImage** bounded retry via `WSD_RETRIEVE_IMAGE_MAX_RETRIES`.
+- Inbound **`SubscriptionEnd`** manager emission + sink handling (`app/inbound_subscription_end_delivery.py`, `tests/test_subscription_end.py`).
+- SOAP fault **Detail** extraction in `parse_soap_fault` / `soap_fault_log_fields` for operator diagnostics.
 
 ### Historical completion details
 

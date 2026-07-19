@@ -8,7 +8,7 @@ This report maps the [WIA client specification](protocol/wia_client_spec.md) to 
 
 ## Executive summary
 
-The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Several **normative items** in the WIA client spec are **not implemented** or only partially met—most notably **CancelJob** and **RetrieveImage document handling / integrity checks**. Optional **RelatesTo** / response **Action** enforcement exists behind ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` (§5). **Multi-XAddr** registration-time failover over ordered discovery candidates is implemented (see §4); outbound **WS-Scan** legs after a successful subscribe still use the selected ``scanner_xaddr`` only. **SOAP client timeouts** expose separate **connect** vs **read** (`sock_connect` / `sock_read`) via environment variables (§3). **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
+The project implements a **device-initiated** path (WS-Eventing **ScanAvailableEvent** → **ValidateScanTicket** → **GetScannerElements** (metadata) → **CreateScanJob** → optional **GetJobStatus** polling → **RetrieveImage**) that matches real Epson-style interop documented elsewhere in this repo. Remaining **normative gaps** are mostly operational polish: **CancelJob** on shutdown/user abort (RetrieveImage failure path is **done**), eventing fallback when subscribe never succeeds, and mid-scan **XAddr** rotation. **RetrieveImage** integrity checks and bounded retry (`WSD_RETRIEVE_IMAGE_MAX_RETRIES`) are implemented. Optional **RelatesTo** / response **Action** enforcement exists behind ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` (§5). **Multi-XAddr** registration-time failover over ordered discovery candidates is implemented (see §4); outbound **WS-Scan** legs after a successful subscribe still use the selected ``scanner_xaddr`` only (mid-chain module exists but is not wired). **SOAP client timeouts** expose separate **connect** vs **read** (`sock_connect` / `sock_read`) via environment variables (§3). **GetJobStatus** polling exists but may be **disabled by vendor profile** (e.g. Epson WF-3640 default). Explicit scan lifecycle states are recorded on each chain via [`app/scan_lifecycle.py`](../app/scan_lifecycle.py). Optional eventing is implemented; **fallback to job-status polling** when eventing fails is not.
 
 ---
 
@@ -86,9 +86,9 @@ The spec’s logical sequence is:
 | **CreateScanJob** — store JobId | **Met** | Parsed and returned in chain result. |
 | **GetJobStatus** — poll until terminal, 200–500ms initial, backoff ~2s | **Partial** | Implemented in [`app/soap/parsers/scan.py`](../app/soap/parsers/scan.py) + [`poll_get_job_status_until_ready`](../app/ws_eventing_client.py); intervals align with intent; may be off by profile. |
 | **RetrieveImage** — only when ready | **Partial** | Gated when polling enabled; see §6. |
-| **RetrieveImage** — base64, large payloads, chunked | **Partial** | [`parse_retrieve_image_mtom`](../app/mtom.py) returns **integrity** metadata: HTTP ``Content-Length`` vs actual bytes (via [`post_retrieve_image`](../app/soap/transport.py)), MTOM closing delimiter, per-part lengths, **xop** resolution, and image magic vs MIME. On failure the chain records ``airscand:RetrieveImagePayloadIntegrity`` and does not persist (`app/ws_eventing_client.py`). **Bounded automatic retry** after truncation remains a follow-up (see `IMPLEMENTATION_PLAN.md`). |
-| **RetrieveImage** — truncated retry | **Gap** | No bounded automatic **RetrieveImage** retry loop yet; operators rely on the next device event / manual rerun. |
-| **CancelJob** | **Gap** | **Not implemented.** |
+| **RetrieveImage** — base64, large payloads, chunked | **Met** | [`parse_retrieve_image_mtom`](../app/mtom.py) + [`post_retrieve_image`](../app/soap/transport.py) integrity checks; failures surface ``airscand:RetrieveImagePayloadIntegrity`` and skip persist. **Bounded retry** after truncation/transport via ``WSD_RETRIEVE_IMAGE_MAX_RETRIES`` (default one retry). |
+| **RetrieveImage** — truncated retry | **Met** | [`run_scan_available_chain`](../app/ws_eventing_client.py) retries **RetrieveImage** on payload-integrity or transport faults up to ``retrieve_image_max_retries``; device SOAP faults are not retried. |
+| **CancelJob** | **Partial** | [`cancel_scan_job`](../app/ws_eventing_client.py) runs automatically after exhausted **RetrieveImage** retries on timeout/transport when ``cancel_job_on_retrieve_error=True`` (default). **Not** sent on daemon shutdown or explicit user abort. |
 
 ---
 
@@ -96,10 +96,10 @@ The spec’s logical sequence is:
 
 | Requirement | Status | Notes |
 |-------------|--------|--------|
-| Explicit states (Idle → … → Completed) | **Gap** | No named state machine type; behavior is **procedural** in `main` + `run_scan_available_chain`. |
-| Track JobId lifecycle | **Partial** | Job id returned in dict; **no** global lifecycle across cancellations or abandoned jobs. |
-| Prevent invalid transitions | **Not applicable / weak** | Without explicit states, transitions are implicit. |
-| Clean up abandoned jobs | **Gap** | **CancelJob** not sent on user abort/timeout (§7.5). |
+| Explicit states (Idle → … → Completed) | **Met** | [`ScanLifecycle`](../app/scan_lifecycle.py) with guarded transitions; chain results include ``lifecycle_state``, ``lifecycle_path``, ``lifecycle_job_id``. |
+| Track JobId lifecycle | **Partial** | Job id on chain result + lifecycle fields; **no** global registry across cancellations or abandoned jobs. |
+| Prevent invalid transitions | **Partial** | Invalid transitions log warnings (strict mode raises in tests); SOAP behavior unchanged on happy path. |
+| Clean up abandoned jobs | **Partial** | **CancelJob** after **RetrieveImage** failure when enabled; not on shutdown/user abort (§7.5 residual). |
 
 ---
 
@@ -118,8 +118,8 @@ The spec’s logical sequence is:
 | Requirement | Status | Notes |
 |-------------|--------|--------|
 | Retry **GetJobStatus** | **Partial** | Polling loop present when enabled; not a separate retry matrix for transient faults. |
-| Retry **RetrieveImage** | **Gap** | No bounded retry loop for transient image faults or truncation (§10.2). |
-| Limit retries | **Partial** | Some gates (e.g. create retry once); no unified limiter for image retrieval. |
+| Retry **RetrieveImage** | **Met** | Bounded loop in [`run_scan_available_chain`](../app/ws_eventing_client.py) for ``airscand:RetrieveImagePayloadIntegrity`` / transport subcodes only. |
+| Limit retries | **Met** | ``WSD_RETRIEVE_IMAGE_MAX_RETRIES`` / ``retrieve_image_max_attempts``; separate from **GetJobStatus** polling backoff. |
 
 ---
 
@@ -157,10 +157,10 @@ The spec’s logical sequence is:
 | Retrieves image only when ready | **Partial** | Status gate when polling enabled; else optimistic |
 | Handles malformed responses | **Partial** | Regex + tolerant paths; not full XML |
 | Retries transient failures | **Partial** | Selective retries |
-| Handles timeouts | **Partial** | Single timeout value; not §3.2 defaults split |
-| Tracks JobId lifecycle | **Partial** | Per-chain only |
-| Prevents invalid transitions | **Weak** | No explicit machine |
-| Cleans up jobs | **No** | No **CancelJob** |
+| Handles timeouts | **Met** | Separate connect/read on ``SoapHttpClient``; per-operation read budgets (e.g. **RetrieveImage**). |
+| Tracks JobId lifecycle | **Partial** | Per-chain + ``lifecycle_*`` fields |
+| Prevents invalid transitions | **Partial** | ``ScanLifecycle`` guards (log/strict) |
+| Cleans up jobs | **Partial** | **CancelJob** on **RetrieveImage** failure; not shutdown/abort |
 | Works with real WSD scanner | **Yes** (reported) | [ws-scan_audit.md](ws-scan_audit.md) |
 | Handles non-compliant devices | **Partial** | Heuristics and fallbacks; gaps above remain |
 
@@ -179,17 +179,17 @@ Use this as a prioritized backlog against [wia_client_spec.md](protocol/wia_clie
 ### High
 
 - [x] **Outbound SOAP response validation**: optional verify `wsa:RelatesTo` matches the request `wsa:MessageID` and expected `wsa:Action` via ``WSD_VALIDATE_OUTBOUND_SOAP_RESPONSE`` (`app/soap/outbound_response_validation.py`, `tests/test_outbound_response_validation.py`, `tests/test_ws_eventing_client.py`).
-- [ ] **Timeouts**: expose **connect** and **read** timeouts via config/env; align defaults with §3.2 (connect ≤ 2s, read 2–10s).
+- [x] **Timeouts**: separate **connect** vs **read** via ``WSD_SOAP_HTTP_CONNECT_TIMEOUT_SEC`` / ``WSD_SOAP_HTTP_READ_TIMEOUT_SEC`` (`SoapHttpClient`, `main.configure_soap_http_client_from_config`). Defaults target LAN operability rather than spec §3.2 numeric bounds.
 - [x] **Multi-XAddr failover** (registration): ordered candidates from [`discover_scanner_xaddrs`](../app/discovery.py); [`main._eventing_registration_loop`](../main.py) advances on [`is_scanner_xaddr_transport_failover`](../app/soap/transport.py). Residual: scan-chain SOAP does not rotate **XAddr** mid-job.
 - [x] **`RetrieveImage` integrity (pull / MTOM)**: HTTP body vs ``Content-Length`` when present (`SoapHttpClient.post_retrieve_image`); MTOM closing delimiter, optional per-part ``Content-Length``, **xop:Include** resolution, non-empty binary, and JPEG/PNG/TIFF/PDF magic vs declared MIME (`app/mtom.py`, `app/ws_eventing_client.py`, `tests/test_mtom.py`). **Why:** prevents persisting truncated or wrong-part payloads when SOAP still says success.
-- [ ] **`RetrieveImage` bounded automatic retry** after integrity or transport truncation (§7.4 / §10.2): not implemented; failures surface ``airscand:RetrieveImagePayloadIntegrity`` or SOAP faults for operator visibility.
+- [x] **`RetrieveImage` bounded automatic retry** after integrity or transport truncation (§7.4 / §10.2): ``WSD_RETRIEVE_IMAGE_MAX_RETRIES`` in [`run_scan_available_chain`](../app/ws_eventing_client.py) (`tests/test_ws_eventing_client.py`, `tests/test_mtom.py`). **Why:** replays truncated MTOM without requiring a new device event.
 
 ### Medium
 
-- [ ] **CancelJob**: send on shutdown, user cancel, or timeout; tolerate devices that ignore it (§7.5).
+- [x] **CancelJob (RetrieveImage failure):** [`cancel_scan_job`](../app/ws_eventing_client.py) after exhausted retries on timeout/transport when ``cancel_job_on_retrieve_error=True``; devices that ignore cancel are tolerated (`tests/test_ws_eventing_client.py`). **Residual:** shutdown / user-abort paths.
 - [x] **Connection reuse**: shared `ClientSession` via [`SoapHttpClient`](../app/soap/transport.py) (process-wide default client).
 - [ ] **Idempotent SOAP retries**: define which operations are idempotent and retry policy (GET-like / safe replays).
-- [ ] **Explicit client state machine** (§8): map `Idle` → `CapabilitiesLoaded` → `JobCreated` → `Polling` → `Retrieving` → terminal states; guard transitions.
+- [x] **Explicit client state machine** (§8): [`app/scan_lifecycle.py`](../app/scan_lifecycle.py) + chain result enrichment in [`run_scan_available_chain`](../app/ws_eventing_client.py) (`tests/test_scan_lifecycle.py`).
 - [ ] **Eventing fallback**: if subscribe never succeeds, document behavior; optionally add **GetJobStatus**-based polling for long-running jobs if a pull-only mode is added.
 
 ### Low / clarify
